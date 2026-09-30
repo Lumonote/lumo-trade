@@ -12,6 +12,26 @@ def test_valid_code_accepts_beijing_920():
     assert _VALID_CODE.match("920161")
 
 
+def test_eastmoney_quote_retains_exchange_date(tmp_path, monkeypatch):
+    import datetime
+    from zoneinfo import ZoneInfo
+    import webui.services.watchlist_service as module
+    timestamp = datetime.datetime(2026, 9, 30, 15, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    monkeypatch.setattr(module, "request_json", lambda *a, **k: {"data": {"diff": [
+        {"f12": "000001", "f2": 10.5, "f124": timestamp}]}})
+    quote = WatchlistService(tmp_path / "watch.json")._quotes_eastmoney(["000001"])["000001"]
+    assert quote["quote_date"] == "2026-09-30"
+
+
+def test_tencent_quote_retains_exchange_date(tmp_path, monkeypatch):
+    import webui.services.watchlist_service as module
+    fields = [""] * 33
+    fields[2], fields[3], fields[30] = "000001", "10.5", "20260930145900"
+    monkeypatch.setattr(module, "request_text", lambda *a, **k: 'v_sz000001="' + "~".join(fields) + '";')
+    quote = WatchlistService(tmp_path / "watch.json")._quotes_tencent(["000001"])["000001"]
+    assert quote["quote_date"] == "2026-09-30"
+
+
 def test_valid_code_still_accepts_known_segments():
     for code in ("600519", "000001", "300750", "830799", "430047"):
         assert _VALID_CODE.match(code), code

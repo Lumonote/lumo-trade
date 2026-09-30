@@ -1,0 +1,33 @@
+.tp-board { margin: 0 0 18px; }
+.tp-toolbar, .tp-actions, .tp-page-nav { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.tp-toolbar { margin-bottom: 16px; }
+.tp-toolbar .button.secondary[aria-pressed="true"] { background: var(--ink); color: var(--surface, #fff); }
+.tp-market { display: grid; grid-template-columns: 1.5fr repeat(3, 1fr); gap: 12px; padding: 16px; background: var(--soft, #f5f6f8); border-radius: 10px; margin-bottom: 12px; }
+.tp-market strong { display: block; font-size: 19px; margin: 5px 0; }
+.tp-market small, .tp-note, .tp-card small { color: var(--muted); font-size: 12px; }
+.tp-indices { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; font-size: 12px; }
+.tp-sectors { font-size: 12px; line-height: 1.8; margin: 8px 0 14px; }
+.tp-list { display: grid; gap: 10px; }
+.tp-card { border: 1px solid var(--line, #d9dde4); border-left: 3px solid var(--muted, #84919d); padding: 14px; border-radius: 8px; }
+.tp-card[data-status="entry"], .tp-card[data-status="add"] { border-left-color: #168467; }
+.tp-card[data-status="exit"], .tp-card[data-status="reduce"], .tp-card[data-status="invalidated"] { border-left-color: #d34c4c; }
+.tp-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.tp-card-head button { font-size: 14px; font-weight: 600; }
+.tp-status { font-size: 12px; font-weight: 600; }
+.tp-levels { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+.tp-levels span { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.tp-levels strong { font-variant-numeric: tabular-nums; font-size: 14px; }
+.tp-blockers { margin: 8px 0; font-size: 12px; color: var(--muted); line-height: 1.7; }
+.tp-detail { font-size: 12px; line-height: 1.8; margin-top: 8px; }
+.tp-detail summary, .tp-stock > summary { cursor: pointer; }
+.tp-detail ul { padding-left: 18px; margin: 8px 0; }
+.tp-actions { justify-content: space-between; margin-top: 10px; }
+.tp-page-nav { justify-content: flex-end; margin-top: 12px; }
+.tp-stock { border: 1px solid var(--line, #d9dde4); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.tp-stock > summary { font-size: 14px; font-weight: 600; }
+.tp-stock-status { margin-left: 12px; font-weight: 400; font-size: 12px; color: var(--muted); }
+.tp-stock .tp-content { margin-top: 12px; }
+@media (max-width: 760px) {
+  .tp-market, .tp-levels { grid-template-columns: repeat(2, 1fr); }
+  .tp-card-head, .tp-actions { align-items: flex-start; flex-wrap: wrap; }
+}

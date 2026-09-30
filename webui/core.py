@@ -79,6 +79,7 @@ from webui.services.scoring_health_service import ScoringHealthService
 from webui.services.db_backup_service import DbBackupService
 from webui.services.command_center_service import CommandCenterService
 from webui.services.market_pulse_service import MarketPulseService
+from webui.services.trading_plan_service import TradingPlanService
 from data_store import opportunity_repo
 
 logger = logging.getLogger(__name__)
@@ -123,14 +124,12 @@ AUTO_FOLLOW_SERVICE = PaperAutoFollowService(
 
 # ----------------------------- 风险·机遇 作战大屏 -----------------------------
 def _cc_market_env():
-    """Systemic-risk backdrop for the command center.
-
-    仓内暂无干净的「涨跌家数 / 沪深300 区间收益」数值源(market_intelligence 以快讯·热榜
-    为主,且 load() 为重型联网聚合,不宜挂在 overview 热路径)。返回 {} 时引擎给出中性
-    backdrop(score_market_risk 基线 35)。后续接入真实 breadth 源时,在此映射为
-    {hs300_ret_5d, hs300_ret_20d, advance, decline, sentiment}。
-    """
-    return {}
+    """复用风向服务中真实沪深300收益，缺失字段保持未知。"""
+    benchmark = MARKET_PULSE_SERVICE.payload().get("benchmark") or {}
+    return {key: value for key, value in {
+        "hs300_ret_5d": benchmark.get("chg_5d"),
+        "hs300_ret_20d": benchmark.get("chg_20d"),
+    }.items() if value is not None}
 
 
 def _cc_holdings():
@@ -305,6 +304,25 @@ MARKET_PULSE_SERVICE = MarketPulseService(
 def market_pulse_payload(as_of=None):
     """总览页「指数风向 + 板块机会与拐点」payload(见 MarketPulseService.payload)。"""
     return MARKET_PULSE_SERVICE.payload(as_of=as_of)
+
+
+def _trading_plan_kline(code):
+    payload, error = STOCK_KLINE_SERVICE.get_payload(code, period="daily", limit=120)
+    if error:
+        raise ValueError(error)
+    return payload or {}
+
+
+TRADING_PLAN_SERVICE = TradingPlanService(
+    store_path=USER_ROOT / "config" / "trading_plans.json",
+    watchlist=WATCHLIST_SERVICE.list_items,
+    opportunities=lambda: _command_center_report(),
+    market_pulse=lambda: MARKET_PULSE_SERVICE.payload(),
+    holdings=_cc_holdings,
+    quotes=WATCHLIST_SERVICE.quotes,
+    kline=_trading_plan_kline,
+    metadata=WATCHLIST_SERVICE._sector_info,
+)
 
 
 def start_sector_refresh():

@@ -891,6 +891,32 @@ def market_pulse(request: Request) -> Response:
 
 # ----------------------------- 模拟盘 paper trading -----------------------------
 
+@_native_get("/api/trading-plans")
+def trading_plans(request: Request) -> Response:
+    try:
+        payload = webui_core.TRADING_PLAN_SERVICE.overview(
+            scope=_query_value(request, "scope", "watchlist"),
+            code=_query_value(request, "code") or None,
+            offset=webui_core._safe_int(_query_value(request, "offset"), 0, minimum=0) or 0,
+            limit=webui_core._safe_int(_query_value(request, "limit"), 10, minimum=1, maximum=20) or 10,
+        )
+        return _json_response(payload)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return _json_response({"error": str(exc)}, status_code=500)
+
+
+@_native_post("/api/trading-plans/lock")
+def trading_plan_lock(request: Request) -> Response:
+    try:
+        payload, status = webui_core.TRADING_PLAN_SERVICE.lock_plan(_request_json(request))
+        return _json_response(payload, status_code=status)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return _json_response({"error": str(exc)}, status_code=500)
+
 @_native_get("/api/paper/account")
 def paper_account(request: Request) -> Response:
     return _json_response(webui_core.PAPER_TRADING_SERVICE.account_summary())

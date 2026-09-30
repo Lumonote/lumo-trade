@@ -355,7 +355,7 @@ class WatchlistService:
         secids = ",".join(_eastmoney_secid(c) for c in valid)
         url = (
             "https://push2.eastmoney.com/api/qt/ulist.np/get?"
-            "fltt=2&invt=2&fields=f12,f14,f2,f3,f4,f62&secids=" + secids
+            "fltt=2&invt=2&fields=f12,f14,f2,f3,f4,f62,f124&secids=" + secids
         )
         payload = request_json(url, headers=_QUOTE_HEADERS, timeout=4, retries=2)
         diff = ((payload or {}).get("data") or {}).get("diff") or []
@@ -367,12 +367,21 @@ class WatchlistService:
             code = str(row.get("f12") or "").strip()
             if not code:
                 continue
+            quote_date = None
+            try:
+                from zoneinfo import ZoneInfo
+                stamp = _safe_float(row.get("f124"))
+                if stamp and stamp > 0:
+                    quote_date = datetime.datetime.fromtimestamp(stamp, ZoneInfo("Asia/Shanghai")).date().isoformat()
+            except (ValueError, OSError, OverflowError):
+                pass
             out[code] = {
                 "name": str(row.get("f14") or "").strip(),
                 "price": _safe_float(row.get("f2")),
                 "change_pct": round(_safe_float(row.get("f3")) or 0.0, 2),
                 "change_amount": _safe_float(row.get("f4")),
                 "main_net_inflow": _safe_float(row.get("f62")),
+                "quote_date": quote_date,
             }
         return out
 
@@ -406,6 +415,8 @@ class WatchlistService:
                 "change_pct": round(_safe_float(fields[32]) or 0.0, 2),
                 "change_amount": _safe_float(fields[31]),
                 "main_net_inflow": None,  # 腾讯基础行情不含主力净流入
+                "quote_date": (f"{fields[30][:4]}-{fields[30][4:6]}-{fields[30][6:8]}"
+                               if len(fields[30]) >= 8 and fields[30][:8].isdigit() else None),
             }
         return out
 

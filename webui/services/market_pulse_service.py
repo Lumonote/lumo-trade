@@ -66,6 +66,7 @@ class MarketPulseService:
 
         metrics_by_symbol: Dict[str, Dict[str, Any]] = {}
         realtime_by_symbol: Dict[str, bool] = {}
+        dates_by_symbol: Dict[str, str] = {}
         for symbol in symbols:
             bars = bars_by_symbol.get(symbol) or []
             quote = quotes.get(symbol)
@@ -74,6 +75,7 @@ class MarketPulseService:
             merged, live = ip.overlay_realtime(bars, quote) if bars else (bars, False)
             metrics_by_symbol[symbol] = ip.index_metrics(merged)
             realtime_by_symbol[symbol] = bool(live)
+            dates_by_symbol[symbol] = str((merged[-1] if merged else {}).get("day") or "")[:10]
 
         cards: List[Dict[str, Any]] = []
         for symbol, ts_code, name in ip.DISPLAY_INDEXES:
@@ -91,6 +93,7 @@ class MarketPulseService:
                 "ma20_slope": metrics["ma20_slope"],
                 "pulse": pulse, "pulse_label": ip.PULSE_LABELS[pulse],
                 "realtime": realtime_by_symbol[symbol],
+                "as_of": dates_by_symbol[symbol],
             })
 
         style = ip.style_axis(metrics_by_symbol.get("sh000300"),
@@ -103,10 +106,11 @@ class MarketPulseService:
         for symbol, _, _ in ip.DISPLAY_INDEXES:
             bars = bars_by_symbol.get(symbol) or []
             if bars:
-                as_of = str(bars[-1].get("day") or "")[:10]
+                as_of = dates_by_symbol[symbol]
                 break
         return {"indices": cards, "style": style, "level": level,
                 "position_advice": position_advice(level), "as_of": as_of,
+                "benchmark": metrics_by_symbol.get("sh000300") or {},
                 "degraded_index": deg_index, "degraded_quote": deg_quote or not quotes}
 
     # ------------------------------------------------------------ 板块
@@ -163,6 +167,7 @@ class MarketPulseService:
             "style": index_part["style"],
             "level": index_part["level"],
             "position_advice": index_part["position_advice"],
+            "benchmark": index_part["benchmark"],
             "sectors": {
                 "fired": sector_part["fired"],
                 "watch": sector_part["watch"],
