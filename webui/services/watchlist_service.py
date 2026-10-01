@@ -2,18 +2,20 @@
 
 - 落库走原子写（临时文件 + replace），与 RuntimeConfigurationService 口径一致。
 - 实时行情走东方财富 ulist.np 批量报价接口，可对任意一篮子代码取价。
-- 纯本地单用户，无并发写竞争；列表读写均以磁盘为准，避免与桌面多页状态漂移。
+- 跨进程串行读改写；保留最后一次有效备份，读取异常不再当作空列表写回。
 """
 
 from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import re
 import tempfile
 import threading
 from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,7 @@ from webui.services.http_client import request_json, request_text
 
 _VALID_CODE = re.compile(r"^(?:6[0-9]{5}|[03][0-9]{5}|[84][0-9]{5}|92[0-9]{4})$")
 _MAX_ITEMS = 200
+logger = logging.getLogger(__name__)
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -76,49 +79,157 @@ def _tencent_symbol(code: str) -> str:
     return f"sz{code}"
 
 
+class WatchlistStorageError(RuntimeError):
+    """Storage is unavailable; callers must not treat it as an empty watchlist."""
+
+
 class WatchlistService:
-    def __init__(self, store_path: Path):
+    def __init__(self, store_path: Path, *, legacy_paths: list[Path] | None = None):
         self.store_path = Path(store_path)
+        self.backup_path = self.store_path.with_name(self.store_path.name + ".bak")
+        self._legacy_paths = [Path(path) for path in (legacy_paths or [])]
+        self._storage_notice = ""
         self._lock = threading.RLock()
         self._sector_cache: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # 持久化
     # ------------------------------------------------------------------
-    def _read(self) -> list[dict[str, Any]]:
+    @contextmanager
+    def _locked(self):
+        """Lock the complete read/modify/replace transaction across app instances."""
+        with self._lock:
+            try:
+                self.store_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.store_path.with_name(self.store_path.name + ".lock").open("a+b") as handle:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        if handle.seek(0, os.SEEK_END) == 0:
+                            handle.write(b"\0")
+                            handle.flush()
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    try:
+                        yield
+                    finally:
+                        if os.name == "nt":
+                            handle.seek(0)
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError as exc:
+                raise WatchlistStorageError("自选文件读写失败，已暂停操作以保护原数据。") from exc
+
+    @staticmethod
+    def _read_file(path: Path) -> list[dict[str, Any]]:
         try:
-            data = json.loads(self.store_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise WatchlistStorageError(f"自选文件 {path.name} 无法读取，已暂停写入以保护原数据。") from exc
         items = data.get("items") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            raise WatchlistStorageError(f"自选文件 {path.name} 格式异常，已暂停写入以保护原数据。")
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
-        if isinstance(items, list):
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                code = normalize_code(it.get("code"))
-                if not _VALID_CODE.match(code) or code in seen:
-                    continue
-                seen.add(code)
-                out.append({
-                    "code": code,
-                    "name": str(it.get("name") or "").strip(),
-                    "added_at": str(it.get("added_at") or _now()),
-                    "pinned": bool(it.get("pinned")),
-                })
+        for it in items:
+            if not isinstance(it, dict) or not _VALID_CODE.match(normalize_code(it.get("code"))):
+                raise WatchlistStorageError(f"自选文件 {path.name} 存在异常记录，已暂停写入以保护原数据。")
+            code = normalize_code(it.get("code"))
+            if code in seen:
+                continue
+            seen.add(code)
+            out.append({
+                "code": code,
+                "name": str(it.get("name") or "").strip(),
+                "added_at": str(it.get("added_at") or _now()),
+                "pinned": bool(it.get("pinned")),
+            })
         return out
 
+    def _read(self) -> list[dict[str, Any]]:
+        self._storage_notice = ""
+        try:
+            items = self._read_file(self.store_path)
+        except FileNotFoundError:
+            if self.backup_path.exists():
+                return self._recover_backup()
+            return self._migrate_legacy()
+        except WatchlistStorageError as exc:
+            # A sharing/permission/I/O failure is not evidence of corrupt data.
+            if isinstance(exc.__cause__, OSError):
+                raise
+            if self.backup_path.exists():
+                return self._recover_backup()
+            raise
+        if not self.backup_path.exists():
+            self._save_backup(items)
+        return items
+
+    def _migrate_legacy(self) -> list[dict[str, Any]]:
+        candidates = [path for path in self._legacy_paths if path.is_file()]
+        candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+        error = None
+        for path in candidates:
+            try:
+                items = self._read_file(path)
+            except WatchlistStorageError as exc:
+                error = exc
+                logger.warning("Legacy watchlist unreadable: %s", path)
+                continue
+            # The newest valid store wins, including a deliberate empty list.
+            self._write(items)
+            self._storage_notice = "已从旧版用户目录迁移自选股，原文件已保留。"
+            logger.info("Migrated watchlist from %s to %s", path, self.store_path)
+            return items
+        if error is not None:
+            raise error
+        return []
+
+    def _recover_backup(self) -> list[dict[str, Any]]:
+        items = self._read_file(self.backup_path)
+        if self.store_path.exists():
+            # Preserve damaged bytes for manual recovery before replacing them.
+            fd, name = tempfile.mkstemp(prefix=f"{self.store_path.name}.damaged-", dir=self.store_path.parent)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(self.store_path.read_bytes())
+                handle.flush()
+                os.fsync(handle.fileno())
+        self._atomic_write(self.store_path, items)
+        self._storage_notice = "自选文件异常，已从最近一次有效备份恢复。"
+        logger.warning("Recovered watchlist from %s", self.backup_path)
+        return items
+
+    def _save_backup(self, items: list[dict[str, Any]]) -> None:
+        try:
+            self._atomic_write(self.backup_path, items)
+        except OSError:
+            logger.exception("Could not back up watchlist: %s", self.backup_path)
+            self._storage_notice = "自选已读取或保存，但备份写入失败，请检查用户目录权限。"
+
     def _write(self, items: list[dict[str, Any]]) -> None:
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write(self.store_path, items)
+        self._save_backup(items)
+
+    @staticmethod
+    def _atomic_write(path: Path, items: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{self.store_path.name}.", suffix=".tmp", dir=str(self.store_path.parent)
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump({"items": items, "updated_at": _now()}, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
-            Path(tmp_name).replace(self.store_path)
+                handle.flush()
+                os.fsync(handle.fileno())
+            Path(tmp_name).replace(path)
         finally:
             Path(tmp_name).unlink(missing_ok=True)
 
@@ -146,12 +257,12 @@ class WatchlistService:
     # 增删查
     # ------------------------------------------------------------------
     def list_items(self) -> list[dict[str, Any]]:
-        with self._lock:
+        with self._locked():
             return self._sort_items(self._read())
 
     def pin(self, code: Any, pinned: bool = True) -> tuple[dict[str, Any], int]:
         norm = normalize_code(code)
-        with self._lock:
+        with self._locked():
             items = self._read()
             for it in items:
                 if it["code"] == norm:
@@ -164,7 +275,7 @@ class WatchlistService:
         norm = normalize_code(code)
         if not _VALID_CODE.match(norm):
             return {"error": "无效的股票代码"}, 400
-        with self._lock:
+        with self._locked():
             items = self._read()
             if any(it["code"] == norm for it in items):
                 return {"items": self._sort_items(items), "added": False, "code": norm}, 200
@@ -177,7 +288,7 @@ class WatchlistService:
 
     def remove(self, code: Any) -> tuple[dict[str, Any], int]:
         norm = normalize_code(code)
-        with self._lock:
+        with self._locked():
             items = self._read()
             kept = [it for it in items if it["code"] != norm]
             if len(kept) == len(items):
@@ -187,7 +298,7 @@ class WatchlistService:
 
     def is_member(self, code: Any) -> bool:
         norm = normalize_code(code)
-        with self._lock:
+        with self._locked():
             return any(it["code"] == norm for it in self._read())
 
     # ------------------------------------------------------------------
@@ -421,8 +532,9 @@ class WatchlistService:
         return out
 
     def list_with_quotes(self) -> dict[str, Any]:
-        with self._lock:
+        with self._locked():
             items = self._sort_items(self._read())
+            storage_notice = self._storage_notice
         quote_map = self.quotes([it["code"] for it in items]) if items else {}
         merged: list[dict[str, Any]] = []
         for it in items:
@@ -443,6 +555,7 @@ class WatchlistService:
         summary = self._summary(merged)
         return {
             "items": merged,
+            "storage_notice": storage_notice,
             "count": len(merged),
             "quoted": bool(quote_map),
             "summary": summary,

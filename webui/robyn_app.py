@@ -30,6 +30,7 @@ from webui.services.model_runtime import load_model_payload, loaded_model_info, 
 from webui.services import futures_service, quant_radar_service, star_orbit_service
 from webui.services import license_service
 from webui.services import stock_screener_service
+from webui.services.watchlist_service import WatchlistStorageError
 from data_store import quant_radar_repo, star_orbit_repo
 
 
@@ -1602,9 +1603,22 @@ def save_auto_follow_settings(request: Request) -> Response:
     return _json_response(webui_core.CONFIGURATION_SERVICE.save_auto_follow_settings(_request_json(request)))
 
 
+def _watchlist_response(operation, *args, **kwargs) -> Response:
+    try:
+        result = operation(*args, **kwargs)
+    except WatchlistStorageError as exc:
+        return _json_response(
+            {"error": str(exc), "error_code": "watchlist_storage_unavailable"}, status_code=503
+        )
+    if isinstance(result, tuple):
+        payload, status_code = result
+        return _json_response(payload, status_code=status_code)
+    return _json_response(result)
+
+
 @_native_get("/api/watchlist")
 def watchlist_list(request: Request) -> Response:
-    return _json_response(webui_core.WATCHLIST_SERVICE.list_with_quotes())
+    return _watchlist_response(webui_core.WATCHLIST_SERVICE.list_with_quotes)
 
 
 @_native_get("/api/watchlist/alerts")
@@ -1613,32 +1627,28 @@ def watchlist_alerts_api(request: Request) -> Response:
 
     数据面与条件选股共用(本地资金流/量化雷达/吸筹/量化席位 + STOCK_KLINE_SERVICE 日K)。
     """
-    items = webui_core.WATCHLIST_SERVICE.list_items()
-    return _json_response(stock_screener_service.watchlist_alerts(
-        items, kline_fetcher=_quant_kline_fetcher))
+    return _watchlist_response(lambda: stock_screener_service.watchlist_alerts(
+        webui_core.WATCHLIST_SERVICE.list_items(), kline_fetcher=_quant_kline_fetcher))
 
 
 @_native_post("/api/watchlist/add")
 def watchlist_add(request: Request) -> Response:
     body = _request_json(request)
-    result, status_code = webui_core.WATCHLIST_SERVICE.add(body.get("code"), body.get("name"))
-    return _json_response(result, status_code=status_code)
+    return _watchlist_response(webui_core.WATCHLIST_SERVICE.add, body.get("code"), body.get("name"))
 
 
 @_native_post("/api/watchlist/remove")
 def watchlist_remove(request: Request) -> Response:
     body = _request_json(request)
-    result, status_code = webui_core.WATCHLIST_SERVICE.remove(body.get("code"))
-    return _json_response(result, status_code=status_code)
+    return _watchlist_response(webui_core.WATCHLIST_SERVICE.remove, body.get("code"))
 
 
 @_native_post("/api/watchlist/pin")
 def watchlist_pin(request: Request) -> Response:
     body = _request_json(request)
-    result, status_code = webui_core.WATCHLIST_SERVICE.pin(
+    return _watchlist_response(webui_core.WATCHLIST_SERVICE.pin,
         body.get("code"), body.get("pinned", True)
     )
-    return _json_response(result, status_code=status_code)
 
 
 @_native_post("/api/open-url")

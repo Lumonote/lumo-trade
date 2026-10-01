@@ -1,6 +1,14 @@
-"""watchlist_service 代码校验 + 行情源市场前缀（含北交所新代码段 920xxx）。"""
+"""自选行情、升级迁移及持久化保护。"""
+import json
+import multiprocessing
+import os
+from pathlib import Path
+
+import pytest
+
 from webui.services.watchlist_service import (
     WatchlistService,
+    WatchlistStorageError,
     _VALID_CODE,
     _eastmoney_secid,
     _tencent_symbol,
@@ -121,3 +129,166 @@ def test_multiple_pinned_stay_on_top_in_add_order(tmp_path):
     codes = [it["code"] for it in svc.list_items()]
     assert codes[:2] == ["600519", "000001"], "置顶组保持在最上"
     assert codes[2:] == ["002594", "300750"], "新添加的按加入时间倒序排在置顶之后"
+
+
+def _stored_items(path, items):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"items": items}), encoding="utf-8")
+
+
+def test_upgrade_migrates_old_directory_and_survives_bundle_replacement(tmp_path, monkeypatch):
+    from webui.services.paths import legacy_watchlist_paths
+
+    old = tmp_path / "com.kronos.app/config/watchlist.json"
+    item = {"code": "600519", "name": "贵州茅台", "added_at": "2026-06-01T09:30:00", "pinned": True}
+    _stored_items(old, [item])
+    original = old.read_bytes()
+    root = tmp_path / "com.lumo.trade"
+    store = root / "config/watchlist.json"
+    service = WatchlistService(store, legacy_paths=legacy_watchlist_paths(root))
+    monkeypatch.setattr(service, "quotes", lambda codes: {})
+    monkeypatch.setattr(service, "_sector_info", lambda code: {})
+    payload = service.list_with_quotes()
+    assert payload["items"][0]["pinned"] is True
+    assert "迁移" in payload["storage_notice"]
+    assert old.read_bytes() == original
+    assert service.backup_path.exists()
+    # Installing a new resource bundle changes PROJECT_ROOT, not user storage.
+    monkeypatch.setenv("KRONOS_PROJECT_ROOT", str(tmp_path / "new-install"))
+    reinstalled = WatchlistService(store, legacy_paths=legacy_watchlist_paths(root))
+    assert reinstalled.list_items() == [item]
+    reinstalled.remove("600519")
+    assert WatchlistService(store, legacy_paths=[old]).list_items() == []
+    assert json.loads(reinstalled.backup_path.read_text())["items"] == []
+
+
+@pytest.mark.parametrize("items", [[], [{"code": "000001"}]])
+def test_existing_list_is_not_overwritten_by_old_directory(tmp_path, items):
+    store, old = tmp_path / "current/watchlist.json", tmp_path / "old/watchlist.json"
+    _stored_items(store, items)
+    _stored_items(old, [{"code": "600519", "pinned": True}])
+    original = store.read_bytes()
+    service = WatchlistService(store, legacy_paths=[old])
+    assert {item["code"] for item in service.list_items()} == {item["code"] for item in items}
+    assert store.read_bytes() == original
+
+
+def test_newest_legacy_store_wins_including_deliberate_empty_list(tmp_path):
+    old, newer = tmp_path / "old/watchlist.json", tmp_path / "newer/watchlist.json"
+    _stored_items(old, [{"code": "600519"}])
+    _stored_items(newer, [])
+    os.utime(old, (1, 1))
+    os.utime(newer, (2, 2))
+    service = WatchlistService(tmp_path / "current/watchlist.json", legacy_paths=[old, newer])
+    assert service.list_items() == []
+    assert service.store_path.exists()
+
+
+def test_bad_legacy_file_is_preserved_and_blocks_empty_overwrite(tmp_path):
+    old = tmp_path / "old/watchlist.json"
+    old.parent.mkdir()
+    old.write_text('{"items": [')
+    service = WatchlistService(tmp_path / "current/watchlist.json", legacy_paths=[old])
+    with pytest.raises(WatchlistStorageError):
+        service.add("000001")
+    assert old.read_text() == '{"items": ['
+    assert not service.store_path.exists()
+
+
+@pytest.mark.parametrize("raw", [b'{"items": [', b"null", b'{"items": null}', b'{"items": [{"code": "bad"}]}', b"\xff"])
+def test_invalid_storage_is_not_empty_and_cannot_be_overwritten(tmp_path, raw):
+    store = tmp_path / "watchlist.json"
+    store.write_bytes(raw)
+    service = WatchlistService(store)
+    for action in (service.list_items, lambda: service.add("000001"),
+                   lambda: service.remove("600519"), lambda: service.pin("600519")):
+        with pytest.raises(WatchlistStorageError):
+            action()
+        assert store.read_bytes() == raw
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_last_saved_backup_restores_complete_list_and_pin_state(tmp_path, monkeypatch, missing):
+    service = WatchlistService(tmp_path / "watchlist.json")
+    service.add("600519", "贵州茅台")
+    service.add("000001", "平安银行")
+    service.pin("600519")
+    expected = service.list_items()
+    if missing:
+        service.store_path.unlink()
+    else:
+        service.store_path.write_bytes(b"damaged bytes")
+    reinstalled = WatchlistService(service.store_path)
+    monkeypatch.setattr(reinstalled, "quotes", lambda codes: {})
+    monkeypatch.setattr(reinstalled, "_sector_info", lambda code: {})
+    payload = reinstalled.list_with_quotes()
+    assert "备份恢复" in payload["storage_notice"]
+    assert reinstalled.list_items() == expected
+    damaged = list(tmp_path.glob("watchlist.json.damaged-*"))
+    assert len(damaged) == (0 if missing else 1)
+    if damaged:
+        assert damaged[0].read_bytes() == b"damaged bytes"
+
+
+def test_two_damaged_files_block_writes_without_replacing_either(tmp_path):
+    service = WatchlistService(tmp_path / "watchlist.json")
+    service.store_path.write_text("bad primary")
+    service.backup_path.write_text("bad backup")
+    with pytest.raises(WatchlistStorageError):
+        service.add("000001")
+    assert service.store_path.read_text() == "bad primary"
+    assert service.backup_path.read_text() == "bad backup"
+
+
+def test_permission_failure_does_not_restore_stale_backup(tmp_path, monkeypatch):
+    service = WatchlistService(tmp_path / "watchlist.json")
+    service.add("600519")
+    original = service.store_path.read_bytes()
+    read_text = Path.read_text
+
+    def denied(path, *args, **kwargs):
+        if path == service.store_path:
+            raise PermissionError("temporarily locked")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(WatchlistStorageError):
+        service.add("000001")
+    assert service.store_path.read_bytes() == original
+    assert not list(tmp_path.glob("watchlist.json.damaged-*"))
+
+
+def test_failed_atomic_replace_keeps_saved_primary_and_backup(tmp_path, monkeypatch):
+    service = WatchlistService(tmp_path / "watchlist.json")
+    service.add("600519")
+    original, backup = service.store_path.read_bytes(), service.backup_path.read_bytes()
+    replace = Path.replace
+
+    def fail_primary(path, target):
+        if target == service.store_path:
+            raise OSError("replace failed")
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_primary)
+    with pytest.raises(WatchlistStorageError):
+        service.add("000001")
+    assert service.store_path.read_bytes() == original
+    assert service.backup_path.read_bytes() == backup
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def _add_from_process(args):
+    path, start = args
+    service = WatchlistService(Path(path))
+    for number in range(start, start + 12):
+        _, status = service.add(str(600000 + number))
+        assert status == 200
+
+
+def test_independent_backend_processes_do_not_lose_updates(tmp_path):
+    store = tmp_path / "watchlist.json"
+    with multiprocessing.get_context("spawn").Pool(4) as pool:
+        pool.map(_add_from_process, [(str(store), start) for start in (0, 12, 24, 36)])
+    service = WatchlistService(store)
+    assert {item["code"] for item in service.list_items()} == {str(600000 + i) for i in range(48)}
+    assert json.loads(service.backup_path.read_text())["items"] == json.loads(store.read_text())["items"]

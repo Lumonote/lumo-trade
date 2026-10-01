@@ -28,6 +28,21 @@ def user_root(app_name: str = "com.lumo.trade") -> Path:
     return root
 
 
+def legacy_watchlist_paths(root: Path) -> list[Path]:
+    """Known pre-rename stores; never import personal data from the app bundle.
+
+    Explicit/custom user directories remain isolated. The service migrates only
+    when the destination is absent, so an intentionally empty list stays empty.
+    """
+    root = Path(root)
+    if root.name != "com.lumo.trade":
+        return []
+    roots = [root.parent / name for name in ("com.kronos.app", "com.lumo.app", "Kronos")]
+    if sys.platform == "darwin" and root.parent == Path.home() / "Library" / "Application Support":
+        roots.extend(Path.home() / "Documents" / name for name in ("Kronos", "Lumo"))
+    return [candidate / "config" / "watchlist.json" for candidate in roots]
+
+
 def results_dir() -> Path:
     """Single source of truth for the opportunity/report output directory.
 

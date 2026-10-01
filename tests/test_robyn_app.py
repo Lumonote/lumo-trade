@@ -48,6 +48,40 @@ def test_robyn_route_manifest_contains_native_routes(robyn_module):
     assert manifest == native_manifest
 
 
+def test_watchlist_storage_error_is_not_a_successful_empty_response(robyn_module):
+    from robyn.testing import TestClient
+
+    service = robyn_module.webui_core.WATCHLIST_SERVICE
+    service.store_path.write_text('{"items": [')
+    original = service.store_path.read_bytes()
+    with TestClient(robyn_module.app) as client:
+        responses = [client.get("/api/watchlist"), client.get("/api/watchlist/alerts")]
+        for action in ("add", "remove", "pin"):
+            responses.append(client.post(f"/api/watchlist/{action}", json_data={"code": "600519"}))
+    for response in responses:
+        assert response.status_code == 503
+        assert response.json()["error_code"] == "watchlist_storage_unavailable"
+        assert "items" not in response.json()
+    assert service.store_path.read_bytes() == original
+
+
+def test_watchlist_api_recovers_saved_list_with_notice(robyn_module, monkeypatch):
+    from robyn.testing import TestClient
+
+    service = robyn_module.webui_core.WATCHLIST_SERVICE
+    monkeypatch.setattr(service, "quotes", lambda codes: {})
+    monkeypatch.setattr(service, "_sector_info", lambda code: {})
+    with TestClient(robyn_module.app) as client:
+        assert client.post("/api/watchlist/add", json_data={"code": "600519", "name": "贵州茅台"}).status_code == 200
+        assert client.post("/api/watchlist/pin", json_data={"code": "600519"}).status_code == 200
+        service.store_path.write_text("damaged")
+        response = client.get("/api/watchlist")
+    assert response.status_code == 200
+    assert response.json()["items"][0]["code"] == "600519"
+    assert response.json()["items"][0]["pinned"] is True
+    assert "备份恢复" in response.json()["storage_notice"]
+
+
 def test_robyn_native_json_routes(robyn_module, monkeypatch):
     from robyn.testing import TestClient
 

@@ -137,6 +137,8 @@ Tauri 2 桌面壳
 
 安装包已内置本地后端，**不需要**单独安装 Python、Node.js 或 Rust，装完双击即用。
 
+升级前请彻底退出应用，再覆盖安装。自选股独立保存在用户目录下的 `config/watchlist.json`（macOS：`~/Library/Application Support/com.lumo.trade/`；Windows：`%APPDATA%\com.lumo.trade\`），不随安装包替换。旧版目录中的清单会在新目录尚无清单时自动迁移；保存时同步生成 `watchlist.json.bak`，文件异常时从备份恢复并保留损坏文件。已有清单（包括主动删空的清单）不会被安装包或旧目录覆盖。
+
 > 只有推送 `v*` 标签（如 `v1.1.6`）才会生成 GitHub Release；平时推送到 `main` / 其他分支的产物只留在
 > Actions 的 Artifacts 中，保留期分别为 14 天 / 7 天。
 

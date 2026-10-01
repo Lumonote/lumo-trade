@@ -66,7 +66,7 @@ from webui.services.model_runtime import (
     loaded_model_info,
     run_prediction_payload,
 )
-from webui.services.paths import ensure_user_subdirs, project_root, results_dir, user_root
+from webui.services.paths import ensure_user_subdirs, legacy_watchlist_paths, project_root, results_dir, user_root
 from webui.services.pattern_search_service import PatternSearchService
 from webui.services.stock_suite_service import STOCK_SUITE_SERVICE
 from webui.services.trading_client_service import TradingClientService
@@ -104,7 +104,9 @@ STOCK_KLINE_SERVICE = StockKlineService(USER_ROOT / "data")
 MARKET_INTELLIGENCE_SERVICE = MarketIntelligenceService()
 PATTERN_SEARCH_SERVICE = PatternSearchService(USER_ROOT / "data" / "pattern_fingerprints.db")
 TRADING_CLIENT_SERVICE = TradingClientService(PROJECT_ROOT / "config" / "trading_client_adapters.json")
-WATCHLIST_SERVICE = WatchlistService(USER_ROOT / "config" / "watchlist.json")
+WATCHLIST_SERVICE = WatchlistService(
+    USER_ROOT / "config" / "watchlist.json", legacy_paths=legacy_watchlist_paths(USER_ROOT)
+)
 # 资金榜单(主力净流入榜+龙虎榜):注入自选服务的实时报价以叠加最新价/涨跌幅
 CAPITAL_RANKINGS_SERVICE = CapitalRankingsService(quote_provider=WATCHLIST_SERVICE.quotes)
 # 模拟盘台账(起始100W,含简化费用):盯市价复用自选实时报价
