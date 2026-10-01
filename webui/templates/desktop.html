@@ -6,7 +6,7 @@
     <title>{{ page_title }} - Lumo Trade</title>
     <script async src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
     <link rel="stylesheet" href="/static/lumo_desktop.css?v={{ asset_v('lumo_desktop.css') }}" />
-    <link rel="stylesheet" href="/static/lumo_trading_plan.css?v={{ asset_v('lumo_trading_plan.css') }}" />
+    <link rel="stylesheet" href="/static/lumo_operations.css?v={{ asset_v('lumo_operations.css') }}" />
   </head>
 	  <body data-page="{{ active_page }}" data-desktop-mode="{{ '1' if desktop_mode else '0' }}">
 	    <div class="app-shell" id="appShell">
@@ -70,23 +70,6 @@
 
         {% if active_page == 'command_center' %}
         <section id="commandCenterRoot" class="cc-screen"></section>
-        {% endif %}
-
-        {% if active_page in ['overview', 'features', 'watchlist', 'command_center', 'workbench'] %}
-        <section id="tradingPlanBoard" class="panel tp-board" aria-label="统一操作计划">
-          <div class="panel-header">
-            <h2 class="panel-title">操作计划 · 大盘 → 板块 → 个股</h2>
-            <button type="button" class="button secondary compact" data-tp-refresh>刷新计划</button>
-          </div>
-          <div class="panel-body">
-            <div class="tp-toolbar" role="group" aria-label="计划范围">
-              <button type="button" class="button secondary compact" data-tp-scope="watchlist">自选股</button>
-              <button type="button" class="button secondary compact" data-tp-scope="opportunities">挖掘机会</button>
-              <button type="button" class="button secondary compact" data-tp-scope="holdings">模拟持仓</button>
-            </div>
-            <div class="tp-content" aria-live="polite">正在读取操作计划…</div>
-          </div>
-        </section>
         {% endif %}
 
         {% if active_page == 'capital_rankings' %}
@@ -1503,10 +1486,6 @@
           <button id="closeStockContextBtn" class="button secondary compact" type="button">关闭</button>
         </div>
         <div class="modal-body stock-context-body">
-          <details id="tradingPlanStock" class="tp-stock">
-            <summary>统一买卖计划 <span class="tp-stock-status">读取中…</span></summary>
-            <div class="tp-content" aria-live="polite"></div>
-          </details>
           <nav class="stock-suite-tabs" role="tablist" id="stockSuiteTabs">
             <button data-suite-tab="quick"               class="suite-tab active" type="button">快速信息</button>
             <button data-suite-tab="overview"            class="suite-tab" type="button">综合总览</button>
@@ -1735,7 +1714,7 @@
     <script src="/static/provider_context_menu.js"></script>
     <script src="/static/lumo_open_external.js?v={{ asset_v('lumo_open_external.js') }}"></script>
     <script src="/static/lumo_desktop_app.js?v={{ asset_v('lumo_desktop_app.js') }}"></script>
-    <script src="/static/lumo_trading_plan.js?v={{ asset_v('lumo_trading_plan.js') }}"></script>
+    <script src="/static/lumo_operations.js?v={{ asset_v('lumo_operations.js') }}"></script>
     <script src="/static/lumo_quant_sector_clicks.js?v={{ asset_v('lumo_quant_sector_clicks.js') }}"></script>
     <script src="/static/lumo_market_cloud.js?v={{ asset_v('lumo_market_cloud.js') }}"></script>
   </body>

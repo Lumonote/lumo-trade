@@ -24,6 +24,45 @@ def lock(svc, item):
                           "basis_key": item["candidate"]["basis_key"]})
 
 
+def test_graph_model_and_account_plan_use_the_same_structural_levels(tmp_path):
+    from analysis.operation_models import analyze_operations
+    from analysis.sector_opportunities import sector_landscape
+    from tests.test_operation_models import model_bars, NOW
+    from tests.test_sector_opportunities import series
+    rows = model_bars()
+    op = analyze_operations(rows, now=NOW)
+    kl = {"available": True, "records": rows, "operation": op, "source": "test"}
+    market = pulse()
+    market["sectors"] = {"landscape": sector_landscape({("银行", "行业"): series()}, reference_date="2026-10-01")}
+    svc = service(tmp_path, kline=lambda c: kl, market_pulse=lambda: market, now=lambda: NOW,
+        quotes=lambda codes: {c: {"price": rows[-1]["close"], "quote_date": "2026-09-30"} for c in codes},
+        opportunities=lambda: {"date":"2026-09-30", "items":[{"code":"000001", "score":85, "signals":{"rsi":50}}]})
+    item = svc.overview(code="000001")["items"][0]
+    assert item["model"]["state"] == "triggered"
+    assert item["levels"] == item["chart"]["operation"]["levels"]
+    assert len(item["chart"]["records"]) == 240
+    assert len(svc.overview(limit=1)["items"][0]["chart"]["records"]) == 60
+    assert item["status"] == "entry"
+    assert lock(svc, item)[1] == 200
+    rows[-1]["volume"] = None
+    kl["operation"] = analyze_operations(rows, now=NOW)
+    updated = svc.overview(code="000001")["items"][0]
+    assert updated["locked"]
+    assert updated["status"] == "blocked"
+    assert any("模型待确认" in b for b in updated["blockers"])
+
+
+def test_invalid_latest_ohlc_cannot_reuse_an_older_model_confirmation(tmp_path):
+    from analysis.operation_models import analyze_operations
+    from tests.test_operation_models import model_bars, NOW
+    rows=model_bars()
+    rows[-1]["open"]=rows[-1]["high"]+1
+    op=analyze_operations(rows,now=NOW)
+    item=service(tmp_path,now=lambda:NOW,kline=lambda c:{"records":rows,"operation":op}).overview(code="000001")["items"][0]
+    assert not item["candidate"]["available"]
+    assert "OHLC" in item["candidate"]["reason"]
+
+
 def test_batch_allocations_share_sector_and_total_budget(tmp_path):
     out = service(tmp_path).overview()
     items = out["items"]

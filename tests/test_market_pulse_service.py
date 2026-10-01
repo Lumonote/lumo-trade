@@ -161,3 +161,33 @@ def test_payload_force_bypasses_cache():
     svc.payload()
     svc.payload(force=True)
     assert len(calls) == 2
+
+
+def test_landscape_survives_absent_turning_events_and_retains_lagged_sectors():
+    from tests.test_sector_opportunities import series
+    from datetime import date
+    seen = {}
+
+    def turning(rows, **kwargs):
+        seen.update(rows)
+        return {"fired": [], "watch": []}
+
+    out = _service(sector_series=lambda **kwargs: {
+        ("银行", "行业"): series(),
+        ("旧板块", "行业"): series(end=date(2026, 9, 10))}, turning_rules=turning).payload(as_of="2026-10-01")
+    assert out["sectors"]["status"] == "no_trigger"
+    assert len(out["sectors"]["landscape"]) == 2
+    assert out["sectors"]["coverage"]["eligible"] == 1
+    assert out["sectors"]["coverage"]["stale"] == 1
+    assert ("旧板块", "行业") not in seen
+
+
+def test_validation_failure_and_empty_source_are_distinct():
+    def boom():
+        raise RuntimeError("failed to read validation")
+
+    failed = _service(rule_stats=boom).payload()
+    assert failed["sectors"]["status"] == "validation_error"
+    assert failed["sectors"]["landscape"]
+    assert not failed["sectors"]["fired"]
+    assert _service(sector_series=lambda **kwargs: {}).payload()["sectors"]["status"] == "no_data"

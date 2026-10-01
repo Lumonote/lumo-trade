@@ -126,6 +126,9 @@ class TradingPlanService:
             sector = sector_plan(meta, pulse, today=today)
             result = evaluate_plan(plan, candidate, market, sector, quotes.get(c), position_map.get(c), today=today)
             result["candidate"] = candidate
+            result["chart"] = {"code": c, "name": meta["name"], "source": kl.get("source"),
+                               "records": (kl.get("records") or []) if selected else (kl.get("records") or [])[-60:],
+                               "operation": candidate.get("operation") or kl.get("operation") or {}}
             result["revision"] = (saved.get(c) or {}).get("revision", 0)
             result["degraded"] = local_degraded
             if unclassified:

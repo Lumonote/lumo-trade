@@ -94,12 +94,17 @@ def sector_plan(meta, pulse, *, today):
     confirmed = [r for state, r in matches if state == "fired" and not r.get("provisional")
                  and fresh(r.get("trade_date"), today)]
     ready = bool(confirmed) and not ((pulse or {}).get("degraded") or {}).get("sector")
+    landscape = [r for r in sectors.get("landscape") or [] if r.get("sector") in names]
+    leaders = [r for r in landscape if r.get("eligible") and not r.get("stale")
+               and not r.get("provisional") and fresh(r.get("trade_date"), today)]
+    strength_ready = bool(leaders) and not ((pulse or {}).get("degraded") or {}).get("sector")
     return {
         "name": meta.get("sector") or "未识别板块", "boards": sorted(names),
-        "state": "confirmed" if ready else "watch" if matches else "unknown",
-        "label": "板块拐点已确认" if ready else "板块待确认" if matches else "无已验证板块信号",
-        "entry_allowed": ready, "evidence": [r for _, r in matches],
-        "condition": "关联板块的已启用拐点规则触发，且为有效期内的收盘确认数据",
+        "state": "confirmed" if ready else "leading" if strength_ready else "watch" if matches or landscape else "unknown",
+        "label": "板块拐点已确认" if ready else "板块强度/广度/资金共振" if strength_ready else "板块待确认" if matches or landscape else "板块数据待补齐",
+        "entry_allowed": ready or strength_ready, "evidence": [r for _, r in matches],
+        "landscape": landscape,
+        "condition": "有效期内的已验证拐点，或收盘相对强度改善且上涨广度≥50%、5日净流入为正；后者为状态规则，不代表历史胜率",
         "exit_condition": "板块信号失效或转为临界观察时暂停加仓，复核持仓",
     }
 
@@ -174,7 +179,32 @@ def stock_plan(code, meta, kline, opportunity=None, *, today):
         "exits": ["触及止损：退出剩余仓位", "第一目标：减持原计划仓位30%",
                   "第二目标：再减持原计划仓位40%", "余下30%：跌破锁定止损与MA20中的较高者时退出"],
     })
+    operation = (kline or {}).get("operation")
+    if operation is not None:
+        result["operation"] = operation
+        if not operation.get("available"):
+            result.update(available=False, reason=operation.get("reason") or "操作结构数据不足")
+            return result
+        if day(operation.get("as_of")) != day(stamp):
+            result.update(available=False, reason="最新日K的OHLC结构无效，请复核行情后制定计划")
+            return result
+        levels = dict(operation.get("levels") or {})
+        if not (0 < levels.get("stop_loss", 0) < levels.get("entry_low", 0) <= levels.get("entry_high", 0)):
+            result.update(available=False, reason="结构价位精度不足，无法制定有效风险距离")
+            return result
+        stage = operation["stage"]["key"]
+        result.update(levels=levels, trend="up" if stage == "advance" else "down" if stage == "decline" else "range",
+                      trend_label=operation["stage"]["label"])
+        selected = next(m for m in operation["models"] if m["key"] == operation["selected_model"])
+        result["model"] = {k: selected[k] for k in ("key", "label", "state", "state_label", "theory")}
+        result["stages"] = ["试仓：模型收盘确认且大盘、板块和风险预算均通过",
+                            "加仓：突破/回调确认持续有效，已有仓位盈利且预算仍有余量",
+                            "结构支撑失效时取消计划；不向下摊平"]
+        result["exits"] = ["跌破锁定结构失效线：退出复核", "进入第一压力/风险情景区：分批减仓复核",
+                           "余仓按趋势保护线跟踪；目标区不代表必达价格"]
     basis = {k: result[k] for k in ("code", "data_as_of", "levels")}
+    if result.get("model"):
+        basis["model"] = result["model"]["key"]
     result["basis_key"] = hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()[:20]
     return result
 
@@ -190,6 +220,12 @@ def evaluate_plan(plan, candidate, market, sector, quote=None, position=None, *,
     held = (number(position.get("qty")) or 0) > 0
     levels = plan.get("levels") or {}
     blockers = []
+    operation = candidate.get("operation") or {}
+    if operation.get("available"):
+        model = next((m for m in operation.get("models") or [] if m["key"] == operation.get("selected_model")), {})
+        if model.get("state") != "triggered":
+            pending = [c["label"] for c in model.get("checks") or [] if c["passed"] is not True]
+            blockers.append("盘中模型待收盘确认" if model.get("state") == "provisional" else "模型待确认：" + "、".join(pending))
     if not plan.get("available") or not candidate.get("available"):
         blockers.append(candidate.get("reason") or plan.get("reason") or "个股数据不足")
     if not market.get("entry_allowed"):

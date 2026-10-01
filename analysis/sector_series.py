@@ -155,7 +155,7 @@ def load_series(sector: str, sector_type: str, *, end_date: Optional[str] = None
 
 
 def load_all_series(*, end_date: Optional[str] = None, limit: int = 60,
-                    min_members: int = 5) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+                    min_members: int = 5, include_stale: bool = False) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
     """全部板块的日序列。成分股不足 min_members 的板块直接剔除(噪声太大)。"""
     end = (end_date or "9999-12-31").strip()
     dates = [r[0] for r in get_conn().execute(
@@ -176,7 +176,7 @@ def load_all_series(*, end_date: Optional[str] = None, limit: int = 60,
     latest = max(dates)
     return {
         key: series for key, series in out.items()
-        if series and series[-1]["trade_date"] == latest
+        if series and (include_stale or series[-1]["trade_date"] == latest)
         and (series[-1]["member_count"] or 0) >= int(min_members)
     }
 

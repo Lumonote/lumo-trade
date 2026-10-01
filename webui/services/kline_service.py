@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from analysis.limit_up_patterns import bars_from_records, detect_kline_patterns
+from analysis.operation_models import analyze_operations
 from webui.services.analysis_jobs import normalize_stock_codes, safe_int
 from webui.services.http_client import request_json
 
@@ -314,6 +315,7 @@ class StockKlineService:
                 'available': True,
                 'records': sina_records,
                 'patterns': self._pattern_payload(sina_records, code, name),
+                'operation': analyze_operations(sina_records, period=normalized_period),
                 'quote': quote_block,
                 'quoted': bool(quote_block),
                 'quote_updated_at': quote_block['updated_at'] if quote_block else None,
@@ -331,6 +333,7 @@ class StockKlineService:
                 'available': True,
                 'records': local_records,
                 'patterns': self._pattern_payload(local_records, code, name),
+                'operation': analyze_operations(local_records, period=normalized_period),
                 'quote': quote_block,
                 'quoted': bool(quote_block),
                 'quote_updated_at': quote_block['updated_at'] if quote_block else None,

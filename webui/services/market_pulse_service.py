@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Callable, Dict, List, Optional
 
 from analysis import index_pulse as ip
 from analysis.market_regime import position_advice
+from analysis.operation_models import analyze_operations, normalize_bars
+from analysis.sector_opportunities import sector_landscape
 
 DISCLAIMER = ("指数状态与板块信号基于公开数据的统计描述,不构成投资建议;"
               "盘中信号随当日数据变化,收盘后方为定稿。")
@@ -37,7 +41,7 @@ class MarketPulseService:
     def __init__(self, *, index_bars: Callable, index_quotes: Callable,
                  sector_series: Callable, turning_rules: Callable,
                  rule_stats: Optional[Callable] = None, ttl: int = 30,
-                 datalen: int = 160, series_limit: int = 60):
+                 datalen: int = 240, series_limit: int = 60):
         self._index_bars = index_bars
         self._index_quotes = index_quotes
         self._sector_series = sector_series
@@ -67,6 +71,7 @@ class MarketPulseService:
         metrics_by_symbol: Dict[str, Dict[str, Any]] = {}
         realtime_by_symbol: Dict[str, bool] = {}
         dates_by_symbol: Dict[str, str] = {}
+        charts_by_symbol: Dict[str, Any] = {}
         for symbol in symbols:
             bars = bars_by_symbol.get(symbol) or []
             quote = quotes.get(symbol)
@@ -76,6 +81,10 @@ class MarketPulseService:
             metrics_by_symbol[symbol] = ip.index_metrics(merged)
             realtime_by_symbol[symbol] = bool(live)
             dates_by_symbol[symbol] = str((merged[-1] if merged else {}).get("day") or "")[:10]
+            charts_by_symbol[symbol] = {
+                "records": normalize_bars(merged),
+                "operation": analyze_operations(merged),
+            }
 
         cards: List[Dict[str, Any]] = []
         for symbol, ts_code, name in ip.DISPLAY_INDEXES:
@@ -94,6 +103,7 @@ class MarketPulseService:
                 "pulse": pulse, "pulse_label": ip.PULSE_LABELS[pulse],
                 "realtime": realtime_by_symbol[symbol],
                 "as_of": dates_by_symbol[symbol],
+                **charts_by_symbol[symbol],
             })
 
         style = ip.style_axis(metrics_by_symbol.get("sh000300"),
@@ -115,7 +125,7 @@ class MarketPulseService:
 
     # ------------------------------------------------------------ 板块
     def _build_sectors(self, as_of: Optional[str]) -> Dict[str, Any]:
-        stats, _ = self._safe(lambda: self._rule_stats() or {}, {})
+        stats, stats_failed = self._safe(lambda: self._rule_stats() or {}, {})
         enabled = list(stats.get("enabled") or [])
         weights = stats.get("weights") or None
 
@@ -125,8 +135,11 @@ class MarketPulseService:
             evaluated = {"fired": [], "watch": []}
             deg_rules = degraded
         else:
+            latest = max((str(s[-1].get("trade_date") or "") for s in series_by_sector.values() if s), default="")
+            current_series = {key: seq for key, seq in series_by_sector.items()
+                              if seq and str(seq[-1].get("trade_date") or "") == latest}
             evaluated, deg_rules = self._safe(
-                lambda: self._turning_rules(series_by_sector, weights=weights,
+                lambda: self._turning_rules(current_series, weights=weights,
                                             enabled=enabled),
                 {"fired": [], "watch": []})
             deg_rules = deg_rules or degraded
@@ -138,6 +151,10 @@ class MarketPulseService:
                 last = series[-1]
                 latest_date = max(latest_date, str(last.get("trade_date") or ""))
                 provisional = provisional or bool(last.get("provisional"))
+        landscape = sector_landscape(series_by_sector, reference_date=as_of or datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat())
+        status = ("data_error" if degraded else "no_data" if not series_by_sector else
+                  "validation_error" if stats_failed else "unvalidated" if not enabled else
+                  "active" if evaluated.get("fired") or evaluated.get("watch") else "no_trigger")
         return {
             "fired": evaluated.get("fired", []),
             "watch": evaluated.get("watch", []),
@@ -146,6 +163,11 @@ class MarketPulseService:
             "as_of": latest_date or None,
             "provisional": provisional,
             "degraded": bool(deg_rules),
+            "landscape": landscape, "status": status,
+            "validation_as_of": stats.get("generated_at"),
+            "coverage": {"total": len(landscape), "eligible": sum(r["eligible"] for r in landscape),
+                         "stale": sum(r["stale"] for r in landscape),
+                         "insufficient": sum(r["history_count"] < 20 for r in landscape)},
         }
 
     # ------------------------------------------------------------ 对外
@@ -173,6 +195,8 @@ class MarketPulseService:
                 "watch": sector_part["watch"],
                 "enabled": sector_part["enabled"],
                 "rule_stats": sector_part["rule_stats"],
+                "landscape": sector_part["landscape"], "status": sector_part["status"],
+                "coverage": sector_part["coverage"], "validation_as_of": sector_part["validation_as_of"],
             },
             "degraded": {
                 "index": index_part["degraded_index"],

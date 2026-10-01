@@ -87,6 +87,8 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = project_root()
 USER_ROOT = user_root()
 ensure_user_subdirs(USER_ROOT)
+# WebUI与桌面使用相同持久数据目录；显式数据库/数据目录设置仍优先。
+os.environ.setdefault("KRONOS_DATA_DIR", str(USER_ROOT / "data"))
 RESULTS_DIR = results_dir()
 REPORT_DIRS = {
     "results": RESULTS_DIR,
@@ -274,7 +276,7 @@ def _market_pulse_index_quotes(symbols):
 def _market_pulse_series(end_date=None, limit=60):
     from analysis import sector_series
 
-    return sector_series.load_all_series(end_date=end_date, limit=limit)
+    return sector_series.load_all_series(end_date=end_date, limit=limit, include_stale=True)
 
 
 def _market_pulse_rules(series_by_sector, weights=None, enabled=None):
@@ -307,7 +309,7 @@ def market_pulse_payload(as_of=None):
 
 
 def _trading_plan_kline(code):
-    payload, error = STOCK_KLINE_SERVICE.get_payload(code, period="daily", limit=120)
+    payload, error = STOCK_KLINE_SERVICE.get_payload(code, period="daily", limit=240)
     if error:
         raise ValueError(error)
     return payload or {}

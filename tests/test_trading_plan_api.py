@@ -9,6 +9,7 @@ from tests.test_trading_plan_service import service
 @pytest.fixture
 def module(tmp_path, monkeypatch):
     monkeypatch.setenv("KRONOS_USER_DIR", str(tmp_path))
+    monkeypatch.setenv("KRONOS_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("KRONOS_DISABLE_QUANT_RADAR_AUTOSAVE", "1")
     sys.modules.pop("webui.core", None)
     sys.modules.pop("webui.robyn_app", None)
@@ -55,6 +56,9 @@ def test_desktop_template_loads_plans_for_watchlist_and_stock(module):
     with TestClient(module.app) as client:
         response = client.get("/desktop/watchlist")
     assert response.status_code == 200
-    assert 'id="tradingPlanBoard"' in response.text
-    assert 'id="tradingPlanStock"' in response.text
-    assert "/static/lumo_trading_plan.js?v=" in response.text
+    assert 'id="tradingPlanBoard"' not in response.text
+    assert 'id="tradingPlanStock"' not in response.text
+    assert 'id="suitePaneMarketCycle"' in response.text
+    assert 'id="suitePaneRiskControl"' in response.text
+    assert "/static/lumo_operations.js?v=" in response.text
+    assert "/static/lumo_operations.css?v=" in response.text
