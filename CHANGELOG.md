@@ -6,9 +6,59 @@
 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
 版本号约定：发布分支采用 `V主.次.修订`（如 `V2.1.4`），Git tag 采用小写 `v主.次.修订`
-（本版本为 `v2.1.4`）；桌面安装包（`package.json` / `src-tauri/tauri.conf.json`）另有独立的
+（本版本为 `v2.1.6`）；桌面安装包（`package.json` / `src-tauri/tauri.conf.json`）另有独立的
 bundle 版本号（当前 `1.1.6`）；分析引擎的内部评分里程碑（v1 → v25 → m1）在文末附录单独标注，
 不与发布版本混用。
+
+## [v2.1.6] - 2026-10-01
+
+统一操作计划版本（tag：`v2.1.6`，对应发布分支 `v2.1.6`，桌面 bundle：`1.1.6`）。
+变更范围自上一个发布 tag `v2.1.5`（`21bda5a`，2026-09-29）起算。
+
+### 新增
+- **统一操作计划**（`analysis/trading_plan.py`、`webui/services/trading_plan_service.py`）：
+  打通「大盘 → 板块 → 个股」三层门控，覆盖自选股、挖掘机会与模拟持仓；输出买入区、
+  试仓与加仓额度、锁定止损、分档止盈和减仓条件，替换页面中无条件的「越跌越加仓」方案；
+  数据缺失或过期时暂停新增仓位，锁定计划在刷新行情后不会下移止损线。
+- **操作模型与板块轮动**（`analysis/operation_models.py`、`analysis/sector_opportunities.py`）：
+  在 K 线原位展示三类操作模型的确认条件与板块轮动机会；板块面板同时展示持续相对强度、
+  广度、资金状态与已验证拐点，走势由成分股聚合收益绘制，不合成虚假 K 线。
+- **前端面板**：新增 `webui/static/lumo_operations.css` / `.js` 与
+  `webui/static/lumo_trading_plan.css` / `.js`，并在 `webui/templates/desktop.html` 接入新页签。
+- **自选股路径解析**（`webui/services/paths.py`）：新增自选股存储路径解析，支持升级迁移与备份恢复。
+- **测试**：新增 `test_trading_plan.py`、`test_trading_plan_api.py`、`test_trading_plan_service.py`、
+  `test_operation_models.py`、`test_sector_opportunities.py`、`test_watchlist_paths.py`；并扩充
+  `test_watchlist_service.py`、`test_market_pulse_service.py`、`test_robyn_app.py`。
+
+### 变更
+- `webui/core.py`、`webui/robyn_app.py`、`webui/services/market_pulse_service.py`、
+  `webui/services/kline_service.py`、`analysis/sector_series.py` 适配新增服务与路由。
+- README 截图顺序校正（个股工作台、龙虎榜、量化活跃度），并补充自选股 / K 线与操作计划说明。
+
+### 修复
+- **修复升级后自选股清空**：新增迁移与备份恢复链路，保证历史自选不因升级丢失。
+
+### 文档
+- README 新增「AI 软件定制 · 智能体开发 · 业务自动化」板块与微信联系二维码。
+
+## [v2.1.5] - 2026-09-29
+
+评分优化版本（tag：`v2.1.5`，对应发布分支 `v2.1.5`，桌面 bundle：`1.1.6`）。
+本节为事后补记 —— `v2.1.5` 发布时已打 tag，但当时未同步更新本文件。
+
+### 新增
+- **评分与机会审计脚本**：新增 `scripts/optimize_factor_scores.py`、
+  `scripts/analyze_installed_opportunities.py`、`scripts/benchmark_installed_opportunities.py`。
+- **测试**：新增 `test_factor_score_optimization.py`、`test_installed_opportunity_audit.py`。
+
+### 变更
+- **综合分算法**：调整为「原综合分 + 当日涨幅分段校准 + 板块分数与近 3 日涨幅的交互分」。
+
+### 修复
+- 修复 README 中的图片引用错误。
+
+### 文档
+- README 补充 LINUX DO 社区友链。
 
 ## [v2.1.4] - 2026-09-12
 
