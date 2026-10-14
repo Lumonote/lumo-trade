@@ -1,0 +1,32 @@
+.panic-mount { display: block; margin: 5px 0; }
+.panic-badge { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid currentColor; border-radius: 5px; color: var(--panic-color,#8995a4); font-size: 11px; line-height: 1.4; font-weight: 400; }
+.panic-badge b { font-weight: 600; }
+.panic-badge small { font-size: 10px; opacity: .8; }
+.panic-compact { flex-wrap: nowrap; gap: 3px; padding: 3px 4px; white-space: nowrap; }
+.panic-calm,.panic-low { --panic-color: #378278; }
+.panic-neutral { --panic-color: #928268; }
+.panic-high { --panic-color: #d39236; }
+.panic-extreme { --panic-color: #d9635a; }
+.panic-unknown { --panic-color: #8995a4; }
+.panic-mount .panic-badge,.panic-details .panic-badge { color: var(--panic-color); }
+.panic-badge b,.panic-badge small { color: inherit; }
+.panic-details { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border,#dbe3ee); border-radius: 6px; }
+.panic-details summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; cursor: pointer; }
+.panic-details summary > span:last-child,.panic-details p { font-size: 11px; color: #8995a4; }
+.panic-factors { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; }
+.mc-panel-row .panic-mount { grid-column: 1 / -1; justify-self: start; }
+.mc-panel-head .panic-mount { flex-basis: 100%; }
+.mc-panel-head { flex-wrap: wrap; }
+.mc-tape-index .panic-mount { margin: 2px 0 0; }
+.mc-tape-index .panic-badge span,.mc-tape-index .panic-badge b { font-size: 10px; }
+.market-corner-head .panic-badge { border: 0; padding: 2px 0; }
+body[data-page="market_cloud"] .mc-terminal { grid-template-rows: 104px minmax(0,1fr) 42px; }
+body[data-page="market_cloud"] .mc-index-tape { gap: clamp(8px,1.2vw,18px); }
+body[data-page="market_cloud"] .mc-terminal .panic-badge,
+body[data-page="market_cloud"] .mc-terminal .panic-badge b,
+body[data-page="market_cloud"] .mc-terminal .panic-badge small { color: var(--panic-color); font-size: 11px; line-height: 1.4; }
+body[data-page="market_cloud"] .mc-terminal .panic-badge b { font-weight: 600; }
+body[data-page="market_cloud"] .mc-sector-panel .mc-panel-head .panic-mount { grid-column: 1 / -1; }
+@media (max-width: 860px) { body[data-page="market_cloud"] .mc-terminal { grid-template-rows: 166px minmax(0,1fr) 142px; } }
+@media (max-width: 640px) { body[data-page="market_cloud"] .mc-terminal { grid-template-rows: 224px minmax(0,1fr) 142px; } }
+@media (max-width: 760px) { .panic-factors { flex-direction: column; } }

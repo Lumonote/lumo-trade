@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 
 from analysis.limit_up_patterns import bars_from_records, detect_kline_patterns
 from analysis.operation_models import analyze_operations
+from analysis.panic_indicator import panic_from_bars, panic_indicator
 from webui.services.analysis_jobs import normalize_stock_codes, safe_int
 from webui.services.http_client import request_json
 
@@ -314,6 +315,7 @@ class StockKlineService:
                 'source': 'sina',
                 'available': True,
                 'records': sina_records,
+                'panic': panic_from_bars(sina_records, quote=quote_block, period=normalized_period),
                 'patterns': self._pattern_payload(sina_records, code, name),
                 'operation': analyze_operations(sina_records, period=normalized_period),
                 'quote': quote_block,
@@ -332,6 +334,7 @@ class StockKlineService:
                 'source': f'local:{local_source}',
                 'available': True,
                 'records': local_records,
+                'panic': panic_from_bars(local_records, quote=quote_block, period=normalized_period),
                 'patterns': self._pattern_payload(local_records, code, name),
                 'operation': analyze_operations(local_records, period=normalized_period),
                 'quote': quote_block,
@@ -348,6 +351,7 @@ class StockKlineService:
                 'source': 'sina',
                 'available': False,
                 'records': [],
+                'panic': panic_indicator(),
                 'message': '暂无K线数据：本地没有该股票数据，Sina 行情接口暂不可用。',
                 'detail': sina_error,
             }, None
@@ -359,5 +363,6 @@ class StockKlineService:
             'source': 'sina',
             'available': False,
             'records': [],
+            'panic': panic_indicator(),
             'message': '暂无K线数据：本地没有该股票数据，Sina 行情接口未返回记录。',
         }, None

@@ -21,6 +21,7 @@ from analysis import index_pulse as ip
 from analysis.market_regime import position_advice
 from analysis.operation_models import analyze_operations, normalize_bars
 from analysis.sector_opportunities import sector_landscape
+from analysis.panic_indicator import panic_from_bars, panic_from_quotes
 
 DISCLAIMER = ("指数状态与板块信号基于公开数据的统计描述,不构成投资建议;"
               "盘中信号随当日数据变化,收盘后方为定稿。")
@@ -84,6 +85,7 @@ class MarketPulseService:
             charts_by_symbol[symbol] = {
                 "records": normalize_bars(merged),
                 "operation": analyze_operations(merged),
+                "panic": panic_from_bars(merged, quote=quote, scope="index"),
             }
 
         cards: List[Dict[str, Any]] = []
@@ -186,6 +188,10 @@ class MarketPulseService:
             "as_of": {"index": index_part["as_of"], "sector": sector_part["as_of"],
                       "provisional": sector_part["provisional"]},
             "indices": index_part["indices"],
+            "panic": panic_from_quotes([
+                {"change_pct": next((f["value"] for f in c["panic"]["factors"] if f["key"] == "change"), None)}
+                for c in index_part["indices"]
+            ], breadth_label="四大指数上涨占比", as_of=index_part["as_of"]),
             "style": index_part["style"],
             "level": index_part["level"],
             "position_advice": index_part["position_advice"],

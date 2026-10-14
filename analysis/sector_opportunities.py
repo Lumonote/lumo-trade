@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import date
 from analysis.operation_models import numeric
+from analysis.panic_indicator import panic_from_sector_series
 
 LABELS = {"leading": "领涨", "weakening": "转弱", "lagging": "落后", "improving": "改善", "unknown": "历史不足"}
 
@@ -90,6 +91,7 @@ def sector_landscape(series_by_sector, *, reference_date=None):
             "return20": _return(rows[-20:], "pct_chg_mean") if len(rows) >= 20 else None,
             "breadth": breadth, "net_amount": numeric(last.get("net_amount")),
             "flow5": round(flow5, 2) if flow5 is not None else None, "inflow_streak": streak,
+            "panic": panic_from_sector_series(rows, stale=stale),
             "eligible": eligible, "curve": curve,
             "data_status": "数据滞后" if stale else "历史不足20日" if not sufficient else "相对强度数据缺失" if strength is None else "盘中待确认" if last.get("provisional") else "收盘数据",
             "next_condition": "保持相对强度、广度及资金共振" if eligible else "等待相对强度改善、上涨广度≥50%与5日净流入确认",

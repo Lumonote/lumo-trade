@@ -81,6 +81,7 @@ from webui.services.command_center_service import CommandCenterService
 from webui.services.market_pulse_service import MarketPulseService
 from webui.services.trading_plan_service import TradingPlanService
 from data_store import opportunity_repo
+from analysis.panic_indicator import panic_indicator, panic_from_bars, panic_from_quotes
 
 logger = logging.getLogger(__name__)
 
@@ -2309,6 +2310,7 @@ def _board_stock_row(s):
         'change_pct': s.get('change_pct'),
         'main_net_inflow': s.get('main_net_inflow'),
         'main_net_inflow_text': s.get('main_net_inflow_text') or '',
+        'panic': panic_indicator(change_pct=s.get('change_pct'), as_of=s.get('trade_date') or s.get('updated_at')),
     }
 
 
@@ -3598,6 +3600,8 @@ def _stock_context_payload(stock_code, stock_name=''):
             'market': _market_symbol_for_code(code),
         },
         'quote': latest_quote,
+        'panic': (kline_payload.get('panic') if (kline_payload.get('panic') or {}).get('available')
+                  else panic_from_bars(kline_payload.get('records') or [], quote=latest_quote)),
         'opportunity': opportunity_match,
         'opportunity_report': opportunity.get('latest_report'),
         'analysis_results': _load_stock_batch_results(code),
@@ -3783,6 +3787,8 @@ def _real_sector_rows(intelligence):
             'monitored_count': 0,
             'main_net_inflow_text': board.get('main_net_inflow_text'),
             'is_hot': change >= 2.0,
+            'panic': panic_indicator(change_pct=board.get('change_pct'), scope='sector',
+                                     as_of=board.get('trade_date') or board.get('updated_at')),
             'leader': None,                      # 领涨股本期后置（spec §10）
         })
     return rows
@@ -3835,12 +3841,20 @@ def _build_market_dashboard(force_market_refresh=False):
             })
 
     primary_index = next((item for item in indices if item["code"] == "sh000001"), indices[0] if indices else None)
+    for item in indices:
+        item['panic'] = panic_indicator(change_pct=(raw_indices.get(item['code']) or {}).get('change_pct'),
+                                        scope='index', as_of=item.get('updated_at'))
 
     return {
         'index': primary_index.get("price") if primary_index else None,
         'index_change': primary_index.get("change_pct") if primary_index else None,
         'primary_index': primary_index,
         'indices': indices,
+        'panic': panic_from_quotes([
+            {'change_pct': (raw_indices.get(item['code']) or {}).get('change_pct'), 'available': item['available']}
+            for item in indices
+        ], breadth_label='展示指数上涨占比',
+                                   as_of=_format_datetime(index_last_update) if index_last_update else None),
         'index_available': bool(primary_index and primary_index.get("available")),
         'index_last_update': _format_datetime(index_last_update) if index_last_update else None,
         'total_particles': len(stocks),
@@ -3853,6 +3867,7 @@ def _build_market_dashboard(force_market_refresh=False):
                 'name': stock.get('name'),
                 'price': round(_safe_float(stock.get('price'), 0.0), 2),
                 'change': round(_safe_float(stock.get('change'), 0.0), 2),
+                'panic': panic_indicator(change_pct=stock.get('change')),
                 'sector': SECTORS[stock.get('sectorId', 0)]['name'] if stock.get('sectorId') is not None else '',
             }
             for stock in top_movers
@@ -3893,6 +3908,11 @@ def _market_cloud_payload(force_refresh=False, limit=5000, trade_date=None):
 
     dashboard = _build_market_dashboard(force_market_refresh=force_refresh)
     source = (stocks[0].get('source') if stocks and isinstance(stocks[0], dict) else None)
+    stocks = [dict(s, panic=panic_indicator(change_pct=s.get('change_pct'),
+                                           as_of=s.get('trade_date') or s.get('updated_at'))) for s in stocks]
+    sector_samples = defaultdict(list)
+    for stock in stocks:
+        sector_samples[stock.get('industry') or stock.get('sector') or '其他'].append(stock)
     return {
         'generated_at': datetime.datetime.now().isoformat(),
         'source': source or ('tushare_market_cloud' if normalized_trade_date else ('market_cloud' if stocks else 'dashboard_fallback')),
@@ -3904,6 +3924,10 @@ def _market_cloud_payload(force_refresh=False, limit=5000, trade_date=None):
             else normalized_trade_date
         ),
         'stocks': stocks,
+        'panic': panic_from_quotes(stocks, breadth_label='云图样本上涨占比',
+                                   as_of=stocks[0].get('trade_date') if stocks else None),
+        'sector_panics': {name: panic_from_quotes(rows, scope='sector', breadth_label='云图行业样本上涨占比',
+                                                 as_of=rows[0].get('trade_date')) for name, rows in sector_samples.items()},
         'indices': dashboard.get('indices') or [],
         'primary_index': dashboard.get('primary_index'),
         'sectors': dashboard.get('sectors') or [],

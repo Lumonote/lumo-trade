@@ -62,6 +62,7 @@
 
   function drawChart(element, payload, options={}) {
     if (!element) return;
+    window.LumoPanic?.mount(element.parentElement,payload.panic,{detail:true,title:"恐慌指标"});
     for (const old of charts.keys()) if (!old.isConnected) { resizeObserver.unobserve(old); charts.delete(old); }
     const operation=payload.operation||{}, levels=options.levels||operation.levels||{}, all=payload.records||[], rows=all.slice(-(options.limit||120));
     charts.set(element,{payload,options});
@@ -160,6 +161,7 @@
     let root=row.querySelector(".op-mini");if(!root){root=document.createElement("div");root.className="op-mini";row.append(root);}
     root.innerHTML=`<div class="op-inline-chart" tabindex="0" role="button" aria-label="查看${esc(plan.name||code)}结构K线">${candleSvg(plan.chart||{},{mini:true,limit:35})}</div><div class="op-mini-copy"><strong>${esc(op.stage?.label||"数据不足")} · ${esc(plan.model?.label||"结构观察")}</strong><span>${esc(plan.status_label)}${finite(l.entry_high)?` · 触发 ${fmt(l.entry_low)}–${fmt(l.entry_high)} · 失效 ${fmt(l.stop_loss)}`:""}</span><small>${esc(op.as_of||plan.data_as_of||"—")} · ${esc(op.provisional?"盘中待确认":plan.candidate?.reason||op.reason||"点击K线查看结构")}</small></div>`;
     const target=root.querySelector(".op-inline-chart");
+    window.LumoPanic?.mount(root,plan.chart?.panic);
     const open=event=>{event.stopPropagation();openStockKlineModal(code,240,{stockName:plan.name}).catch(()=>{});};
     target?.addEventListener("click",open);target?.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();open(event);}});
   }
@@ -198,14 +200,14 @@
   }
   function sectorDetail(host,row) {
     if(!row)return;
-    host.innerHTML=`<div class="op-head"><b>${esc(row.sector)}（${esc(row.sector_type)}） · ${esc(row.state_label)}</b><span class="op-meta">${esc(row.data_status)} · ${esc(row.trade_date)}</span></div>${curveSvg(row)}<p class="op-note">20日相对 ${pct(row.relative20)} · 上涨广度 ${finite(row.breadth)?fmt(row.breadth*100,0)+"%":"—"} · 5日净流 ${fmt(row.flow5,0)} 万元 · 连续流入 ${row.inflow_streak} 日</p><p class="op-note">${esc(row.next_condition)}。${esc(row.basis)}</p>`;
+    host.innerHTML=`<div class="op-head"><b>${esc(row.sector)}（${esc(row.sector_type)}） · ${esc(row.state_label)}</b><span class="op-meta">${esc(row.data_status)} · ${esc(row.trade_date)}</span></div>${curveSvg(row)}${window.LumoPanic?.details(row.panic)||""}<p class="op-note">20日相对 ${pct(row.relative20)} · 上涨广度 ${finite(row.breadth)?fmt(row.breadth*100,0)+"%":"—"} · 5日净流 ${fmt(row.flow5,0)} 万元 · 连续流入 ${row.inflow_streak} 日</p><p class="op-note">${esc(row.next_condition)}。${esc(row.basis)}</p>`;
   }
   function renderSectors(host,data) {
     const rows=data.sectors?.landscape||[], coverage=data.sectors?.coverage||{};
     const statuses={no_data:"尚未形成板块日序列，请在资金数据入库后刷新",data_error:"板块数据读取失败，请稍后重试",validation_error:"拐点校验结果读取失败，趋势状态仍可观察",unvalidated:"拐点规则未通过校验，趋势状态仍可观察",no_trigger:"今日无已验证新拐点，持续趋势见下方",active:"已验证拐点与持续趋势分别展示"};
     const filtered=rows.filter(r=>selectedState==="all"||r.state===selectedState);
     host.innerHTML=`<div class="op-sector-toolbar">${[["all","全部"],["leading","领涨"],["improving","改善"],["weakening","转弱"],["lagging","落后"]].map(([key,label])=>`<button type="button" data-op-state="${key}" class="${selectedState===key?"active":""}">${label}${key==="all"?` ${rows.length}`:` ${rows.filter(r=>r.state===key).length}`}</button>`).join("")}<span class="op-meta">共振观察 ${coverage.eligible||0} · 滞后 ${coverage.stale||0}</span></div>
-      ${rows.length?`<div class="op-sector-layout"><div>${rotationSvg(rows)}<p class="op-note">相对强度 × 动量 · 点击板块查看走势。相对领涨不等同于绝对上涨。</p></div><div class="op-sector-table"><table><thead><tr><th>板块</th><th>状态</th><th>相对20日</th><th>上涨广度</th></tr></thead><tbody>${filtered.map(r=>`<tr><td><button type="button" data-op-sector="${esc(sectorKey(r))}">${esc(r.sector)}${r.stale?" · 滞后":""}<small class="op-meta"> ${esc(r.sector_type)}</small></button></td><td>${esc(r.state_label)}</td><td class="${r.relative20>=0?"op-up":"op-down"}">${pct(r.relative20)}</td><td>${finite(r.breadth)?fmt(r.breadth*100,0)+"%":"—"}</td></tr>`).join("")||'<tr><td colspan="4">该状态暂无板块，可切换全部</td></tr>'}</tbody></table></div></div><div class="op-sector-detail"></div>`:""}
+      ${rows.length?`<div class="op-sector-layout"><div>${rotationSvg(rows)}<p class="op-note">相对强度 × 动量 · 点击板块查看走势。相对领涨不等同于绝对上涨。</p></div><div class="op-sector-table"><table><thead><tr><th>板块</th><th>状态</th><th>相对20日</th><th>上涨广度</th><th>恐慌指标</th></tr></thead><tbody>${filtered.map(r=>`<tr><td><button type="button" data-op-sector="${esc(sectorKey(r))}">${esc(r.sector)}${r.stale?" · 滞后":""}<small class="op-meta"> ${esc(r.sector_type)}</small></button></td><td>${esc(r.state_label)}</td><td class="${r.relative20>=0?"op-up":"op-down"}">${pct(r.relative20)}</td><td>${finite(r.breadth)?fmt(r.breadth*100,0)+"%":"—"}</td><td>${window.LumoPanic?.badge(r.panic)||"数据不足"}</td></tr>`).join("")||'<tr><td colspan="5">该状态暂无板块，可切换全部</td></tr>'}</tbody></table></div></div><div class="op-sector-detail"></div>`:""}
       <div class="op-events">${[...(data.sectors?.fired||[]),...(data.sectors?.watch||[])].map(r=>`<span class="op-event">${esc(r.sector)} · ${r.provisional?"盘中待确认":(data.sectors.fired||[]).includes(r)?"拐点触发":"临界观察"}</span>`).join("")}</div><p class="op-note">${esc(statuses[data.sectors?.status]||"等待板块状态")} · ${esc(data.as_of?.sector||"日期未知")}</p>`;
     host.querySelectorAll("[data-op-state]").forEach(b=>b.addEventListener("click",()=>{selectedState=b.dataset.opState;renderSectors(host,data);}));
     const choose=row=>{selectedSector=sectorKey(row);sectorDetail(host.querySelector(".op-sector-detail"),row);host.querySelector(".op-rotation").outerHTML=rotationSvg(rows);bindRotation();};
@@ -218,7 +220,7 @@
     const signature=JSON.stringify([data.as_of,data.indices?.map(i=>i.close),data.sectors]);
     if(signature===pulseSignature&&host.querySelector("[data-op-market]"))return;
     pulseSignature=signature;
-    host.innerHTML=`<section class="panel" data-op-market><div class="panel-header"><h2 class="panel-title">指数风向</h2><span class="op-meta">${esc(data.as_of?.index||"数据待补齐")}</span></div><div class="panel-body"><div class="op-index-grid">${(data.indices||[]).map((r,i)=>`<div class="mp-index-card"><div class="mp-name">${esc(r.name)}</div><div class="op-index-number">${fmt(r.close)} <small class="op-meta">5日 ${pct(r.chg_5d)}</small></div><div class="op-index-stage"><span>${esc(r.operation?.stage?.label||r.pulse_label)}</span><span>${esc(r.operation?.dow?.label||"")}</span></div><button type="button" class="op-index-candle" data-op-index="${i}" aria-label="展开${esc(r.name)}趋势K线">${candleSvg(r,{mini:true,limit:40})}</button><div class="op-meta">${esc(r.operation?.provisional?"当日K线待收盘":"收盘结构")} · 点击K线展开</div></div>`).join("")||'<div class="op-error">指数行情暂不可用</div>'}</div><p class="op-note">${esc(data.style?.label||"")} · ${esc(data.position_advice||"")}</p><div data-op-index-detail hidden></div></div></section><section class="panel"><div class="panel-header"><h2 class="panel-title">板块机会与拐点</h2><span class="op-meta">相对强度 · 广度 · 资金持续性</span></div><div class="panel-body" id="opSectorBody"></div></section>`;
+    host.innerHTML=`<section class="panel" data-op-market><div class="panel-header"><h2 class="panel-title">指数风向</h2><span class="op-meta">${esc(data.as_of?.index||"数据待补齐")}</span></div><div class="panel-body"><div class="op-index-grid">${(data.indices||[]).map((r,i)=>`<div class="mp-index-card"><div class="mp-name">${esc(r.name)}</div>${window.LumoPanic?.badge(r.panic)||""}<div class="op-index-number">${fmt(r.close)} <small class="op-meta">5日 ${pct(r.chg_5d)}</small></div><div class="op-index-stage"><span>${esc(r.operation?.stage?.label||r.pulse_label)}</span><span>${esc(r.operation?.dow?.label||"")}</span></div><button type="button" class="op-index-candle" data-op-index="${i}" aria-label="展开${esc(r.name)}趋势K线">${candleSvg(r,{mini:true,limit:40})}</button><div class="op-meta">${esc(r.operation?.provisional?"当日K线待收盘":"收盘结构")} · 点击K线展开</div></div>`).join("")||'<div class="op-error">指数行情暂不可用</div>'}</div><p class="op-note">${esc(data.style?.label||"")} · ${esc(data.position_advice||"")}</p><div data-op-index-detail hidden></div></div></section><section class="panel"><div class="panel-header"><h2 class="panel-title">板块机会与拐点</h2><span class="op-meta">相对强度 · 广度 · 资金持续性</span></div><div class="panel-body" id="opSectorBody"></div></section>`;
     host.querySelectorAll("[data-op-index]").forEach(button=>button.addEventListener("click",()=>{
       const index=data.indices[Number(button.dataset.opIndex)], detail=host.querySelector("[data-op-index-detail]");
       detail.hidden=false;
@@ -226,6 +228,7 @@
       chartAt("opIndexChart",index,{height:380});
       detail.querySelector("[data-op-close-index]").addEventListener("click",()=>{detail.hidden=true;});
     }));
+    window.LumoPanic?.mount(host.querySelector("[data-op-market] .panel-header"),data.panic,{title:"大盘恐慌"});
     renderSectors(host.querySelector("#opSectorBody"),data);
   }
   window.LumoOperations={renderMarketPulse};
