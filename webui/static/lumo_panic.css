@@ -14,7 +14,9 @@
 .panic-details summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; cursor: pointer; }
 .panic-details summary > span:last-child,.panic-details p { font-size: 11px; color: #8995a4; }
 .panic-factors { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; }
-.mc-panel-row .panic-mount { grid-column: 1 / -1; justify-self: start; }
+.mc-panel-row .panic-mount { justify-self: end; min-width: 0; margin: 0; }
+body[data-page="market_cloud"] .mc-terminal .mc-panel-row .panic-badge,
+body[data-page="market_cloud"] .mc-terminal .mc-panel-row .panic-badge b { font-size: 10px; }
 .mc-panel-head .panic-mount { flex-basis: 100%; }
 .mc-panel-head { flex-wrap: wrap; }
 .mc-tape-index .panic-mount { margin: 2px 0 0; }

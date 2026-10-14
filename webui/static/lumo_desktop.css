@@ -6429,6 +6429,8 @@ body[data-page="market_cloud"] .mc-zoom-back:focus-visible {
 
 body[data-page="market_cloud"] .mc-sector-panel {
   width: min(438px, 34vw);
+  display: flex;
+  flex-direction: column;
   padding: 0;
   overflow: hidden;
   border: 1px solid rgba(28, 34, 43, 0.38);
@@ -6438,6 +6440,14 @@ body[data-page="market_cloud"] .mc-sector-panel {
   box-shadow: 0 22px 58px rgba(0, 0, 0, 0.42);
   backdrop-filter: blur(4px);
   pointer-events: auto;
+}
+
+/* 头部/大字块/统计条固定，股票列表吸收剩余高度并自行滚动——
+   避免面板 max-height 裁剪列表底部导致最后几行永远看不到。 */
+body[data-page="market_cloud"] .mc-sector-panel > .mc-panel-head,
+body[data-page="market_cloud"] .mc-sector-panel > .mc-panel-feature,
+body[data-page="market_cloud"] .mc-sector-panel > .mc-panel-stats {
+  flex: 0 0 auto;
 }
 
 body[data-page="market_cloud"] .mc-sector-panel.pinned {
@@ -6588,6 +6598,8 @@ body[data-page="market_cloud"] .mc-sector-panel .mc-panel-stats b {
 
 body[data-page="market_cloud"] .mc-sector-panel .mc-panel-list {
   display: block;
+  flex: 0 1 auto;
+  min-height: 0;
   max-height: 438px;
   overflow: auto;
   overscroll-behavior: contain;
@@ -6599,9 +6611,9 @@ body[data-page="market_cloud"] .mc-sector-panel .mc-panel-list {
 
 body[data-page="market_cloud"] .mc-sector-panel .mc-panel-row {
   width: 100%;
-  grid-template-columns: minmax(0, 1fr) 82px 72px 78px;
+  grid-template-columns: minmax(0, 1fr) 70px 62px 60px 52px;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-height: 42px;
   padding: 0 12px 0 18px;
   border: 0;

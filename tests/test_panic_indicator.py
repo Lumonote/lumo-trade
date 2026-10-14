@@ -99,7 +99,7 @@ def test_aggregate_excludes_missing_unavailable_and_invalid_quotes():
     assert panic_from_quotes([])["available"] is False
 
 
-def test_cloud_and_dashboard_expose_independent_scope_indicators(monkeypatch):
+def test_cloud_and_dashboard_share_market_panic_while_stock_scopes_remain_independent(monkeypatch):
     import time
     import webui.core as core
 
@@ -120,8 +120,14 @@ def test_cloud_and_dashboard_expose_independent_scope_indicators(monkeypatch):
         {"code":"600001","industry":"银行","change_pct":-5,"trade_date":"20261014"},
         {"code":"600002","industry":"银行","change_pct":2,"trade_date":"20261014"},
         {"code":"600003","industry":"银行","change_pct":None,"trade_date":"20261014"}])
+    # 大盘恐慌统一为指数口径：云图徽章与总览消费同一份 dashboard 指标，两页永远一致。
+    monkeypatch.setitem(core.market_state,"indices",{"sh000001":{"price":3000,"change_pct":-2}})
     cloud = core._market_cloud_payload()
-    assert cloud["panic"]["sample_count"] == 2
+    assert cloud["panic"] == core._build_market_dashboard()["panic"]
+    # 样本数=1 指的是唯一有涨跌的指数（sh000001），不是云图个股样本（3 只里的 2 只）。
+    assert cloud["panic"]["sample_count"] == 1
+    assert any(f["key"] == "breadth" and "指数" in f["label"] for f in cloud["panic"]["factors"])
+    # 板块与个股层仍是各自样本的独立口径。
     assert cloud["sector_panics"]["银行"]["scope"] == "sector"
     assert cloud["stocks"][0]["panic"]["scope"] == "stock"
     assert cloud["stocks"][2]["panic"]["available"] is False

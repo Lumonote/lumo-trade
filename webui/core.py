@@ -3924,8 +3924,9 @@ def _market_cloud_payload(force_refresh=False, limit=5000, trade_date=None):
             else normalized_trade_date
         ),
         'stocks': stocks,
-        'panic': panic_from_quotes(stocks, breadth_label='云图样本上涨占比',
-                                   as_of=stocks[0].get('trade_date') if stocks else None),
+        # 大盘恐慌与总览共用同一份 dashboard 指标（指数口径），避免两页徽章数字不一致；
+        # 板块/个股层仍用各自样本，见 sector_panics 与 stocks[].panic。
+        'panic': dashboard.get('panic'),
         'sector_panics': {name: panic_from_quotes(rows, scope='sector', breadth_label='云图行业样本上涨占比',
                                                  as_of=rows[0].get('trade_date')) for name, rows in sector_samples.items()},
         'indices': dashboard.get('indices') or [],
