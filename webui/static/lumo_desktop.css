@@ -5956,9 +5956,9 @@ body[data-page="market_cloud"] .mc-terminal-brand small {
 body[data-page="market_cloud"] .mc-index-tape {
   min-width: 0;
   display: flex;
-  justify-content: center;
+  justify-content: safe center;
   gap: clamp(18px, 3vw, 48px);
-  overflow: hidden;
+  overflow-x: auto;
   white-space: nowrap;
 }
 
