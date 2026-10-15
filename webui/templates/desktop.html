@@ -8,6 +8,9 @@
     <link rel="stylesheet" href="/static/lumo_desktop.css?v={{ asset_v('lumo_desktop.css') }}" />
     <link rel="stylesheet" href="/static/lumo_operations.css?v={{ asset_v('lumo_operations.css') }}" />
     <link rel="stylesheet" href="/static/lumo_panic.css?v={{ asset_v('lumo_panic.css') }}" />
+    {% if active_page == 'growth_research' %}
+    <link rel="stylesheet" href="/static/lumo_growth_research.css?v={{ asset_v('lumo_growth_research.css') }}" />
+    {% endif %}
   </head>
 	  <body data-page="{{ active_page }}" data-desktop-mode="{{ '1' if desktop_mode else '0' }}">
 	    <div class="app-shell" id="appShell">
@@ -1005,60 +1008,8 @@
         </div>
         {% endif %}
 
-        {% if active_page == 'star_orbit' %}
-        <section class="orbit-layout">
-          <div class="orbit-toolbar">
-            <div><span id="orbitMeta" class="panel-meta">星轨读取中…</span></div>
-            <div class="actions">
-              <button id="orbitViewToggle" class="button secondary" type="button" title="星轨/列表切换">列表视图</button>
-              <button id="orbitAddRingBtn" class="button secondary" type="button">+ 轨道环</button>
-              <button id="orbitAddBoardBtn" class="button" type="button">+ 板块/概念</button>
-              <button id="orbitResetBtn" class="button secondary" type="button" title="清空并重灌默认 物理AI/AI产业链 映射">恢复默认</button>
-              <button id="orbitRefreshBtn" class="button secondary" type="button">刷新</button>
-            </div>
-          </div>
-          <div class="orbit-main">
-            <div class="orbit-stage panel">
-              <div id="orbitSvgWrap" class="orbit-svg-wrap">
-                <p class="muted" style="padding:24px;">正在构建星轨…</p>
-              </div>
-              <div id="orbitLegend" class="orbit-legend"></div>
-            </div>
-            <aside class="orbit-side panel">
-              <div class="panel-header">
-                <h2 class="panel-title" id="orbitSideTitle">板块详情</h2>
-                <span id="orbitSideMeta" class="panel-meta"></span>
-              </div>
-              <div id="orbitSideBody" class="panel-body">
-                <p class="muted">点击星轨上的板块节点：查看实时成分股、钉选/删除个股。<br/>外环越往外＝越接近应用/终端层。节点颜色随板块当日涨跌。</p>
-              </div>
-            </aside>
-          </div>
-        </section>
-
-        <div id="orbitBoardDialog" class="orbit-dialog hidden" role="dialog" aria-modal="true">
-          <div class="orbit-dialog-card panel">
-            <div class="panel-header">
-              <h2 class="panel-title">添加板块 / 概念</h2>
-              <button id="orbitBoardDialogClose" class="button secondary" type="button">关闭</button>
-            </div>
-            <div class="panel-body">
-              <div class="form-grid">
-                <label>归属轨道环
-                  <select id="orbitBoardRingSelect"></select>
-                </label>
-                <label>搜索东财板块（关键词或 BK 码）
-                  <input id="orbitBoardSearchInput" placeholder="如 机器人 / 算力 / BK1127" autocomplete="off" />
-                </label>
-              </div>
-              <div class="actions">
-                <button id="orbitBoardSearchBtn" class="button secondary" type="button">搜索</button>
-                <span class="muted" style="align-self:center;">从真实东财概念+行业板块中选，保证 BK 码可取数。</span>
-              </div>
-              <div id="orbitBoardSearchResults" class="list" style="margin-top:12px; max-height:320px; overflow:auto;"></div>
-            </div>
-          </div>
-        </div>
+        {% if active_page == 'growth_research' %}
+        {% include 'growth_research_panel.html' %}
         {% endif %}
 
         {% if active_page == 'reports' %}
@@ -1716,9 +1667,15 @@
     <script src="/static/provider_context_menu.js"></script>
     <script src="/static/lumo_open_external.js?v={{ asset_v('lumo_open_external.js') }}"></script>
     <script src="/static/lumo_desktop_app.js?v={{ asset_v('lumo_desktop_app.js') }}"></script>
+    <script>
+      if (typeof JOB_TYPE_LABELS !== 'undefined') JOB_TYPE_LABELS.growth_research = '成长研究';
+    </script>
     <script src="/static/lumo_panic.js?v={{ asset_v('lumo_panic.js') }}"></script>
     <script src="/static/lumo_operations.js?v={{ asset_v('lumo_operations.js') }}"></script>
     <script src="/static/lumo_quant_sector_clicks.js?v={{ asset_v('lumo_quant_sector_clicks.js') }}"></script>
     <script src="/static/lumo_market_cloud.js?v={{ asset_v('lumo_market_cloud.js') }}"></script>
+    {% if active_page == 'growth_research' %}
+    <script src="/static/lumo_growth_research.js?v={{ asset_v('lumo_growth_research.js') }}"></script>
+    {% endif %}
   </body>
 </html>

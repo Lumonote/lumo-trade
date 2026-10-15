@@ -30,6 +30,7 @@ from webui.services.model_runtime import load_model_payload, loaded_model_info, 
 from webui.services import futures_service, quant_radar_service, star_orbit_service
 from webui.services import license_service
 from webui.services import stock_screener_service
+from webui.services import growth_research_service
 from webui.services.watchlist_service import WatchlistStorageError
 from data_store import quant_radar_repo, star_orbit_repo
 
@@ -1413,6 +1414,41 @@ def screener_run(request: Request) -> Response:
         kline_fetcher=_quant_kline_fetcher,
     )
     return _json_response(payload, status_code=200 if payload.get("ok") else 400)
+
+
+@_native_get("/api/growth-research")
+def growth_research_query(request: Request) -> Response:
+    try:
+        return _json_response(growth_research_service.query(dict(_request_query_pairs(request))))
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_get("/api/growth-research/status")
+def growth_research_status(request: Request) -> Response:
+    return _json_response({"job": growth_research_service.latest_job(webui_core.JOB_SERVICE)})
+
+
+@_native_post("/api/growth-research/refresh")
+def growth_research_refresh(request: Request) -> Response:
+    try:
+        job = growth_research_service.start_refresh(
+            str(_request_json(request).get("mode") or "rebuild"), webui_core.JOB_SERVICE)
+        return _json_response({"job": job}, status_code=202)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_get("/api/growth-research/export")
+def growth_research_export(request: Request) -> Response:
+    try:
+        text = growth_research_service.export_csv(dict(_request_query_pairs(request)))
+        return Response(status_code=200, headers=Headers({
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": 'attachment; filename="growth_research.csv"',
+        }), description=text)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
 
 
 @_native_get("/api/notifications/events")

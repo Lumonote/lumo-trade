@@ -4992,9 +4992,9 @@ DESKTOP_PAGES = {
         'title': '形态搜股',
         'subtitle': '手绘曲线或载入个股形态检索相似股票',
     },
-    'star_orbit': {
-        'title': '星轨图谱',
-        'subtitle': '物理AI/AI产业链同心轨道图:概念板块→A股个股,可增删板块与股票',
+    'growth_research': {
+        'title': '成长研究',
+        'subtitle': '全市场增长统计、盈利预期、新质方向与低位支撑，搜索、筛选和板块比较',
     },
     'reports': {
         'title': '报告与健康',
@@ -5013,6 +5013,7 @@ DESKTOP_PAGES = {
 DESKTOP_PAGE_ALIASES = {
     'overview': 'features',  # 「总览」「功能总览」已合并为 features 单页
     'opportunities': 'workbench',  # 「投资机会挖掘」已并入「分析工作台」
+    'star_orbit': 'growth_research',
 }
 
 

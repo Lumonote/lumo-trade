@@ -1,0 +1,49 @@
+<section id="growthResearchRoot" class="gr-screen" aria-label="全市场成长研究">
+  <div class="gr-toolbar">
+    <div><h2>从增长兑现到价格位置</h2><p id="grMeta" class="muted" aria-live="polite">正在读取本地研究快照…</p></div>
+    <div class="actions">
+      <button class="button secondary" type="button" data-gr-refresh="rebuild">重算本地数据</button>
+      <button class="button secondary" type="button" data-gr-refresh="technical">校验候选支撑</button>
+      <button class="button" type="button" data-gr-refresh="financials">更新财报与预期</button>
+    </div>
+  </div>
+  <div id="grJob" class="gr-job" role="status" hidden></div>
+  <div id="grError" class="gr-notice gr-error" role="alert" hidden></div>
+  <div id="grCoverage" class="gr-kpis" aria-label="市场数据覆盖"></div>
+  <div id="grNotes" class="gr-notice" hidden></div>
+  <form id="grFilters" class="panel gr-filters" role="search">
+    <div class="gr-filter-main">
+      <label class="gr-search">股票、方向与风险<input name="search" type="search" placeholder="名称 / 代码 / 行业 / 概念 / 风险" autocomplete="off" /></label>
+      <label>行业<select name="industry"><option value="">全部行业</option></select></label>
+      <label>新质方向<select name="theme"><option value="">全部方向</option></select></label>
+      <label>价格依据<select name="basis"><option value="">全部依据</option><option value="qfq">前复权已校验</option><option value="close">收盘初筛待校验</option></select></label>
+      <label>价格位置<select name="position"><option value="">全部位置</option><option value="bottom">阶段低位</option><option value="support">接近参考支撑</option><option value="both">低位且近支撑</option></select></label>
+      <label>排序<select name="sort"><option value="default">按研究分组</option><option value="cagr">未来EPS CAGR</option><option value="growth_next">下一年EPS增长</option><option value="profit_growth">报告期归母增长</option><option value="revenue_growth">报告期营收增长</option><option value="pe">预期PE</option><option value="forecast_orgs">机构覆盖数</option><option value="support_distance">距离支撑</option><option value="price">收盘价</option></select></label>
+    </div>
+    <div class="gr-filter-more">
+      <label>营收增长≥%<input name="revenue_min" type="number" step="1" placeholder="不限" /></label>
+      <label>归母增长≥%<input name="profit_min" type="number" step="1" placeholder="不限" /></label>
+      <label>未来CAGR≥%<input name="cagr_min" type="number" step="1" placeholder="不限" /></label>
+      <label>预期PE≤<input name="pe_max" type="number" min="0" step="1" placeholder="不限" /></label>
+      <label>评级机构≥<input name="orgs_min" type="number" min="0" step="1" placeholder="不限" /></label>
+      <label class="gr-check"><input name="industry_only" type="checkbox" /> 仅行业依据命中新质</label>
+      <label class="gr-check"><input name="exclude_st" type="checkbox" checked /> 排除ST/退市名称</label>
+      <button class="button secondary compact" type="reset">重置筛选</button>
+    </div>
+  </form>
+  <div id="grGroups" class="gr-groups" aria-label="候选分组"></div>
+  <section class="panel gr-results">
+    <div class="gr-results-head">
+      <div class="gr-tabs" role="tablist" aria-label="统计视图">
+        <button type="button" role="tab" aria-selected="true" data-gr-tab="stocks">股票明细</button>
+        <button type="button" role="tab" aria-selected="false" data-gr-tab="sectors">板块比较</button>
+      </div>
+      <div class="actions"><span id="grCount" class="panel-meta"></span><button id="grExport" class="button secondary compact" type="button">导出筛选结果</button></div>
+    </div>
+    <div id="grTable" class="gr-table-wrap" aria-live="polite"><p class="gr-empty">正在读取研究数据…</p></div>
+    <div id="grPager" class="gr-pager"></div>
+  </section>
+  <section id="grDetail" class="panel gr-detail" aria-label="个股研究依据" hidden></section>
+  <details class="gr-method panel"><summary>筛选口径与数据来源</summary><div id="grCriteria"></div></details>
+  <p class="gr-footnote">阶段低位不等于底部确认，预测可能下修，支撑可能失效。筛选结果用于研究观察。</p>
+</section>
