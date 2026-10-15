@@ -27,6 +27,8 @@ def test_get_plan_lock_and_reload_routes(module):
         response = client.get("/api/trading-plans", query_params={"code": "000001"})
         assert response.status_code == 200
         item = response.json()["items"][0]
+        assert item["chart"]["panic"]["available"]
+        assert item["chart"]["panic"]["scope"] == "stock"
         body = {"code": item["code"], "basis_key": item["candidate"]["basis_key"],
                 "expected_revision": item["revision"]}
         assert client.post("/api/trading-plans/lock", json_data=body).status_code == 200

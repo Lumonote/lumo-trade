@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from analysis.panic_indicator import panic_from_bars
 from analysis.trading_plan import evaluate_plan, fresh, market_plan, number, sector_plan, stock_plan
 from webui.services.watchlist_service import normalize_code, _VALID_CODE
 
@@ -126,9 +127,16 @@ class TradingPlanService:
             sector = sector_plan(meta, pulse, today=today)
             result = evaluate_plan(plan, candidate, market, sector, quotes.get(c), position_map.get(c), today=today)
             result["candidate"] = candidate
+            # 自选小图与个股详情共用K线指标，不能在裁剪图表字段时丢掉恐慌数据。
+            panic = kl.get("panic")
+            if not (panic or {}).get("available"):
+                quote = quotes.get(c) or {}
+                panic = panic_from_bars(kl.get("records") or [], quote={
+                    **quote, "updated_at": quote.get("updated_at") or quote.get("quote_date")})
             result["chart"] = {"code": c, "name": meta["name"], "source": kl.get("source"),
                                "records": (kl.get("records") or []) if selected else (kl.get("records") or [])[-60:],
-                               "operation": candidate.get("operation") or kl.get("operation") or {}}
+                               "operation": candidate.get("operation") or kl.get("operation") or {},
+                               "panic": panic}
             result["revision"] = (saved.get(c) or {}).get("revision", 0)
             result["degraded"] = local_degraded
             if unclassified:

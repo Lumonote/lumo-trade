@@ -112,6 +112,45 @@ def test_pagination_avoids_fetching_every_stock(tmp_path):
     assert out["total"] == 3
 
 
+@pytest.mark.parametrize("selected", [None, "000001"])
+def test_list_and_detail_charts_keep_kline_panic_without_extra_fetch(tmp_path, selected):
+    from analysis.panic_indicator import panic_from_bars
+
+    payload = bars()
+    payload["panic"] = panic_from_bars(payload["records"])
+    original = json.dumps(payload, sort_keys=True)
+    calls = []
+    svc = service(tmp_path, kline=lambda code: calls.append(code) or payload)
+    item = svc.overview(code=selected, limit=1)["items"][0]
+    assert item["chart"]["panic"] == payload["panic"]
+    assert item["chart"]["panic"]["available"]
+    assert calls == ["000001"]
+    assert json.dumps(payload, sort_keys=True) == original
+
+
+@pytest.mark.parametrize("missing_panic", [None, {"available": False}])
+def test_chart_panic_falls_back_to_existing_bars(tmp_path, missing_panic):
+    from analysis.panic_indicator import panic_from_bars
+
+    payload = {**bars(), "panic": missing_panic}
+    item = service(tmp_path, kline=lambda code: payload).overview(code="000001")["items"][0]
+    assert item["chart"]["panic"] == panic_from_bars(payload["records"])
+
+
+def test_missing_bars_can_use_real_quote_for_snapshot_panic(tmp_path):
+    quote = {"price": 10, "change_pct": -5, "quote_date": TODAY.isoformat()}
+    svc = service(tmp_path, kline=lambda code: {}, quotes=lambda codes: {c: quote for c in codes})
+    panic = svc.overview(code="000001")["items"][0]["chart"]["panic"]
+    assert panic["available"] and panic["quality"] == "snapshot"
+    assert panic["score"] == 75 and panic["as_of"] == TODAY.isoformat()
+
+
+def test_missing_bars_and_quote_still_report_panic_unavailable(tmp_path):
+    svc = service(tmp_path, kline=lambda code: {}, quotes=lambda codes: {})
+    panic = svc.overview(code="000001")["items"][0]["chart"]["panic"]
+    assert not panic["available"] and panic["score"] is None
+
+
 def test_unavailable_market_does_not_turn_unknown_into_sell_signal(tmp_path):
     svc = service(tmp_path, market_pulse=lambda: {}, holdings=lambda: {
         "account": {"cash": 99000, "total_equity": 100000},
