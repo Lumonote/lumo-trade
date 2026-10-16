@@ -3815,17 +3815,31 @@ def _build_market_dashboard(force_market_refresh=False):
     index_last_update = market_state.get("index_last_update")
     index_is_fresh = bool(index_last_update and (time.time() - index_last_update <= 600))
     raw_indices = market_state.get("indices", {}) if index_is_fresh else {}
+    index_part = MARKET_PULSE_SERVICE.indices_payload()
+    pulse_indices = {item['symbol']: item for item in index_part['indices']}
     indices = []
     for code, fallback_name in REAL_INDEX_CODES.items():
+        pulse = pulse_indices.get(code)
+        if pulse and pulse.get('close') is not None:
+            change_pct = pulse.get('change_pct')
+            indices.append({
+                'code': code, 'name': fallback_name, 'price': round(pulse['close'], 2),
+                'change': None, 'change_pct': change_pct, 'available': True,
+                'source': 'market_pulse', 'updated_at': pulse.get('as_of'), 'panic': pulse['panic'],
+            })
+            continue
         quote = raw_indices.get(code)
         if quote:
+            price = _safe_float(quote.get('price'), None)
+            change = _safe_float(quote.get('change'), None)
+            change_pct = _safe_float(quote.get('change_pct'), None)
             indices.append({
                 "code": code,
                 "name": quote.get("display_name") or fallback_name,
-                "price": round(_safe_float(quote.get("price"), 0.0), 2),
-                "change": round(_safe_float(quote.get("change"), 0.0), 2),
-                "change_pct": round(_safe_float(quote.get("change_pct"), 0.0), 2),
-                "available": True,
+                "price": round(price, 2) if price is not None else None,
+                "change": round(change, 2) if change is not None else None,
+                "change_pct": round(change_pct, 2) if change_pct is not None else None,
+                "available": price is not None and price > 0,
                 "source": quote.get("source", "tencent"),
                 "updated_at": quote.get("updated_at"),
             })
@@ -3843,19 +3857,16 @@ def _build_market_dashboard(force_market_refresh=False):
 
     primary_index = next((item for item in indices if item["code"] == "sh000001"), indices[0] if indices else None)
     for item in indices:
-        item['panic'] = panic_indicator(change_pct=(raw_indices.get(item['code']) or {}).get('change_pct'),
-                                        scope='index', as_of=item.get('updated_at'))
+        if 'panic' not in item:
+            item['panic'] = panic_indicator(change_pct=item.get('change_pct'),
+                                            scope='index', as_of=item.get('updated_at'))
 
     return {
         'index': primary_index.get("price") if primary_index else None,
         'index_change': primary_index.get("change_pct") if primary_index else None,
         'primary_index': primary_index,
         'indices': indices,
-        'panic': panic_from_quotes([
-            {'change_pct': (raw_indices.get(item['code']) or {}).get('change_pct'), 'available': item['available']}
-            for item in indices
-        ], breadth_label='展示指数上涨占比',
-                                   as_of=_format_datetime(index_last_update) if index_last_update else None),
+        'panic': index_part['panic'],
         'index_available': bool(primary_index and primary_index.get("available")),
         'index_last_update': _format_datetime(index_last_update) if index_last_update else None,
         'total_particles': len(stocks),

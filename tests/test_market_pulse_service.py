@@ -150,6 +150,35 @@ def test_payload_uses_cache_within_ttl():
     assert len(calls) == 1
 
 
+def test_dashboard_index_snapshot_and_full_payload_share_cache_and_rebuild_after_refresh():
+    calls = []
+    def bars(symbols, **kwargs):
+        calls.append(1)
+        return {s: _bars(base=100+len(calls)) for s in symbols}
+    svc = _service(index_bars=bars)
+    indices = svc.indices_payload()
+    first = svc.payload()
+    assert first["indices"] is indices["indices"] and first["panic"] is indices["panic"]
+    assert len(calls) == 1
+    refreshed = svc.indices_payload(force=True)
+    assert svc.payload()["indices"] is refreshed["indices"]
+    assert len(calls) == 2
+
+
+def test_market_panic_matches_twenty_day_index_cards_after_daily_rebound():
+    from datetime import date, timedelta
+    prices = [100.0]*5 + [100-i*.6 for i in range(20)] + [89.0]
+    rows = [{"day":(date(2026,9,1)+timedelta(days=i)).isoformat(),
+             "close":p, "open":p, "high":p, "low":p, "volume":1000}
+            for i,p in enumerate(prices)]
+    out = _service(index_bars=lambda symbols, **kw: {s:rows for s in symbols}).payload()
+    assert out["panic"]["score"] == out["indices"][0]["panic"]["score"]
+    assert out["panic"]["level"] in {"high", "extreme"}
+    assert all(i["panic"]["change_periods"] == 20 for i in out["indices"])
+    # 行情涨跌幅仍保留真实当日值，不被20日指标覆盖。
+    assert all(i["change_pct"] > 0 and i["chg_20d"] < 0 for i in out["indices"])
+
+
 def test_payload_force_bypasses_cache():
     calls = []
 

@@ -65,7 +65,7 @@ def test_classify_pulse_risk():
 
 
 def test_classify_pulse_pullback():
-    assert ip.classify_pulse({"chg_5d": -2.0, "chg_20d": 1.0, "above_ma20": False,
+    assert ip.classify_pulse({"chg_5d": 2.0, "chg_20d": -3.0, "above_ma20": False,
                               "ma20_slope": 0.1, "percentile_60d": 0.5}) == "pullback"
 
 
@@ -77,6 +77,12 @@ def test_classify_pulse_range_when_flat():
 def test_classify_pulse_unknown_without_data():
     assert ip.classify_pulse({}) == "unknown"
     assert ip.classify_pulse(None) == "unknown"
+    assert ip.classify_pulse({"chg_5d": 5.0}) == "unknown"
+
+
+def test_classify_pulse_uses_twenty_days_even_after_five_day_rebound():
+    assert ip.classify_pulse({"chg_5d": 4, "chg_20d": -8, "above_ma20": False}) == "risk"
+    assert ip.classify_pulse({"chg_5d": -4, "chg_20d": 8, "above_ma20": True}) == "strong"
 
 
 def test_pulse_labels_cover_all_states():

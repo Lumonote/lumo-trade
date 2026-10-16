@@ -73,7 +73,7 @@ def index_metrics(bars: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     volumes = [_num(b.get("volume")) for b in rows]
     volumes = [v for v in volumes if v is not None]
 
-    changes = trailing_changes(closes, horizons=(5, 20))
+    changes = trailing_changes(closes, horizons=(1, 5, 20))
     ma20 = _avg_tail(closes, 20)
     ma60 = _avg_tail(closes, 60)
     ma20_prev = _avg_tail(closes[:-5], 20) if len(closes) >= 25 else None
@@ -93,6 +93,7 @@ def index_metrics(bars: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
 
     return {
         "close": closes[-1] if closes else None,
+        "chg_1d": changes.get("chg_1d"),
         "chg_5d": changes.get("chg_5d"),
         "chg_20d": changes.get("chg_20d"),
         "ma20": ma20,
@@ -107,22 +108,21 @@ def index_metrics(bars: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
 
 
 def classify_pulse(metrics: Optional[Mapping[str, Any]]) -> str:
-    """单指数状态分级。仅描述当前状态,不含拐点断言。"""
+    """按20日累计涨跌与均线分级。仅描述当前状态,不含拐点断言。"""
     m = metrics or {}
-    chg5 = _num(m.get("chg_5d"))
     chg20 = _num(m.get("chg_20d"))
-    if chg5 is None:
+    if chg20 is None:
         return "unknown"
     above = m.get("above_ma20")
     slope = _num(m.get("ma20_slope")) or 0.0
 
-    if chg5 <= -4 or (chg5 <= -2 and chg20 is not None and chg20 <= -6):
+    if chg20 <= -6:
         return "risk"
-    if chg5 <= -1 or (above is False and slope < 0):
+    if chg20 <= -2 or (above is False and slope < 0):
         return "pullback"
-    if chg5 >= 3 and chg20 is not None and chg20 >= 5 and above is not False:
+    if chg20 >= 5 and above is not False:
         return "strong"
-    if chg5 >= 1 and above is not False:
+    if chg20 >= 2 and above is not False:
         return "mild_up"
     return "range"
 

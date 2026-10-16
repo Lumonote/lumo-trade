@@ -21,7 +21,7 @@ from analysis import index_pulse as ip
 from analysis.market_regime import position_advice
 from analysis.operation_models import analyze_operations, normalize_bars
 from analysis.sector_opportunities import sector_landscape
-from analysis.panic_indicator import panic_from_bars, panic_from_quotes
+from analysis.panic_indicator import panic_from_bars, panic_from_indices
 
 DISCLAIMER = ("指数状态与板块信号基于公开数据的统计描述,不构成投资建议;"
               "盘中信号随当日数据变化,收盘后方为定稿。")
@@ -53,6 +53,8 @@ class MarketPulseService:
         self._series_limit = int(series_limit)
         self._lock = threading.Lock()
         self._cache: Dict[str, Any] = {"ts": 0.0, "key": None, "payload": None}
+        self._index_lock = threading.Lock()
+        self._index_cache: Dict[str, Any] = {"ts": 0.0, "payload": None}
 
     @staticmethod
     def _safe(fn, default):
@@ -85,7 +87,7 @@ class MarketPulseService:
             charts_by_symbol[symbol] = {
                 "records": normalize_bars(merged),
                 "operation": analyze_operations(merged),
-                "panic": panic_from_bars(merged, quote=quote, scope="index"),
+                "panic": panic_from_bars(merged, quote=quote, scope="index", change_periods=20),
             }
 
         cards: List[Dict[str, Any]] = []
@@ -97,6 +99,7 @@ class MarketPulseService:
             cards.append({
                 "symbol": symbol, "ts_code": ts_code, "name": name,
                 "close": metrics["close"],
+                "change_pct": metrics["chg_1d"],
                 "chg_5d": metrics["chg_5d"], "chg_20d": metrics["chg_20d"],
                 "vol_ratio": metrics["vol_ratio"],
                 "percentile_60d": metrics["percentile_60d"],
@@ -120,7 +123,8 @@ class MarketPulseService:
             if bars:
                 as_of = dates_by_symbol[symbol]
                 break
-        return {"indices": cards, "style": style, "level": level,
+        panic = panic_from_indices(cards, expected_count=len(ip.DISPLAY_INDEXES))
+        return {"indices": cards, "panic": panic, "style": style, "level": level,
                 "position_advice": position_advice(level), "as_of": as_of,
                 "benchmark": metrics_by_symbol.get("sh000300") or {},
                 "degraded_index": deg_index, "degraded_quote": deg_quote or not quotes}
@@ -173,25 +177,34 @@ class MarketPulseService:
         }
 
     # ------------------------------------------------------------ 对外
+    def indices_payload(self, *, force: bool = False) -> Dict[str, Any]:
+        """总览、云图和指数风向共用同一份指数快照，不额外加载板块数据。"""
+        with self._index_lock:
+            cached = self._index_cache
+            if not force and cached["payload"] is not None and time.time() - cached["ts"] < self._ttl:
+                return cached["payload"]
+            result = self._build_indices()
+            self._index_cache = {"ts": time.time(), "payload": result}
+            return result
+
     def payload(self, *, as_of: Optional[str] = None, force: bool = False) -> Dict[str, Any]:
         key = as_of or ""
         now = time.time()
         with self._lock:
             cached = self._cache
             if (not force and cached["payload"] is not None and cached["key"] == key
-                    and now - cached["ts"] < self._ttl):
+                    and now - cached["ts"] < self._ttl
+                    and now - self._index_cache["ts"] < self._ttl
+                    and cached["payload"]["indices"] is (self._index_cache["payload"] or {}).get("indices")):
                 return cached["payload"]
 
-        index_part = self._build_indices()
+        index_part = self.indices_payload(force=force)
         sector_part = self._build_sectors(as_of)
         result = {
             "as_of": {"index": index_part["as_of"], "sector": sector_part["as_of"],
                       "provisional": sector_part["provisional"]},
             "indices": index_part["indices"],
-            "panic": panic_from_quotes([
-                {"change_pct": next((f["value"] for f in c["panic"]["factors"] if f["key"] == "change"), None)}
-                for c in index_part["indices"]
-            ], breadth_label="四大指数上涨占比", as_of=index_part["as_of"]),
+            "panic": index_part["panic"],
             "style": index_part["style"],
             "level": index_part["level"],
             "position_advice": index_part["position_advice"],

@@ -6,7 +6,7 @@ import json
 import pytest
 
 from analysis.panic_indicator import (
-    panic_indicator, panic_from_bars, panic_from_quotes, panic_from_sector_series,
+    panic_indicator, panic_from_bars, panic_from_quotes, panic_from_sector_series, panic_from_indices,
 )
 
 
@@ -99,9 +99,50 @@ def test_aggregate_excludes_missing_unavailable_and_invalid_quotes():
     assert panic_from_quotes([])["available"] is False
 
 
+def test_twenty_day_decline_is_not_overridden_by_one_day_rebound():
+    rows = _bars([0] + [-.5]*19 + [.5])
+    out = panic_from_bars(rows, scope="index", change_periods=20)
+    expected_return = (rows[-1]["close"]/rows[-21]["close"]-1)*100
+    factor = next(f for f in out["factors"] if f["key"] == "change")
+    assert factor["value"] == pytest.approx(expected_return, abs=.0001)
+    assert out["score"] >= 80 and out["level"] == "extreme"
+    assert out["change_periods"] == 20
+    assert {f["key"] for f in out["factors"]} == {"change", "drawdown"}
+
+
+@pytest.mark.parametrize("length,gap", [(0, False), (20, False), (21, True)])
+def test_twenty_day_missing_history_does_not_fall_back_to_daily_quote(length, gap):
+    rows = _bars([-.5]*length)
+    if gap:
+        rows[-10]["close"] = None
+    out = panic_from_bars(rows, scope="index", change_periods=20, quote={"change_pct":3})
+    assert not out["available"] and out["score"] is None
+
+
+def test_market_aggregate_keeps_index_composite_scores_and_missing_coverage():
+    cards = [{"symbol": str(i), "name": str(i), "panic": {
+        "available": True, "score": score, "quality":"composite", "coverage":.7,
+        "as_of":"2026-10-16", "provisional":True}}
+        for i, score in enumerate([50.5, 68.4, 70.2, 66.5])]
+    out = panic_from_indices(cards)
+    assert out["score"] == 63.9 and out["level"] == "high"
+    assert out["sample_count"] == 4 and out["provisional"]
+    cards[-1]["panic"]["as_of"] = "2026-10-15"
+    partial = panic_from_indices(cards)
+    assert partial["sample_count"] == 3 and partial["stale"] and partial["quality"] == "partial"
+    assert partial["score"] == 63.0
+    assert not panic_from_indices([])["available"]
+
+
 def test_cloud_and_dashboard_share_market_panic_while_stock_scopes_remain_independent(monkeypatch):
     import time
     import webui.core as core
+    from webui.services.market_pulse_service import MarketPulseService
+
+    bars = [{**r, "day": r["date"]} for r in _bars([-.5]*25)]
+    service = MarketPulseService(index_bars=lambda symbols, **kw: {s:bars for s in symbols},
+        index_quotes=lambda symbols: {}, sector_series=lambda **kw: {}, turning_rules=lambda *a, **kw: {})
+    monkeypatch.setattr(core, "MARKET_PULSE_SERVICE", service)
 
     monkeypatch.setattr(core,"_load_market_intelligence",lambda: {"eastmoney":{"industry_boards":[
         {"code":"BK1","name":"银行","change_pct":-4}, {"code":"BK2","name":"未知"}]}})
@@ -109,10 +150,15 @@ def test_cloud_and_dashboard_share_market_panic_while_stock_scopes_remain_indepe
     monkeypatch.setitem(core.market_state,"indices",{"sh000001":{"price":3000,"change_pct":-2}})
     dashboard = core._build_market_dashboard()
     assert dashboard["indices"][0]["panic"]["scope"] == "index"
+    assert dashboard["primary_index"]["price"] == round(bars[-1]["close"], 2)
+    assert dashboard["primary_index"]["panic"] == service.payload()["indices"][0]["panic"]
+    assert dashboard["panic"] == service.payload()["panic"]
     assert dashboard["panic"]["available"]
     assert dashboard["sectors"][0]["panic"]["available"]
     assert dashboard["sectors"][1]["panic"]["available"] is False
     monkeypatch.setitem(core.market_state,"indices",{"sh000001":{"price":3000}})
+    monkeypatch.setattr(service, "_index_bars", lambda *a, **kw: {})
+    service.indices_payload(force=True)
     unavailable = core._build_market_dashboard()
     assert unavailable["indices"][0]["panic"]["available"] is False
     assert unavailable["panic"]["available"] is False
@@ -122,11 +168,13 @@ def test_cloud_and_dashboard_share_market_panic_while_stock_scopes_remain_indepe
         {"code":"600003","industry":"银行","change_pct":None,"trade_date":"20261014"}])
     # 大盘恐慌统一为指数口径：云图徽章与总览消费同一份 dashboard 指标，两页永远一致。
     monkeypatch.setitem(core.market_state,"indices",{"sh000001":{"price":3000,"change_pct":-2}})
+    monkeypatch.setattr(service, "_index_bars", lambda symbols, **kw: {s:bars for s in symbols})
+    service.indices_payload(force=True)
     cloud = core._market_cloud_payload()
     assert cloud["panic"] == core._build_market_dashboard()["panic"]
-    # 样本数=1 指的是唯一有涨跌的指数（sh000001），不是云图个股样本（3 只里的 2 只）。
-    assert cloud["panic"]["sample_count"] == 1
-    assert any(f["key"] == "breadth" and "指数" in f["label"] for f in cloud["panic"]["factors"])
+    # 统一使用四大指数历史综合分，不混入云图个股或当日涨跌快照。
+    assert cloud["panic"]["sample_count"] == 4
+    assert all("恐慌分" in f["label"] for f in cloud["panic"]["factors"])
     # 板块与个股层仍是各自样本的独立口径。
     assert cloud["sector_panics"]["银行"]["scope"] == "sector"
     assert cloud["stocks"][0]["panic"]["scope"] == "stock"

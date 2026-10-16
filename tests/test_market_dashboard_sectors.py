@@ -2,6 +2,14 @@
 from __future__ import annotations
 
 import webui.core as core
+import pytest
+from analysis.panic_indicator import panic_from_indices
+
+
+@pytest.fixture(autouse=True)
+def _offline_indices(monkeypatch):
+    monkeypatch.setattr(core.MARKET_PULSE_SERVICE, "indices_payload",
+                        lambda: {"indices": [], "panic": panic_from_indices([])})
 
 
 def _intel(boards):

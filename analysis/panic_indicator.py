@@ -27,10 +27,19 @@ def _clip(value):
     return max(0.0, min(100.0, value))
 
 
+def _rating(score):
+    level = ("extreme" if score >= 80 else "high" if score >= 60 else
+             "neutral" if score >= 40 else "low" if score >= 20 else "calm") if score is not None else "unknown"
+    labels = {"extreme": "极度恐慌", "high": "恐慌偏高", "neutral": "中性",
+              "low": "恐慌偏低", "calm": "平稳", "unknown": "数据不足"}
+    return level, labels[level]
+
+
 def panic_indicator(*, change_pct=None, drawdown_pct=None, breadth=None,
                     volume_ratio=None, scope="stock", as_of=None,
-                    breadth_label="上涨广度", provisional=False, stale=False):
+                    breadth_label="上涨广度", provisional=False, stale=False, change_periods=1):
     scale = SCALES.get(scope, 10.0)
+    change_scale = scale * 3 if change_periods == 20 else scale
     factors = []
 
     def add(key, label, value, score, weight):
@@ -39,7 +48,8 @@ def panic_indicator(*, change_pct=None, drawdown_pct=None, breadth=None,
 
     change = number(change_pct)
     if change is not None and change >= -100:
-        add("change", "当期涨跌幅%", change, 50-change/scale*50, .4)
+        add("change", "20期累计涨跌幅%" if change_periods == 20 else "当期涨跌幅%",
+            change, 50-change/change_scale*50, .4)
     dd = number(drawdown_pct)
     if dd is not None and 0 <= dd <= 100:
         add("drawdown", "距20期收盘高点回撤%", dd, dd/(scale*3)*100, .3)
@@ -53,40 +63,47 @@ def panic_indicator(*, change_pct=None, drawdown_pct=None, breadth=None,
         add("volume", "成交量/前5期均量", vol, pressure, .1)
     weight = sum(f["weight"] for f in factors)
     score = round(sum(f["score"]*f["weight"] for f in factors)/weight, 1) if weight else None
-    level = ("extreme" if score >= 80 else "high" if score >= 60 else
-             "neutral" if score >= 40 else "low" if score >= 20 else "calm") if score is not None else "unknown"
-    labels = {"extreme": "极度恐慌", "high": "恐慌偏高", "neutral": "中性",
-              "low": "恐慌偏低", "calm": "平稳", "unknown": "数据不足"}
+    level, label = _rating(score)
+    description = ("自定义20期恐慌强度（0–100，越高卖压越强）：20期累计涨跌40%、同期回撤30%；按有效权重归一化。"
+                   if change_periods == 20 else DESCRIPTION)
     return {"available": score is not None, "score": score, "level": level,
-            "label": labels[level], "scope": scope, "method": METHOD,
-            "description": DESCRIPTION+f" 涨跌满刻度±{scale:g}%，回撤满刻度{scale*3:g}%。", "factors": factors,
+            "label": label, "scope": scope, "method": METHOD,
+            "description": description+f" 涨跌满刻度±{change_scale:g}%，回撤满刻度{scale*3:g}%。", "factors": factors,
             "coverage": round(weight, 2), "quality": "composite" if len(factors) > 1 else "snapshot" if factors else "unavailable",
             "as_of": as_of, "provisional": bool(provisional), "stale": bool(stale)}
 
 
-def panic_from_bars(bars, *, quote=None, scope="stock", period="daily"):
+def panic_from_bars(bars, *, quote=None, scope="stock", period="daily", change_periods=1):
     """以最后一根实际K线为准；缺口不拼接，日线以外保留当期口径。"""
     rows = sorted((dict(r) for r in bars or [] if isinstance(r, dict)),
                   key=lambda r: str(r.get("date") or r.get("day") or ""))
     quote = quote or {}
     last = rows[-1] if rows else {}
     close = number(last.get("close"))
-    prev = number(rows[-2].get("close")) if len(rows) >= 2 else None
+    prev = number(rows[-change_periods-1].get("close")) if len(rows) > change_periods else None
     change = ((close/prev-1)*100 if close is not None and close > 0 and prev is not None and prev > 0
-              else number(last.get("pct_chg")))
-    if change is None:
+              else number(last.get("pct_chg")) if change_periods == 1 else None)
+    if change is None and change_periods == 1:
         change = number(quote.get("change_pct"))
     window = rows[-20:]
     closes = [number(r.get("close")) for r in window]
     dd = ((1-close/max(closes))*100 if len(closes) == 20 and all(c is not None and c > 0 for c in closes) else None)
-    volumes = [number(r.get("volume")) for r in rows[-6:-1]]
-    volume = number(last.get("volume"))
-    vol_ratio = (volume/mean(volumes) if volume is not None and volume >= 0 and len(volumes) == 5
-                 and all(v is not None and v >= 0 for v in volumes) and mean(volumes) > 0 else None)
+    vol_ratio = None
+    if change_periods == 1:
+        volumes = [number(r.get("volume")) for r in rows[-6:-1]]
+        volume = number(last.get("volume"))
+        vol_ratio = (volume/mean(volumes) if volume is not None and volume >= 0 and len(volumes) == 5
+                     and all(v is not None and v >= 0 for v in volumes) and mean(volumes) > 0 else None)
+    if change_periods == 20:
+        # 20日口径不混入当日量比；累计涨跌需要完整的21个交易日收盘价。
+        history = [number(r.get("close")) for r in rows[-21:]]
+        if len(history) != 21 or not all(c is not None and c > 0 for c in history):
+            change, dd = None, None
     result = panic_indicator(change_pct=change, drawdown_pct=dd, volume_ratio=vol_ratio,
                              scope=scope, as_of=last.get("date") or last.get("day") or quote.get("updated_at"),
-                             provisional=bool(last.get("realtime") or quote.get("applied")))
+                             provisional=bool(last.get("realtime") or quote.get("applied")), change_periods=change_periods)
     result["period"] = period
+    result["change_periods"] = change_periods
     return result
 
 
@@ -114,4 +131,33 @@ def panic_from_quotes(rows, *, scope="market", breadth_label="样本上涨占比
                              breadth=sum(p > 0 for p in changes)/len(changes) if changes else None,
                              breadth_label=breadth_label, scope=scope, as_of=as_of)
     result["sample_count"] = len(changes)
+    return result
+
+
+def panic_from_indices(cards, *, expected_count=4):
+    """同日指数卡片恐慌分等权汇总，保留各指数的回撤及卖压证据。"""
+    valid = [(c, c.get("panic") or {}) for c in cards or []
+             if (c.get("panic") or {}).get("available")
+             and number((c.get("panic") or {}).get("score")) is not None]
+    as_of = max((str(p.get("as_of") or c.get("as_of") or "")[:10] for c, p in valid), default="")
+    current = [(c, p) for c, p in valid
+               if str(p.get("as_of") or c.get("as_of") or "")[:10] == as_of]
+    result = panic_indicator(scope="market", as_of=as_of or None)
+    score = round(mean(number(p["score"]) for _, p in current), 1) if current else None
+    level, label = _rating(score)
+    result.update({
+        "available": score is not None, "score": score, "level": level, "label": label,
+        "method": "index_composite_v1",
+        "description": "同日有效指数卡片恐慌分等权平均，沿用各指数的20日累计涨跌与同期回撤；低恐慌不代表贪婪。",
+        "factors": [{"key": c.get("symbol") or str(i), "label": f"{c.get('name') or '指数'}恐慌分",
+                     "value": number(p["score"]), "score": number(p["score"]), "weight": round(1/len(current), 4)}
+                    for i, (c, p) in enumerate(current)],
+        "coverage": round(mean(p.get("coverage", 0) for _, p in current), 2) if current else 0,
+        "quality": ("unavailable" if not current else "snapshot" if all(p.get("quality") == "snapshot" for _, p in current)
+                    else "partial" if len(current) < expected_count else "composite"),
+        "sample_count": len(current), "expected_count": expected_count,
+        "change_periods": 20,
+        "provisional": any(p.get("provisional") for _, p in current),
+        "stale": any(p.get("stale") for _, p in current) or len(current) < len(valid),
+    })
     return result
