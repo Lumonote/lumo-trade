@@ -92,6 +92,8 @@ def futures_dimension(data, health, calendar):
         basis_rows.append({"variety":p.get("variety"), "contract":main.get("symbol"), "date":date,
                            "basis_pct":basis, "basis_change":delta, "previous_date":old_date,
                            "source":main.get("source") or "新浪同日行情校验",
+                           "quote_at":main.get("quote_at") or (f"{date}T{main['ticktime']}" if date and main.get("ticktime") and ":" in str(main["ticktime"]) else None),
+                           "spot_quote_at":main.get("spot_quote_at"),
                            "volume":main.get("volume"), "position":main.get("position")})
     for p in data.get("positions", []):
         s = (p.get("aggregate") or {}).get("summary") or {}
@@ -192,7 +194,7 @@ def build_fusion(health, cross, bars):
                  "高频活跃度不是涨跌方向，也不证明真实量化成交占比。无L2，所有机制判断沿用现有服务的疑似口径。"])
     dims.append(dimension("quant",score,quant.get("fallback_date") or quant.get("snapshot_date") or gauge.get("date"),as_of,calendar,
                           evidence,source="TuShare收盘行为代理（日线/量比/资金流）" if proxy else "现有量化雷达（全量按日榜单优先）",quality=.5 if proxy or len(stocks) < 200 else 1,
-                          details={"bull":bull,"bear":bear,"sample":proxy["sample"] if proxy else len(stocks),"smash":smash,"risk_count":risky,"proxy":proxy,
+                          details={"bull":bull,"bear":bear,"sample":proxy["sample"] if proxy else len(stocks),"smash":smash,"risk_count":risky,"proxy":proxy,"note":quant.get("note"),
                                    "sectors":(quant.get("sectors") or [])[:8],"error":quant.get("error")}))
     capital = cross.get("capital", {})
     flow = sorted((r for r in capital.get("records", []) if iso(r.get("trade_date")) and iso(r["trade_date"]) <= str(as_of)), key=lambda r: iso(r["trade_date"]))

@@ -15,7 +15,8 @@
   const tabs = [...$("mhTabs").querySelectorAll("[data-mh-tab]")].map(b => b.dataset.mhTab);
   let section = tabs.includes(q.get("section")) ? q.get("section") : "overview";
   let symbol = q.get("index") || "sh000001", windowSize = [60,120,250].includes(Number(q.get("window"))) ? Number(q.get("window")) : 120;
-  let payload = null, pollTimer = null, requestId = 0, ruleFilter = "all", ruleSearch = "", horizon = 60, autoStarted = false;
+  let payload = null, envelope = null, pollTimer = null, liveTimer = null, requestId = 0, ruleFilter = "all", ruleSearch = "", horizon = 60, autoStarted = false;
+  let viewMode=q.get("view") === "close" ? "close" : "latest";
 
   function error(message = "") { $("mhError").hidden = !message; $("mhError").textContent = message; }
   function remember() {
@@ -23,6 +24,7 @@
     next.searchParams.set("section", section);
     next.searchParams.set("index", symbol);
     next.searchParams.set("window", String(windowSize));
+    next.searchParams.set("view",viewMode);
     history.replaceState(null, "", next);
   }
   function selectTab(tab, focus = false) {
@@ -39,8 +41,8 @@
   function boxHead(title, description = "", extra = "") {
     return `<div class="mh-box-head"><div><h3>${esc(title)}</h3>${description ? `<p>${esc(description)}</p>` : ""}</div>${extra}</div>`;
   }
-  function dateState(date) {
-    return date && date === payload.as_of ? badge(`${date} · 同日`) : badge(date ? `${date} · 非同日，不计分` : "待补数据", "warn");
+  function dateState(date, dataAt="", provisional=false) {
+    return date && date === payload.as_of ? badge(`${dataAt || date} · ${provisional ? "盘中采样" : "同日"}`) : badge(date ? `${date} · 非同日，不计分` : "待补数据", "warn");
   }
   function currentIndex(code) { return payload.indices.find(r => r.symbol === code) || {}; }
   function summaryReasons() {
@@ -57,7 +59,8 @@
     const s = payload.signals[type], bottom = type === "bottom";
     const matched = s.rules.filter(r => r.hit === true);
     return `<article class="mh-box ${bottom ? "" : "mh-top"}">${boxHead(bottom ? "底部特征" : "顶部特征", "12项经验规则 · 缺失项单独列出", badge(s.known < 8 ? "覆盖不足" : "特征强度"))}
-      <div class="mh-signal-score">${num(s.hit,0)}<span>/ ${s.total} 项触发 · ${s.known} 项可判定</span></div>
+      <div class="mh-signal-score">${num(s.hit,0)}<span>/ ${s.total} 项${payload.provisional ? "当前满足" : "收盘触发"} · ${s.known} 项可判定</span></div>
+      <p class="mh-note">${esc(payload.as_of)}价格极值曾触及 ${num(s.touched,0)}/${num(s.touch_known,0)} 项价格规则；当前/收盘状态与曾触及分开统计。</p>
       <div class="mh-score-track" style="--position:${s.score ?? 0}%"><i></i></div>
       <div class="mh-chips">${matched.slice(0,4).map(r => `<span class="mh-chip">${esc(r.label)}</span>`).join("") || `<small>${s.known ? "暂无规则触发" : "尚无同日可用证据"}</small>`}</div>
       <p class="mh-note">${bottom ? "超卖、缩量与悲观是底部特征；反转需要价格和广度共同修复。" : "普涨、估值扩张与加速是顶部特征；过热可持续，需等待转弱验证。"}</p>
@@ -122,20 +125,29 @@
   function indexTable(extended) {
     return `<div class="mh-table-wrap"><table><thead><tr><th>指数 / 日期</th><th>收盘</th><th>当日</th><th>20日</th><th>500日高点回撤</th><th>年线偏离</th><th>年量比</th>${extended ? "<th>RSI14</th><th>20日年化波动率</th><th>均线状态</th>" : ""}</tr></thead><tbody>
       ${payload.indices.map(r => `<tr class="${extended && r.symbol === symbol ? "mh-row-active" : ""}"><td><button type="button" data-mh-index="${esc(r.symbol)}" class="mh-select-index"><strong>${esc(r.name)}</strong><small>${esc(r.as_of || "未取得")}${r.as_of && r.as_of !== payload.as_of ? " · 非同日" : ""}</small></button></td>
-        <td>${num(r.close,2)}</td><td class="${tone(r.ret1)}">${signed(r.ret1)}</td><td class="${tone(r.ret20)}">${signed(r.ret20)}</td><td class="${tone(r.drawdown)}">${signed(r.drawdown)}</td><td class="${tone(r.dev250)}">${signed(r.dev250)}</td><td>${num(r.volume250,2)}x</td>${extended ? `<td>${num(r.rsi14)}</td><td>${pct(r.volatility20)}</td><td>${esc(r.trend || "数据不足")}</td>` : ""}</tr>`).join("")}
+        <td>${num(r.close,2)}<small>${esc(r.quote_at || r.as_of || "")}${r.provisional ? " · 盘中" : " · 收盘"}</small></td><td class="${tone(r.ret1)}">${signed(r.ret1)}</td><td class="${tone(r.ret20)}">${signed(r.ret20)}</td><td class="${tone(r.drawdown)}">${signed(r.drawdown)}</td><td class="${tone(r.dev250)}">${signed(r.dev250)}</td><td>${r.provisional ? "收盘后确认" : `${num(r.volume250,2)}x`}</td>${extended ? `<td>${num(r.rsi14)}</td><td>${pct(r.volatility20)}</td><td>${esc(r.trend || "数据不足")}</td>` : ""}</tr>`).join("")}
       </tbody></table></div>`;
   }
-  function ruleStatus(hit) {
-    return hit === true ? '<span class="mh-dot yes">● <small>触发</small></span>' : hit === false ? '<span class="mh-dot">○ <small>未触发</small></span>' : '<span class="mh-dot unknown">— <small>待补</small></span>';
+  function ruleStatus(hit, provisional=false, near=false) {
+    return hit === true ? `<span class="mh-dot yes">● <small>${provisional ? "当前满足" : "收盘触发"}</small></span>` : hit === false ? `<span class="mh-dot">○ <small>${provisional ? "当前未满足" : "收盘未触发"}${near ? " · 临界观察" : ""}</small></span>` : `<span class="mh-dot unknown">— <small>${provisional ? "本时段无有效观测" : "待补"}</small></span>`;
   }
   function ruleTable(type) {
     const all = payload.signals[type].rules;
-    const filtered = all.filter(r => (ruleFilter === "all" || (ruleFilter === "hit" ? r.hit === true : ruleFilter === "miss" ? r.hit === false : r.hit == null)) && `${r.label} ${r.group} ${r.note}`.includes(ruleSearch));
-    return filtered.length ? `<div class="mh-table-wrap"><table class="mh-rule-table"><thead><tr><th>状态</th><th>指标 / 依据</th><th>当前</th><th>触发阈值</th></tr></thead><tbody>${filtered.map(r => `<tr><td>${ruleStatus(r.hit)}</td><td><strong>${esc(r.label)}</strong><small>${esc(r.group)} · ${esc(r.note)}</small></td><td>${r.value == null ? "—" : `${num(r.value,r.unit === "倍" ? 3 : r.unit === "日" ? 0 : 2)}${esc(r.unit)}`}</td><td>${esc(r.op)} ${num(r.threshold,r.unit === "倍" || r.unit === "x" ? 2 : 0)}${esc(r.unit)}</td></tr>`).join("")}</tbody></table></div>` : '<div class="mh-empty">没有符合筛选的指标</div>';
+    const filtered = all.filter(r => (ruleFilter === "all" || (ruleFilter === "hit" ? r.hit === true : ruleFilter === "touched" ? r.touched === true : ruleFilter === "miss" ? r.hit === false : r.hit == null)) && `${r.label} ${r.group} ${r.note}`.includes(ruleSearch));
+    const value=r=>r.value == null ? "—" : `${num(r.value,r.unit === "日" ? 0 : r.near || Math.abs(r.value-r.threshold) < .01 ? 4 : r.unit === "倍" ? 3 : 2)}${esc(r.unit)}`;
+    if (!filtered.length) return '<div class="mh-empty">没有符合筛选的指标</div>';
+    const rows=filtered.map(r=>{
+      const reclaimed=r.touched === true && r.hit === false ? `<small class="mh-touch">${payload.provisional ? "今日曾触发，当前已收回" : "当日曾触发，收盘未满足"}</small>` : "";
+      const extreme=`<td>${r.touched == null ? "不适用价格极值" : `${r.touched ? "曾触及" : "未触及"} · ${value({...r,value:r.extreme_value})}`}<small>${r.extreme_price == null ? "按对应指标实际观测判断" : `${esc(r.extreme_kind)} ${num(r.extreme_price,2)}`}</small></td>`;
+      const prior=payload.provisional ? `<td>${value({...r,value:r.closed_value})}<small>${esc(r.closed_as_of)} · ${r.closed_hit === true ? "收盘触发" : r.closed_hit === false ? "收盘未触发" : "无有效观测"}</small></td>` : "";
+      return `<tr data-rule-key="${esc(r.key)}"><td>${ruleStatus(r.hit,payload.provisional,r.near)}${reclaimed}</td><td><strong>${esc(r.label)}</strong><small>${esc(r.group)} · ${esc(r.note)}</small><small>数据日 ${esc(r.as_of || payload.as_of)}</small></td><td title="未舍入值 ${esc(r.value)}">${value(r)}<small>${esc(r.timing_note || r.data_at || r.as_of || payload.as_of)}</small></td>${extreme}${prior}<td>${esc(r.op)} ${num(r.threshold,r.unit === "倍" || r.unit === "x" ? 2 : 0)}${esc(r.unit)}${r.hit === false && r.gap != null ? `<small>还差 ${num(r.gap,4)} ${r.unit === "%" ? "个百分点" : esc(r.unit)}</small>` : ""}</td></tr>`;
+    }).join("");
+    return `<div class="mh-table-wrap"><table class="mh-rule-table"><thead><tr><th>当前状态</th><th>指标 / 依据</th><th>${payload.provisional ? "最新观测" : "收盘值"}</th><th>当日价格极值</th>${payload.provisional ? "<th>上一收盘</th>" : ""}<th>触发阈值</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
   function renderSignals() {
-    $("mhView-signals").innerHTML = `<div class="mh-controls"><label for="mhRuleSearch">搜索指标</label><input id="mhRuleSearch" type="search" placeholder="名称、维度或计算说明" value="${esc(ruleSearch)}"><label for="mhRuleFilter">状态</label><select id="mhRuleFilter"><option value="all">全部指标</option><option value="hit">已触发</option><option value="miss">未触发</option><option value="unknown">待补数据</option></select></div>
-      <div class="mh-grid">${["bottom","top"].map(type => { const s = payload.signals[type]; return `<article class="mh-box">${boxHead(type === "bottom" ? "底部特征 · 超卖与出清" : "顶部特征 · 拥挤与加速", `${s.hit}/12触发 · ${s.known}项可判定 · 强度 ${s.score == null ? "覆盖不足" : `${num(s.score,0)}/100`}`)}<div id="mhRules-${type}">${ruleTable(type)}</div></article>`; }).join("")}</div>
+    $("mhView-signals").innerHTML = `<div class="mh-controls"><label for="mhRuleSearch">搜索指标</label><input id="mhRuleSearch" type="search" placeholder="名称、维度或计算说明" value="${esc(ruleSearch)}"><label for="mhRuleFilter">状态</label><select id="mhRuleFilter"><option value="all">全部指标</option><option value="hit">当前满足</option><option value="touched">今日曾触及（价格类）</option><option value="miss">当前未满足</option><option value="unknown">本时段无有效观测</option></select></div>
+      <div class="mh-grid mh-signal-grid">${["bottom","top"].map(type => { const s = payload.signals[type]; return `<article class="mh-box">${boxHead(type === "bottom" ? "底部特征 · 超卖与出清" : "顶部特征 · 拥挤与加速", `${s.hit}/12${payload.provisional ? "当前满足" : "收盘触发"} · ${s.known}项可判定 · 强度 ${s.score == null ? "覆盖不足" : `${num(s.score,0)}/100`} · ${payload.as_of}价格极值曾触及${s.touched}/${s.touch_known}项`)}<div id="mhRules-${type}">${ruleTable(type)}</div></article>`; }).join("")}</div>
+      <div class="mh-notice">价格类底部规则同时观察今日最低价、当前价和上一收盘；顶部规则对应最高价。“曾触及”只表示今日出现过该极值，源未提供极值发生的具体分钟。广度、估值、量能与披露数据使用各自观测，不拼接不同时间的最低点。距离阈值≤0.5个百分点只提示临界观察，不放宽触发条件。</div>
       <div class="mh-notice">每张卡至少8项有效时才计算“触发数 / 有效项数 × 100”。相关指标不能当作独立投票；阈值为研究规则，未经顶底预测能力检验。原报告的放量反转项已移至独立确认区，新增RSI14，因此计数与原报告不可直接比较。</div>`;
     $("mhRuleFilter").value = ruleFilter;
     $("mhRuleSearch").addEventListener("input", e => { ruleSearch = e.target.value.trim(); updateRuleTables(); });
@@ -163,11 +175,11 @@
   function renderIndices() {
     const r = currentIndex(symbol);
     $("mhView-indices").innerHTML = `<div class="mh-controls"><label for="mhIndexSelect">指数</label><select id="mhIndexSelect">${payload.indices.map(i => `<option value="${esc(i.symbol)}">${esc(i.name)}</option>`).join("")}</select><div class="mh-segment" aria-label="趋势窗口">${[60,120,250].map(n => `<button type="button" data-mh-window="${n}" aria-pressed="${windowSize === n}">${n}交易日</button>`).join("")}</div></div>
-      <article class="mh-box mh-space">${boxHead(`${r.name || "指数"} · 收盘与均线`, `${r.as_of || "未取得"} · 当前 ${num(r.close,2)} · ${r.trend || "数据不足"}`, badge(`历史 ${num(r.bars,0)} 根`))}
+      <article class="mh-box mh-space">${boxHead(`${r.name || "指数"} · ${r.provisional ? "最新价与临时均线" : "收盘与均线"}`, `${r.quote_at || r.as_of || "未取得"} · 当前 ${num(r.close,2)} · ${r.trend || "数据不足"}`, badge(`历史 ${num(r.bars,0)} 根`))}
       <div class="mh-chart-legend"><span><i></i>收盘</span><span><i></i>MA20</span><span><i></i>MA250</span></div>
       ${chart((r.series || []).slice(-windowSize), ["close","ma20","ma250"], `${r.name}最近${windowSize}交易日走势`)}
-      <p class="mh-note">${(r.series || []).slice(-windowSize)[0]?.date || "—"} 至 ${r.as_of || "—"} · 收盘口径，横轴按交易日等距。</p></article>
-      <div class="mh-kpis">${stat("20日涨跌", signed(r.ret20), `60日 ${signed(r.ret60)}`)}${stat("RSI14", num(r.rsi14), "Wilder平滑 · ≤30超卖 / ≥80过热观察")}${stat("20日年化波动率", pct(r.volatility20), "对数日收益样本标准差 × √250")}${stat("当日 / 前5日均量", `${num(r.volume5,2)}x`, `当日 / 250日均量 ${num(r.volume250,2)}x`)}</div>
+      <p class="mh-note">${(r.series || []).slice(-windowSize)[0]?.date || "—"} 至 ${r.as_of || "—"} · ${r.provisional ? "末点为盘中最新价，其余为收盘" : "收盘口径"}，横轴按交易日等距。</p></article>
+      <div class="mh-kpis">${stat("20日涨跌", signed(r.ret20), `60日 ${signed(r.ret60)}`)}${stat("RSI14", num(r.rsi14), "Wilder平滑 · ≤30超卖 / ≥80过热观察")}${stat("20日年化波动率", pct(r.volatility20), "对数日收益样本标准差 × √250")}${stat("当日 / 前5日均量", r.provisional ? "收盘后确认" : `${num(r.volume5,2)}x`, r.provisional ? "全天成交量和均量比仅在收盘后确认" : `当日 / 250日均量 ${num(r.volume250,2)}x`)}</div>
       <article class="mh-box mh-space">${boxHead("指数指标矩阵", "各指数保留自己的数据日期；非同日指标不合入综合评分")}${indexTable(true)}</article>
       <article class="mh-box">${boxHead("波段回撤参考位", "近500个交易日：先低后高的收盘价锚点；仅作价位观察")}
       <div class="mh-kpis">${Object.entries(r.levels || {}).map(([p,v]) => stat(`${num(Number(p)*100)}% 回撤`, num(v,1), `波段低 ${num(r.swing_low,0)} / 高 ${num(r.peak,0)}`)).join("") || '<p class="mh-empty">缺少有效波段锚点</p>'}</div>
@@ -179,11 +191,11 @@
     const b = payload.breadth || {}, m = payload.market?.values || {};
     const barSpecs = [["站上MA20",b.above_ma20],["站上MA60",b.above_ma60],["站上MA250",b.above_ma250],["创60日收盘新低",b.newlow60],["创60日收盘新高",b.newhigh60]];
     const details = [["正PB中位数",`${num(m.pb_median,3)} 倍`],["正PE中位数",`${num(m.pe_median,2)} 倍`],["正PB样本破净率",pct(m.below_pb1_ratio)],["换手率中位数",pct(m.turnover_median)],["个股涨跌中位数",signed(m.chg_median)],["市值加权涨跌",signed(m.mv_weighted_chg)],["近涨停 / 近跌停",`${num(m.limit_up,0)} / ${num(m.limit_down,0)}`],["有效正PB / 正PE样本",`${num(m.pb_sample,0)} / ${num(m.pe_sample,0)}`]];
-    $("mhView-breadth").innerHTML = `<div class="mh-grid"><article class="mh-box">${boxHead("价格广度", `分层样本 ${num(b.sample,0)} 只；不同指标分母可能不同`, dateState(b.as_of))}
+    $("mhView-breadth").innerHTML = `<div class="mh-grid"><article class="mh-box">${boxHead("价格广度", `分层样本 ${num(b.sample,0)} 只；不同指标分母可能不同`, dateState(b.as_of,b.captured_at,b.provisional))}
       <div class="mh-bars">${barSpecs.map(([label,v]) => `<div class="mh-bar-row"><span>${label}</span><div class="mh-bar-track" style="--position:${Math.max(0,Math.min(100,v??0))}%"><i></i></div><strong>${pct(v)}</strong></div>`).join("")}</div>
       <p class="mh-note">个股250日高点回撤中位：${signed(b.dd52_median)}。${esc(b.note || "基于分层抽样，并非全A完整逐股统计。")}</p>
       <p class="mh-note">${Object.entries(b.denominators || {}).map(([k,v]) => `${esc(k)}：${num(v,0)}只`).join(" · ") || "原报告未保存逐指标分母；不推算精确抽样误差。"}</p></article>
-      <article class="mh-box">${boxHead("估值与交易结构", `有效交易个股 ${num(m.total,0)} 只 · ${esc(payload.market?.source || "未取得")}`,dateState(payload.market?.as_of))}
+      <article class="mh-box">${boxHead("估值与交易结构", `有效交易个股 ${num(m.total,0)} 只 · ${esc(payload.market?.source || "未取得")}`,dateState(payload.market?.as_of,payload.market?.captured_at,payload.market?.provisional))}
       <dl class="mh-detail-list">${details.map(([k,v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
       <p class="mh-note">PE/PB仅统计正值有效样本，不能直接当作交易所加权平均估值。“近涨跌停”按板块/ST涨跌幅近似，未核验实际涨跌停价，不含新股特殊规则。</p></article></div>
       <article class="mh-box mh-space">${boxHead("广度观测记录", "完整更新回算最近5个交易日；同一窗口固定成分和分母，同日重复更新不增加连续天数")}
@@ -191,7 +203,7 @@
       <div class="mh-notice">观察“指数与个股背离”：比较大盘与小盘20日收益差、指数回撤和个股回撤中位。样本口径不同只能交叉观察，不能直接把差值解释成确定的补跌空间。</div>`;
   }
   function renderConfirmation() {
-    $("mhView-confirmation").innerHTML = `<div class="mh-notice">将位置特征与趋势验证分开。以下为经验确认条件，至少3项触发后标记“条件满足”；缺失项保留待补，信号仍可能失效。跨日确认仅用已收盘交易日。</div>
+    $("mhView-confirmation").innerHTML = `<div class="mh-notice">收盘确认截至 ${esc(payload.confirmation_as_of || payload.as_of)}。盘中预警不改写此区。以下为经验确认条件，至少3项触发后标记“条件满足”；缺失项保留待补，信号仍可能失效。跨日确认仅用已收盘交易日。</div>
       <div class="mh-grid">${["bottom","top"].map(type => { const c=payload.confirmation[type]; return `<article class="mh-box">${boxHead(type === "bottom" ? "底部反转 · 观察修复" : "顶部转弱 · 观察破位", `${c.hit}/5 项触发 · ${c.known}项可判定`, badge(c.hit >= 3 ? "条件满足" : "等待验证", c.hit >= 3 ? "" : "muted"))}
         <ul class="mh-check-list">${c.items.map(r => `<li><span class="mh-check-icon ${r.hit === true ? "yes" : r.hit == null ? "unknown" : ""}">${r.hit === true ? "✓" : r.hit == null ? "?" : "○"}</span><div><strong>${esc(r.label)} · ${r.hit === true ? "已触发" : r.hit == null ? "待补数据" : "未触发"}</strong><small>${esc(r.note)}</small></div></li>`).join("")}</ul></article>`; }).join("")}</div>
       <article class="mh-box">${boxHead("如何跟踪信号是否失效")}
@@ -239,12 +251,25 @@
     $("mhJob").hidden = !job;
     if (!job) return;
     const status = {queued:"已排队",running:"更新中",finished:"更新完成",failed:"更新失败"}[job.status] || job.status;
-    const detail = job.error || job.result?.notes?.join("；") || job.logs?.slice(-1)[0] || "正在准备数据";
+    const detail = job.error || job.result?.notes?.join("；") || job.logs?.slice(-1)[0] || (busy ? "正在准备数据" : "本轮更新已结束，请以各统计实际数据时点为准");
     $("mhJob").innerHTML = `${busy ? `<progress value="${Math.max(0,Math.min(100,job.progress || 0))}" max="100"></progress>` : ""}<strong>${esc(status)}${busy ? ` ${num(job.progress || 0,0)}%` : ""}</strong><small>${esc(detail)}</small>`;
     if (busy) pollTimer=setTimeout(() => load(true),2500);
   }
+  function activatePayload() {
+    const current=viewMode === "latest" ? envelope.intraday : null;
+    payload={...envelope,...(current || {}),provisional:Boolean(current),job:envelope.job,stale:current ? false : envelope.stale};
+  }
+  function renderTiming() {
+    const status=envelope.live_status || {};
+    $("mhLatestMode").setAttribute("aria-pressed",String(viewMode === "latest"));
+    $("mhCloseMode").setAttribute("aria-pressed",String(viewMode === "close"));
+    $("mhLatestMode").disabled=false;$("mhCloseMode").disabled=false;
+    $("mhQuoteStatus").textContent=`${viewMode === "close" ? `已选择收盘确认 ${envelope.as_of}。` : ""}${status.message || ""}；行情时间 ${status.quote_at || "未取得"}${status.error ? `；${status.error}` : ""}`;
+    $("mhTimingBody").innerHTML=`<p class="mh-note">页面计算 ${esc(envelope.generated_at)}；实时请求 ${esc(status.requested_at || "未请求")}。下面列的是统计输入的实际日期/时间，刷新时间不代表披露数据已更新。</p><div class="mh-table-wrap"><table><thead><tr><th>统计项目</th><th>实际数据日 / 行情时间</th><th>时点类型</th><th>来源与更新说明</th></tr></thead><tbody>${(payload.timing || []).map(r=>`<tr><td>${esc(r.label)}</td><td>${esc(r.data_at || "未取得")}<small>交易日 ${esc(r.as_of || "未取得")}</small></td><td>${badge(r.kind,/上一|非今日|历史|旧日/.test(r.kind) ? "warn" : "")}</td><td>${esc(r.source || "未取得")}<small>${esc(r.note)}</small></td></tr>`).join("")}</tbody></table></div>`;
+  }
   function render() {
-    $("mhMeta").textContent = `基准交易日 ${payload.as_of || "未取得"} · ${payload.source === "baseline" ? "2026-10-22研究基线" : "已更新收盘快照"} · ${payload.updated_at ? `采集 ${payload.updated_at.slice(0,16).replace("T"," ")}` : "尚未执行公开数据更新"}`;
+    $("mhMeta").textContent = payload.provisional ? `今日盘中预警 · 指数行情 ${payload.quote_at} · 收盘确认截至 ${payload.confirmation_as_of}` : `收盘统计 ${payload.as_of || "未取得"} · ${payload.source === "baseline" ? "研究基线" : "收盘快照"} · 今日实时行情另按源时间标记`;
+    renderTiming();
     if ($("refreshMeta")) $("refreshMeta").textContent = `体检 · ${payload.as_of || "待更新"}`;
     if (!payload.indices.some(r => r.symbol === symbol)) symbol="sh000001";
     renderOverview();renderCross();renderSignals();renderIndices();renderBreadth();renderConfirmation();renderHistory();renderMethod();
@@ -256,15 +281,22 @@
     if (!response.ok) { let message="数据读取失败，请重试";try { message=(await response.json()).error || message; } catch {} throw new Error(message); }
     return response.json();
   }
-  async function load(poll = false) {
+  function scheduleLive() {
+    clearTimeout(liveTimer);
+    liveTimer=setTimeout(()=>{if (!document.hidden) load(true);else scheduleLive();},30000);
+  }
+  async function load(poll = false, force = false) {
     const id=++requestId;
     try {
-      const value=await request("/api/market-health");
+      const value=await request(`/api/market-health?live=${force ? "force" : "1"}`);
       if (id !== requestId) return;
-      const unchanged=payload && payload.as_of===value.as_of && payload.updated_at===value.updated_at && payload.fusion?.updated_at===value.fusion?.updated_at;
-      payload=value;error();
+      const old=payload;
+      envelope=value;activatePayload();error();
+      const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message;
       if (poll && unchanged) renderJob(value.job); else render();
-      if (!autoStarted && (value.source === "baseline" || !value.fusion?.updated_at) && !value.job) { autoStarted=true;refresh("full"); }
+      scheduleLive();
+      const needsFull=value.source === "baseline" || !value.fusion?.updated_at || (value.live_status?.available && (value.intraday?.market?.as_of !== value.live_status.as_of || value.intraday?.breadth?.as_of !== value.live_status.as_of));
+      if (!autoStarted && needsFull && (!value.job || ["finished","failed"].includes(value.job.status))) { autoStarted=true;refresh("full"); }
     } catch (e) {
       error(`${e.message}。${payload ? "已有快照继续保留显示。" : "请点击顶部刷新重试。"}`);
       $("mhLoading").hidden=true;root.setAttribute("aria-busy","false");
@@ -272,8 +304,9 @@
     }
   }
   async function refresh(mode) {
+    if (mode === "full") document.dispatchEvent(new CustomEvent("market-health-full-refresh"));
     error();$("mhIndexRefresh").disabled=true;$("mhFullRefresh").disabled=true;$("mhCrossRefresh").disabled=true;
-    try { const value=await request("/api/market-health/refresh",{method:"POST",body:JSON.stringify({mode})});renderJob(value.job);if (payload) payload.job=value.job; }
+    try { await load(false,true);const value=await request("/api/market-health/refresh",{method:"POST",body:JSON.stringify({mode})});renderJob(value.job);if (payload) payload.job=value.job;if (envelope) envelope.job=value.job; }
     catch (e) { error(e.message);$("mhIndexRefresh").disabled=false;$("mhFullRefresh").disabled=false;$("mhCrossRefresh").disabled=false; }
   }
   $("mhTabs").addEventListener("click", e => { const b=e.target.closest("[data-mh-tab]");if (b) selectTab(b.dataset.mhTab); });
@@ -290,15 +323,17 @@
     if (h) { horizon=Number(h.dataset.mhHorizon);renderHistory(); }
   });
   $("mhIndexRefresh").addEventListener("click", () => refresh("indices"));
+  $("mhLatestMode").addEventListener("click",()=>{viewMode="latest";activatePayload();render();remember();load(false,true);});
+  $("mhCloseMode").addEventListener("click",()=>{viewMode="close";activatePayload();render();remember();});
   $("mhCrossRefresh").addEventListener("click", () => refresh("cross"));
   $("mhFullRefresh").addEventListener("click", () => refresh("full"));
   // 专属页面接管共享刷新按钮，避免外壳只刷新任务列表。
-  $("refreshBtn")?.addEventListener("click", e => {e.stopImmediatePropagation();load();},true);
+  $("refreshBtn")?.addEventListener("click", e => {e.stopImmediatePropagation();refresh("full");},true);
   $("mhExport").addEventListener("click", () => {
     if (!payload) return;
     const url=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json;charset=utf-8"}));
     const a=document.createElement("a");a.href=url;a.download=`大盘体检_${payload.as_of || "未更新"}.json`;a.click();setTimeout(() => URL.revokeObjectURL(url),1000);
   });
-  window.addEventListener("pagehide", () => clearTimeout(pollTimer));
+  window.addEventListener("pagehide", () => {clearTimeout(pollTimer);clearTimeout(liveTimer);});
   selectTab(section);load();
 })();

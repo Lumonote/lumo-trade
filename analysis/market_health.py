@@ -167,8 +167,10 @@ def breadth_history(histories, dates):
 
 def _rule(key, label, value, op, threshold, group, note, unit="%"):
     hit = None if value is None else value <= threshold if op == "≤" else value >= threshold
+    gap = None if value is None else value-threshold if op == "≤" else threshold-value
     return {"key": key, "label": label, "value": value, "op": op, "threshold": threshold,
-            "hit": hit, "group": group, "note": note, "unit": unit}
+            "hit": hit, "group": group, "note": note, "unit": unit,
+            "gap":gap,"near":hit is False and unit == "%" and gap <= .5}
 
 
 def signal_cards(indices, market, breadth):
@@ -296,9 +298,79 @@ def build_health(state):
             stage = "弱势运行" if temp["score"] <= 40 else "强势运行" if temp["score"] >= 60 else "中性震荡"
     spread = (same_day["sh000852"].get("ret20")-same_day["sh000300"].get("ret20")
               if all(s in same_day and same_day[s].get("ret20") is not None for s in ("sh000852", "sh000300")) else None)
-    return {"version": VERSION, "as_of": as_of, "stage": stage, "temperature": temp, "signals": signals,
+    result = {"version": VERSION, "as_of": as_of, "stage": stage, "temperature": temp, "signals": signals,
             "confirmation": confirms, "indices": list(indices.values()), "market": m, "breadth": b,
             "style_spread": spread, "observations": state.get("observations", []), "notes": state.get("notes", []),
             "source": state.get("source", "baseline"), "updated_at": state.get("updated_at"),
             "historical": state.get("historical", {}), "historical_as_of": "2026-10-22",
             "report_url": "/api/market-health/report"}
+    attach_price_extremes(result,state.get("bars",{}))
+    return result
+
+
+def attach_price_extremes(health, bars_by_symbol):
+    """价格极值只改变“曾触及”事件，不改变当前/收盘状态。"""
+    price_keys = {"cy_dev":"sz399006","cy_dd":"sz399006","cy_ret":"sz399006",
+                  "sh_dev":"sh000001","sh_dd":"sh000001","sh_ret":"sh000001","rsi":"sh000001"}
+    for side in ("bottom","top"):
+        extremal, prices = {}, {}
+        for symbol in ("sh000001","sz399006"):
+            bars = normalize_bars(bars_by_symbol.get(symbol,[]))
+            if not bars or bars[-1]["date"] != health["as_of"]:
+                continue
+            price = bars[-1].get("low" if side == "bottom" else "high")
+            if price and price > 0 and (price <= bars[-1]["close"] if side == "bottom" else price >= bars[-1]["close"]):
+                extremal[symbol] = index_metrics(symbol,bars[:-1]+[{**bars[-1],"close":price}])
+                prices[symbol] = price
+        extreme_rules = {r["key"]:r for r in signal_cards(extremal,{}, {})[side]["rules"]}
+        rules = health["signals"][side]["rules"]
+        for rule in rules:
+            symbol = price_keys.get(rule["key"])
+            if symbol in extremal:
+                edge = extreme_rules[rule["key"]]
+                rule.update(touched=edge["hit"],extreme_value=edge["value"],extreme_price=prices[symbol],
+                            extreme_kind="当日最低点" if side == "bottom" else "当日最高点",extreme_as_of=health["as_of"])
+            else:
+                rule.update(touched=None,extreme_value=None,extreme_kind="不适用价格极值")
+        health["signals"][side].update(touched=sum(r.get("touched") is True for r in rules),
+                                       touch_known=sum(r.get("touched") is not None for r in rules))
+
+
+def build_intraday_health(state, live):
+    """以真实最新价构建当日临时K线；不写入收盘序列，不以半日量判断缩量。"""
+    from copy import deepcopy
+    closed = build_health(state)
+    date = live.get("as_of")
+    if not date or not closed["as_of"] or date <= closed["as_of"]:
+        return None
+    temporary = deepcopy(state)
+    quotes, accepted = live.get("quotes",{}), {}
+    for symbol, quote in quotes.items():
+        price, previous = number(quote.get("price")), number(quote.get("previous_close"))
+        bars = [r for r in normalize_bars(state.get("bars",{}).get(symbol,[])) if r["date"] < date]
+        if (not bars or len(bars) < 249 or quote.get("as_of") != date or not price or price <= 0
+            or previous is None or abs(previous-bars[-1]["close"]) > max(.02,previous*.00005)):
+            continue
+        temporary["bars"][symbol] = bars+[{"date":date,"close":price,"open":quote.get("open"),
+                                          "high":quote.get("high"),"low":quote.get("low"),"volume":None}]
+        accepted[symbol] = quote
+    if "sh000001" not in accepted:
+        return None
+    temporary["market"] = live.get("market") or state.get("market",{})
+    temporary["breadth"] = live.get("breadth") or state.get("breadth",{})
+    result = build_health(temporary)
+    result.update(provisional=True,quote_at=accepted["sh000001"]["quote_at"],
+                  source="intraday",confirmation=closed["confirmation"],confirmation_as_of=closed["as_of"],
+                  stage="盘中观测 · 等待收盘确认",observations=live.get("observations") or state.get("observations",[]))
+    for row in result["indices"]:
+        quote = accepted.get(row["symbol"])
+        row.update(quote_at=quote.get("quote_at") if quote else None,provisional=bool(quote))
+    for side in ("bottom","top"):
+        old = {r["key"]:r for r in closed["signals"][side]["rules"]}
+        for rule in result["signals"][side]["rules"]:
+            rule.update(as_of=date,provisional=True,closed_value=old[rule["key"]]["value"],
+                        closed_hit=old[rule["key"]]["hit"],closed_as_of=closed["as_of"])
+            if rule["key"] == "volume":
+                rule["note"] = "全天量能条件收盘后判定；上一收盘状态见对照列，盘中不以累计量冒充全天缩量"
+    result["_bars"] = temporary["bars"]
+    return result

@@ -32,7 +32,7 @@ def cached_positions(as_of):
 
 
 def compact_quant(payload):
-    keep = ("gauge","snapshot_date","fallback_date","sectors","note","error","proxy")
+    keep = ("gauge","snapshot_date","fallback_date","sectors","note","error","proxy","updated_at")
     result = {k:payload.get(k) for k in keep}
     # 完整按日榜覆盖优先于kv仅保存的前300只，避免候选样本分母被截断。
     date = iso(payload.get("fallback_date") or payload.get("snapshot_date") or (payload.get("gauge") or {}).get("date"))
@@ -44,16 +44,26 @@ def compact_quant(payload):
 
 def read_cached(as_of):
     from webui.services.market_health_service import read_baseline
-    hit = kv_repo.get(NAMESPACE,"cross")
-    result = {**read_baseline().get("cross",{}), **(hit[0] if hit else {})}
+    hit = kv_repo.get(NAMESPACE,f"cross:{as_of}") or kv_repo.get(NAMESPACE,"cross")
+    baseline = read_baseline().get("cross",{})
+    result = {**baseline, **(hit[0] if hit else {})}
+    quant = result.get("quant") or {}
+    quant_date = iso(quant.get("fallback_date") or quant.get("snapshot_date") or (quant.get("gauge") or {}).get("date"))
+    if quant_date and quant_date > str(as_of):
+        # A later intraday cache must not leak into an explicitly selected closed view.
+        result["quant"] = baseline.get("quant", {})
     futures = dict(result.get("futures", {}))
+    quote_dates = [iso((p.get("main") or {}).get("tradedate")) for p in (futures.get("quotes") or {}).get("products",[])]
+    if quote_dates and any(d and d > str(as_of) for d in quote_dates):
+        futures = {**futures,"quotes":(baseline.get("futures") or {}).get("quotes"),
+                   "previous_quotes":(baseline.get("futures") or {}).get("previous_quotes")}
     positions = cached_positions(as_of)
-    if positions:
-        merged = {p["variety"]:p for p in futures.get("positions",[])}
-        for p in positions:
-            if p.get("date", "") >= merged.get(p["variety"],{}).get("date", ""):
-                merged[p["variety"]] = p
-        futures["positions"] = list(merged.values())
+    merged = {p["variety"]:p for p in (baseline.get("futures") or {}).get("positions",[]) if p.get("date","") <= str(as_of)}
+    merged.update({p["variety"]:p for p in futures.get("positions",[]) if p.get("date","") <= str(as_of)})
+    for p in positions:
+        if p.get("date", "") >= merged.get(p["variety"],{}).get("date", ""):
+            merged[p["variety"]] = p
+    futures["positions"] = list(merged.values())
     memory = futures_service._overview_cache.get("payload")
     if memory and not futures.get("quotes"):
         # 既有行情没有同日现货校验：可展示合约，不直接参与基差判断。
@@ -63,7 +73,7 @@ def read_cached(as_of):
     if dates:
         date = dates[0]
         old_date = iso((result.get("quant") or {}).get("fallback_date") or (result.get("quant") or {}).get("snapshot_date") or ((result.get("quant") or {}).get("gauge") or {}).get("date"))
-        if not old_date or iso(date) >= old_date:
+        if not old_date or old_date > str(as_of) or iso(date) >= old_date:
             cached = kv_repo.get("quant_radar",f"day:{str(date).replace('-','')}")
             rows = quant_radar_repo.get_day(date,limit=0)
             payload = cached[0] if cached else {"gauge":{"date":iso(date),"bull":sum(r.get("changes_bull") or 0 for r in rows),"bear":sum(r.get("changes_bear") or 0 for r in rows)},"snapshot_date":iso(date),"stocks":rows}
@@ -102,11 +112,12 @@ def _verified_futures():
     for symbol, body in re.findall(r'hq_str_(sh\d{6})="([^"]+)"',raw):
         fields = body.split(",")
         if len(fields) > 31:
-            spots[symbol] = {"price":number(fields[3]),"date":iso(fields[30])}
+            spots[symbol] = {"price":number(fields[3]),"date":iso(fields[30]),"quote_at":f"{fields[30]}T{fields[31]}"}
     for product in payload.get("products", []):
         spot = spots.get((product.get("index") or {}).get("code"),{})
         for contract in product.get("contracts", []):
             contract["verified_basis_pct"] = None
+            contract["spot_quote_at"] = spot.get("quote_at")
             if spot.get("date") and iso(contract.get("tradedate")) == spot["date"] and spot.get("price") and number(contract.get("price")) is not None:
                 contract["verified_basis_pct"] = (contract["price"]/spot["price"]-1)*100
         main = product.get("main") or {}
@@ -314,6 +325,7 @@ def collect(as_of, progress, previous_date=None):
             progress(f"{LABELS[key]}证据已读取（{i}/4）")
     result["updated_at"] = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat()
     kv_repo.set_(NAMESPACE,"cross",result)
+    kv_repo.set_(NAMESPACE,f"cross:{as_of}",result)
     return result
 
 

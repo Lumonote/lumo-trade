@@ -1,6 +1,6 @@
 <section id="marketHealthRoot" class="mh-root" aria-label="大盘完整体检" aria-busy="true">
   <div class="mh-heading">
-    <div><span class="mh-eyebrow">A 股市场观察 / 收盘体检</span><h2>看清位置，等待确认。</h2><p id="mhMeta">正在读取研究快照…</p></div>
+    <div><span class="mh-eyebrow">A 股市场观察 / 实时预警与收盘确认</span><h2>看清位置，等待确认。</h2><p id="mhMeta">正在读取行情与研究快照…</p></div>
     <div class="mh-actions">
       <button type="button" class="button secondary" id="mhCrossRefresh">跨市场分析</button>
       <button type="button" class="button secondary" id="mhIndexRefresh">更新指数</button>
@@ -8,21 +8,30 @@
       <button type="button" class="button secondary" id="mhExport" disabled>导出快照</button>
     </div>
   </div>
+  <div class="mh-controls"><div class="mh-segment" aria-label="数据时段"><button id="mhLatestMode" type="button" aria-pressed="true" disabled>最新观测 / 盘中预警</button><button id="mhCloseMode" type="button" aria-pressed="false" disabled>收盘确认</button></div><small id="mhQuoteStatus" role="status"></small></div>
+  <details id="mhTiming" class="mh-box mh-space"><summary>所有统计的数据时点与来源</summary><div id="mhTimingBody"></div></details>
   <div id="mhError" class="mh-notice mh-error" role="alert" hidden></div>
   <div id="mhJob" class="mh-job" role="status" hidden></div>
   <nav id="mhTabs" class="mh-tabs" aria-label="体检分区" role="tablist">
-    {% for key, label in [('overview','综合总览'),('cross','跨市场研判'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
+    {% for key, label in [('overview','综合总览'),('cross','跨市场研判'),('sectors','板块深度'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
     <button type="button" role="tab" id="mhTab-{{ key }}" aria-controls="mhView-{{ key }}" aria-selected="{{ 'true' if key == 'overview' else 'false' }}" tabindex="{{ '0' if key == 'overview' else '-1' }}" data-mh-tab="{{ key }}">{{ label }}</button>
     {% endfor %}
   </nav>
   <div id="mhLoading" class="mh-loading" role="status"><div></div><div></div><div></div><p>正在计算顶底特征与市场温度…</p></div>
   <section id="mhView-overview" role="tabpanel" aria-labelledby="mhTab-overview"></section>
   <section id="mhView-cross" role="tabpanel" aria-labelledby="mhTab-cross" hidden></section>
+  <section id="mhView-sectors" role="tabpanel" aria-labelledby="mhTab-sectors" hidden>
+    <div class="mh-box mh-space"><div class="mh-box-head"><div><h3>追踪资金的去向与持续性</h3><p id="sdMeta">正在读取板块研究…</p></div><div class="mh-actions"><button class="button" id="sdRefresh" type="button">更新板块研究</button><button class="button secondary" id="sdExport" type="button" disabled>导出板块研究</button></div></div>
+    <div class="mh-controls"><label for="sdType">板块类型</label><select id="sdType"><option>行业</option><option>概念</option></select><label for="sdSearch">搜索</label><input id="sdSearch" type="search" placeholder="板块名称或代码"><label for="sdSort">排序</label><select id="sdSort"><option value="net">当日净流入</option><option value="score">综合承接强度</option><option value="persistence">持续性刻度</option><option value="flow5">五日净额</option><option value="rate">净流入占比</option><option value="excess5">五日相对强度</option></select><label><input id="sdPositive" type="checkbox" checked> 仅当日净流入</label></div>
+    <p id="sdStatus" class="mh-note" role="status"></p><p id="sdError" class="mh-notice mh-error" role="alert" hidden></p></div>
+    <div id="sdSummary" class="mh-space"></div><div id="sdLive" class="mh-space"></div><div id="sdRank" class="mh-box mh-space"></div><div id="sdDetail" class="mh-space"></div><div id="sdRotation" class="mh-box mh-space"></div>
+    <details class="mh-box mh-method"><summary>数据来源、完整窗口与计算口径</summary><p>当日资金强度是同类型板块的净额百分位与净流入占比百分位均值；持续性刻度由五日正流入天数40%、净额/绝对资金总额20%、前20%排名驻留20%、跑赢沪深300与否20%组成。综合承接强度为两项均值，属于描述刻度，不是未来上涨概率。</p><p>连续窗口逐日对齐交易所交易日历。缺日或缺值不会补零，缺失窗口不计算；同日反复刷新也不增加连续天数。五日相对强度采用板块与沪深300复合收益之比。排行仅比较所列类型板块，概念成分重叠，不能把各概念资金加总成全市场资金。</p><p>板块资金 <a href="https://tushare.pro/document/2?doc_id=344" target="_blank" rel="noopener">moneyflow_ind_dc</a> 为元；个股资金 <a href="https://tushare.pro/document/2?doc_id=349" target="_blank" rel="noopener">moneyflow_dc</a> 为万元，已转换为元。成分使用 <a href="https://tushare.pro/document/2?doc_id=363" target="_blank" rel="noopener">dc_member 同日成分</a>；板块量价使用 <a href="https://tushare.pro/document/2?doc_id=382" target="_blank" rel="noopener">dc_daily</a>。主力是订单规模口径，不等于识别了机构身份。</p></details>
+  </section>
   <section id="mhView-signals" role="tabpanel" aria-labelledby="mhTab-signals" hidden></section>
   <section id="mhView-indices" role="tabpanel" aria-labelledby="mhTab-indices" hidden></section>
   <section id="mhView-breadth" role="tabpanel" aria-labelledby="mhTab-breadth" hidden></section>
   <section id="mhView-confirmation" role="tabpanel" aria-labelledby="mhTab-confirmation" hidden></section>
   <section id="mhView-history" role="tabpanel" aria-labelledby="mhTab-history" hidden></section>
   <section id="mhView-method" role="tabpanel" aria-labelledby="mhTab-method" hidden></section>
-  <p class="mh-footnote">特征分与温度为可解释的研究刻度，不是顶底概率。极端情绪可能持续，趋势转折需后续交易日验证。</p>
+  <p class="mh-footnote">盘中曾触及、当前满足和收盘确认分别统计；今日低点/高点不等于收盘。特征分与温度为研究刻度，不是顶底概率。</p>
 </section>

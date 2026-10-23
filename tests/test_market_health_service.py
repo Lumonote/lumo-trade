@@ -4,9 +4,15 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from webui.services import market_health_service as service
 from webui.services import market_health_cross_service as cross
+
+
+@pytest.fixture(autouse=True)
+def no_live_network(monkeypatch):
+    monkeypatch.setattr(service,"fetch_live_quotes",lambda **kwargs:{})
 
 
 class Jobs:

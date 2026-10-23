@@ -61,3 +61,20 @@ def test_invalid_refresh_body_is_400(runtime):
     with TestClient(runtime.app) as client:
         response=client.post("/api/market-health/refresh",json_data={"mode":"delete"})
     assert response.status_code==400
+
+
+def test_sector_research_routes_include_real_dated_baseline_and_constituents(runtime):
+    from robyn.testing import TestClient
+    with TestClient(runtime.app) as client:
+        response=client.get("/api/market-health/sectors")
+        assert response.status_code==200
+        value=response.json()
+        assert len(value["rows"])>100 and len(value["calendar"])>=20
+        code=next(iter(runtime.sector_depth_service.baseline()["details"]))
+        detail=client.get("/api/market-health/sectors/detail",query_params={"code":code}).json()
+        assert detail["as_of"]==detail["member_as_of"]==value["as_of"]
+        assert detail["covered"]==detail["members"]
+        assert client.get("/api/market-health/sectors/detail",query_params={"code":"invalid"}).status_code==400
+        page=client.get("/desktop/market_health").text
+        assert 'id="mhView-sectors"' in page and "lumo_sector_depth.js" in page
+        assert client.get("/static/lumo_sector_depth.js").status_code==200

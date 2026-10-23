@@ -32,6 +32,7 @@ from webui.services import license_service
 from webui.services import stock_screener_service
 from webui.services import growth_research_service
 from webui.services import market_health_service
+from webui.services import sector_depth_service
 from webui.services.watchlist_service import WatchlistStorageError
 from data_store import quant_radar_repo, star_orbit_repo
 
@@ -894,7 +895,8 @@ def market_pulse(request: Request) -> Response:
 
 @_native_get("/api/market-health")
 def market_health(request: Request) -> Response:
-    return _json_response(market_health_service.query(webui_core.JOB_SERVICE))
+    live = _query_value(request,"live","")
+    return _json_response(market_health_service.query(webui_core.JOB_SERVICE,refresh_live=live in ("1","force"),force_live=live == "force"))
 
 
 @_native_post("/api/market-health/refresh")
@@ -906,6 +908,24 @@ def market_health_refresh(request: Request) -> Response:
         return _json_response({"job": job}, status_code=202)
     except (ValueError, TypeError, AttributeError):
         return _json_response({"error": "更新模式必须为 full、cross 或 indices"}, status_code=400)
+
+
+@_native_get("/api/market-health/sectors")
+def market_health_sectors(request: Request) -> Response:
+    return _json_response(sector_depth_service.query(webui_core.JOB_SERVICE))
+
+
+@_native_post("/api/market-health/sectors/refresh")
+def market_health_sectors_refresh(request: Request) -> Response:
+    return _json_response({"job":sector_depth_service.start_refresh(webui_core.JOB_SERVICE)},status_code=202)
+
+
+@_native_get("/api/market-health/sectors/detail")
+def market_health_sectors_detail(request: Request) -> Response:
+    try:
+        return _json_response(sector_depth_service.detail(str(_query_value(request,"code","")).strip(),refresh=_query_value(request,"refresh","")=="1"))
+    except ValueError as exc:
+        return _json_response({"error":str(exc)},status_code=400)
 
 
 # ----------------------------- 模拟盘 paper trading -----------------------------
