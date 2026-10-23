@@ -31,6 +31,7 @@ from webui.services import futures_service, quant_radar_service, star_orbit_serv
 from webui.services import license_service
 from webui.services import stock_screener_service
 from webui.services import growth_research_service
+from webui.services import market_health_service
 from webui.services.watchlist_service import WatchlistStorageError
 from data_store import quant_radar_repo, star_orbit_repo
 
@@ -889,6 +890,22 @@ def market_pulse(request: Request) -> Response:
     """指数风向 + 板块机会与拐点(总览页两个分区;盘中 30s 一拍独立刷新)。"""
     as_of = (_query_value(request, "as_of") or "").strip() or None
     return _json_response(webui_core.market_pulse_payload(as_of=as_of))
+
+
+@_native_get("/api/market-health")
+def market_health(request: Request) -> Response:
+    return _json_response(market_health_service.query(webui_core.JOB_SERVICE))
+
+
+@_native_post("/api/market-health/refresh")
+def market_health_refresh(request: Request) -> Response:
+    try:
+        data = _request_json(request)
+        job = market_health_service.start_refresh(
+            data.get("mode", "full"), webui_core.JOB_SERVICE, webui_core._market_pulse_index_bars)
+        return _json_response({"job": job}, status_code=202)
+    except (ValueError, TypeError, AttributeError):
+        return _json_response({"error": "更新模式必须为 full、cross 或 indices"}, status_code=400)
 
 
 # ----------------------------- 模拟盘 paper trading -----------------------------

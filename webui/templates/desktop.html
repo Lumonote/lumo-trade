@@ -8,6 +8,9 @@
     <link rel="stylesheet" href="/static/lumo_desktop.css?v={{ asset_v('lumo_desktop.css') }}" />
     <link rel="stylesheet" href="/static/lumo_operations.css?v={{ asset_v('lumo_operations.css') }}" />
     <link rel="stylesheet" href="/static/lumo_panic.css?v={{ asset_v('lumo_panic.css') }}" />
+    {% if active_page == 'market_health' %}
+    <link rel="stylesheet" href="/static/lumo_market_health.css?v={{ asset_v('lumo_market_health.css') }}" />
+    {% endif %}
     {% if active_page == 'growth_research' %}
     <link rel="stylesheet" href="/static/lumo_growth_research.css?v={{ asset_v('lumo_growth_research.css') }}" />
     {% endif %}
@@ -66,6 +69,10 @@
         </header>
 
         {# 「总览」页已并入 features 单页（见 DESKTOP_PAGE_ALIASES: overview→features） #}
+
+        {% if active_page == 'market_health' %}
+        {% include 'market_health_panel.html' %}
+        {% endif %}
 
         {% if active_page == 'market_cloud' %}
         <section id="marketCloudRoot" class="market-cloud-screen"></section>
@@ -1051,6 +1058,7 @@
             </div>
           </div>
           <div class="actions">
+            <a class="button secondary" href="/desktop/market_health">大盘体检 · 顶底与温度</a>
             <a class="button secondary" href="/">系统首页</a>
             <a class="button secondary" href="/desktop/settings">后台配置</a>
           </div>
@@ -1671,6 +1679,9 @@
       if (typeof JOB_TYPE_LABELS !== 'undefined') JOB_TYPE_LABELS.growth_research = '成长研究';
     </script>
     <script src="/static/lumo_panic.js?v={{ asset_v('lumo_panic.js') }}"></script>
+    {% if active_page == 'market_health' %}
+    <script src="/static/lumo_market_health.js?v={{ asset_v('lumo_market_health.js') }}"></script>
+    {% endif %}
     <script src="/static/lumo_operations.js?v={{ asset_v('lumo_operations.js') }}"></script>
     <script src="/static/lumo_quant_sector_clicks.js?v={{ asset_v('lumo_quant_sector_clicks.js') }}"></script>
     <script src="/static/lumo_market_cloud.js?v={{ asset_v('lumo_market_cloud.js') }}"></script>

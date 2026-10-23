@@ -4967,6 +4967,10 @@ DESKTOP_PAGES = {
         'title': '总览',
         'subtitle': '市场状态、核心指标、热榜与个股快搜',
     },
+    'market_health': {
+        'title': '大盘体检',
+        'subtitle': '指数、广度、估值、股指期货、融资融券、量化与资金的综合研判',
+    },
     'watchlist': {
         'title': '自选',
         'subtitle': '自选股实时行情、快捷分析与一键管理',

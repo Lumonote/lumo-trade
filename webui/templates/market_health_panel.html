@@ -1,0 +1,28 @@
+<section id="marketHealthRoot" class="mh-root" aria-label="大盘完整体检" aria-busy="true">
+  <div class="mh-heading">
+    <div><span class="mh-eyebrow">A 股市场观察 / 收盘体检</span><h2>看清位置，等待确认。</h2><p id="mhMeta">正在读取研究快照…</p></div>
+    <div class="mh-actions">
+      <button type="button" class="button secondary" id="mhCrossRefresh">跨市场分析</button>
+      <button type="button" class="button secondary" id="mhIndexRefresh">更新指数</button>
+      <button type="button" class="button" id="mhFullRefresh">更新公开数据</button>
+      <button type="button" class="button secondary" id="mhExport" disabled>导出快照</button>
+    </div>
+  </div>
+  <div id="mhError" class="mh-notice mh-error" role="alert" hidden></div>
+  <div id="mhJob" class="mh-job" role="status" hidden></div>
+  <nav id="mhTabs" class="mh-tabs" aria-label="体检分区" role="tablist">
+    {% for key, label in [('overview','综合总览'),('cross','跨市场研判'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
+    <button type="button" role="tab" id="mhTab-{{ key }}" aria-controls="mhView-{{ key }}" aria-selected="{{ 'true' if key == 'overview' else 'false' }}" tabindex="{{ '0' if key == 'overview' else '-1' }}" data-mh-tab="{{ key }}">{{ label }}</button>
+    {% endfor %}
+  </nav>
+  <div id="mhLoading" class="mh-loading" role="status"><div></div><div></div><div></div><p>正在计算顶底特征与市场温度…</p></div>
+  <section id="mhView-overview" role="tabpanel" aria-labelledby="mhTab-overview"></section>
+  <section id="mhView-cross" role="tabpanel" aria-labelledby="mhTab-cross" hidden></section>
+  <section id="mhView-signals" role="tabpanel" aria-labelledby="mhTab-signals" hidden></section>
+  <section id="mhView-indices" role="tabpanel" aria-labelledby="mhTab-indices" hidden></section>
+  <section id="mhView-breadth" role="tabpanel" aria-labelledby="mhTab-breadth" hidden></section>
+  <section id="mhView-confirmation" role="tabpanel" aria-labelledby="mhTab-confirmation" hidden></section>
+  <section id="mhView-history" role="tabpanel" aria-labelledby="mhTab-history" hidden></section>
+  <section id="mhView-method" role="tabpanel" aria-labelledby="mhTab-method" hidden></section>
+  <p class="mh-footnote">特征分与温度为可解释的研究刻度，不是顶底概率。极端情绪可能持续，趋势转折需后续交易日验证。</p>
+</section>
