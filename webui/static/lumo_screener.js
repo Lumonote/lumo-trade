@@ -16,7 +16,7 @@
   if (!$('scrRunBtn') || typeof window.fetchJson !== 'function') return;
 
   var ADV_KEY = 'lumo.screener.advOpen';
-  var state = { payload: null, page: 1, pageSize: 50, sortKey: '', sortDir: -1, query: '' };
+  var state = { payload: null, page: 1, pageSize: 50, sortKey: '', sortDir: -1, query: '', limit: 2000 };
   var PRESET_TEXT = {};
 
   // ---------- 接管旧事件(避免双绑定) ----------
@@ -187,7 +187,9 @@
     }
 
     cond.sort = selVal('scrSort') || 'main_net_wan';
-    cond.limit = 0;  // 全量返回,前端分页
+    cond.limit = state.limit;   // 默认 2000,前端分页;0 = 全量(响应体可能很大)
+    var refresh = $('scrRefresh');
+    if (refresh && refresh.checked) cond.refresh_features = true;
     return cond;
   }
 
@@ -307,7 +309,14 @@
 
     if (meta) {
       var bits = ['基座 ' + (payload.base_count || 0) + ' 只', '命中 ' + (payload.total_matched || 0) + ' 只'];
+      if (payload.returned && payload.returned < payload.total_matched) {
+        bits.push('返回前 ' + payload.returned + ' 只');
+      }
       if (state.query) bits.push('筛选后 ' + rows.length + ' 只');
+      var t = payload.timings || {};
+      if (t.total_ms) bits.push((t.total_ms / 1000).toFixed(1) + 's');
+      if (t.kline_cache_hits) bits.push('日K缓存命中 ' + t.kline_cache_hits);
+      if (payload.partial) bits.push('部分结果(超时间预算)');
       bits.push(String(payload.updated_at || '').replace('T', ' '));
       meta.textContent = bits.join(' · ');
     }
@@ -350,7 +359,9 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildPayload()),
-        timeout: 300000
+        // 服务端有 45s 时间预算,这里留 10s 余量:超时优先给出明确提示,
+        // 而不是让 WKWebView 的网络层自己掐断(那种只会抛一句 Load failed)。
+        timeout: 55000
       });
       if (!payload || payload.ok === false) {
         state.payload = null;
@@ -361,9 +372,16 @@
       state.page = 1;
       state.sortKey = '';
       render();
-      toast('选股完成:命中 ' + (payload.total_matched || 0) + ' 只');
+      var secs = payload.timings && payload.timings.total_ms
+        ? (payload.timings.total_ms / 1000).toFixed(1) + 's' : '';
+      toast('选股完成:命中 ' + (payload.total_matched || 0) + ' 只' + (secs ? '(' + secs + ')' : ''));
     } catch (err) {
-      renderError('选股失败: ' + (err && err.message ? err.message : err));
+      var msg = String(err && err.message ? err.message : err);
+      if (/Load failed|Failed to fetch|NetworkError|network conne/i.test(msg)) {
+        msg = '与本地分析服务的连接中断（多为筛选耗时过长被系统掐断）。已评估的股票已写入本地缓存，'
+          + '直接再点一次「开始选股」通常会快很多；也可以先用资金/行情条件收窄候选。';
+      }
+      renderError('选股失败: ' + msg);
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = '开始选股'; }
     }
@@ -372,7 +390,7 @@
   function renderLoading() {
     var wrap = $('scrResultTable');
     if (wrap) {
-      wrap.innerHTML = '<p class="muted">正在按条件筛选(形态标签需逐股拉日K与均线,稍慢)…</p>';
+      wrap.innerHTML = '<p class="muted">正在按条件筛选(形态标签需逐股日K,首次较慢；同一天再选会命本地缓存)…</p>';
     }
   }
 
@@ -382,7 +400,7 @@
     'scrAccumScoreMin', 'scrDragonNetMin', 'scrOppScoreMin', 'scrTechVolRatio',
     'scrTechRsiMin', 'scrTechRsiMax', 'scrQuantBuyMin', 'scrQuantSellMax', 'scrSearch'];
   var RESET_CHECKS = ['scrExcludeLimitUp', 'scrDragonQuantSeat', 'scrTechMa20', 'scrTechMaBull',
-    'scrTechNewHigh', 'scrTechMacdGolden', 'scrTechKdjGolden'];
+    'scrTechNewHigh', 'scrTechMacdGolden', 'scrTechKdjGolden', 'scrRefresh'];
   var RESET_SELECTS = ['scrDirection', 'scrAccumEnable', 'scrDragonDays'];
   var PRESET_DEFAULTS = {
     scrVolMult: '2', scrRet5Min: '15', scrAmountMin: '2', scrHighN: '20',
@@ -525,4 +543,30 @@
   initChips();
   bind();
   updateAppliedHint();
+  // 稍等压缩包内那条 meta 请求先落地,再覆盖成带缓存规模的版本
+  setTimeout(loadMeta, 600);
+
+  // 覆盖压缩包内旧的 meta 文案:额外展示本地日K/形态缓存规模与有效期,
+  // 让「第二次选股为什么变快」对用户可见。
+  async function loadMeta() {
+    var box = $('scrMetaLine');
+    if (!box || typeof window.fetchJson !== 'function') return;
+    try {
+      var data = await window.fetchJson('/api/screener/meta');
+      var dims = (data && data.dims) || {};
+      var bits = [];
+      if (dims.flow) bits.push('资金流 ' + (dims.flow.date || '无') + '(' + (dims.flow.rows || 0) + '只)');
+      if (dims.radar) bits.push('量化雷达 ' + (dims.radar.date || '无') + '(' + (dims.radar.rows || 0) + ')');
+      if (dims.dragon) bits.push('龙虎榜 ' + (dims.dragon.date || '无'));
+      if (dims.opportunity) bits.push('机会分 ' + (dims.opportunity.date || '无') + '(' + (dims.opportunity.rows || 0) + '只)');
+      var cache = (data && data.cache) || {};
+      if (cache.feature) {
+        var ttlMin = Math.max(1, Math.round((cache.ttl_seconds || 0) / 60));
+        bits.push('日K缓存 ' + cache.feature + ' 只(有效 ' + ttlMin + ' 分钟)');
+      }
+      box.textContent = '本地数据面: ' + bits.join(' · ');
+    } catch (err) {
+      box.textContent = '数据面读取失败';
+    }
+  }
 })();

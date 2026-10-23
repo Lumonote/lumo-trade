@@ -1436,21 +1436,45 @@ def screener_meta(request: Request) -> Response:
 
 @_native_post("/api/screener/run")
 def screener_run(request: Request) -> Response:
-    """条件选股:body 为条件 JSON(market/flow/radar/accum/dragon/opportunity/tech + sort/limit)。
+    """条件选股:body 为条件 JSON(market/flow/radar/accum/dragon/opportunity/tech/quant/preset)。
 
-    行情基座注入大盘云图快照(缓存优先,不强刷);技术条件注入 STOCK_KLINE_SERVICE
-    (60s TTL,候选封顶见服务 TECH_CAP)。
+    提速要点:
+    - 行情基座直接取全市场快照的 stocks(与云图页共用 180s 缓存),跳过
+      ``_market_cloud_payload`` 里的 dashboard/恐慌/板块聚合(选股用不到,几百毫秒到数秒的纯计算);
+    - 日K走 ``STOCK_KLINE_SERVICE.get_bars`` 轻量通道(不叠加实时报价、不跑形态/操作分析),
+      每只股票只发一次请求,外层再叠一层本地库缓存(见 data_store.screener_cache_repo);
+    - 服务端 ``budget_seconds`` 预算内返回,超时先给已评估部分,避免 WebView 60s 网络层掐断。
     """
     try:
         cond = _request_json(request) or {}
     except Exception:
         cond = {}
-    payload = stock_screener_service.screen(
-        cond,
-        market_rows_fn=lambda: (webui_core._market_cloud_payload(limit=6000) or {}).get("stocks") or [],
-        kline_fetcher=_quant_kline_fetcher,
-    )
+    try:
+        payload = stock_screener_service.screen(
+            cond,
+            market_rows_fn=_screener_market_rows,
+            kline_fetcher=_screener_kline_bars,
+        )
+    except Exception as exc:  # noqa: BLE001 — 兜住异常,前端拿到可读错误而不是连接中断
+        return _json_response({"ok": False, "error": f"选股异常: {exc}", "stocks": [],
+                               "notes": [], "total_matched": 0}, status_code=500)
     return _json_response(payload, status_code=200 if payload.get("ok") else 400)
+
+
+def _screener_market_rows() -> list:
+    """全市场快照(仅 stocks):与云图页共享 180s 缓存,跳过不必要的聚合计算。"""
+    try:
+        return webui_core.MARKET_INTELLIGENCE_SERVICE.fetch_market_cloud_stocks(limit=5000) or []
+    except Exception:
+        return []
+
+
+def _screener_kline_bars(code: str, limit: int) -> list:
+    """选股专用轻量日K:只取 records,不叠加实时报价、不跑形态/操作分析。"""
+    try:
+        return webui_core.STOCK_KLINE_SERVICE.get_bars(code, period="daily", limit=limit) or []
+    except Exception:
+        return []
 
 
 @_native_get("/api/growth-research")

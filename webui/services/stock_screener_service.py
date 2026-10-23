@@ -17,12 +17,95 @@
 from __future__ import annotations
 
 import datetime as _dt
-from concurrent.futures import ThreadPoolExecutor
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 TECH_CAP = 300          # 技术/量化模型条件最多评估的候选数(逐股日K成本约束)
 ENRICH_CAP = 60         # 未启用日K维度时,仅回填前N只的形态/量能列(纯展示用)
 FLOW_STREAK_WINDOW = 10  # 连续净流入天数的回看窗口(交易日)
+
+# 日K维度提速:并发数、单次K线根数、默认时间预算(秒)。
+# 预算内未评估完的候选按「未命中」处理并在 notes 说明,保证请求不会被
+# WebView 的网络层掐断(macOS WKWebView 单个请求约 60s 就报 "Load failed")。
+KLINE_WORKERS = 16
+KLINE_BARS = 120        # MA60 + 60日回撤 + 60日涨幅,120 根足够,少传省带宽
+SCREEN_BUDGET_SECONDS = 45.0
+
+# 进程内特征缓存:code → (写入时间戳, features)。磁盘层在 screener_cache_repo,
+# 这里只挡同一进程内的重复反序列化(一次选股 300 条 JSON 解析也要几十毫秒)。
+_FEATURE_MEMORY: Dict[str, tuple] = {}
+_FEATURE_MEMORY_MAX = 8000
+_DISK_CACHE = None
+_DISK_CACHE_READY = False
+
+
+def _disk_cache():
+    """惰性拿选股缓存仓储;不可用 / 被 ``LUMO_SCREENER_CACHE=0`` 关闭时返回 None。"""
+    global _DISK_CACHE, _DISK_CACHE_READY
+    if not _DISK_CACHE_READY:
+        if str(os.environ.get("LUMO_SCREENER_CACHE", "")).strip() == "0":
+            _DISK_CACHE = None
+        else:
+            try:
+                from data_store import screener_cache_repo
+
+                _DISK_CACHE = screener_cache_repo
+            except Exception:  # noqa: BLE001 — 缓存是加速项,缺失不应影响选股
+                _DISK_CACHE = None
+        _DISK_CACHE_READY = True
+    return _DISK_CACHE
+
+
+def _cache_ttl() -> int:
+    """缓存有效期:盘中 2 分钟(当日 bar 仍在变),其余 6 小时。"""
+    cache = _disk_cache()
+    if cache:
+        try:
+            return int(cache.ttl_seconds())
+        except Exception:  # noqa: BLE001
+            pass
+    now = _dt.datetime.now()
+    if now.weekday() >= 5:
+        return 6 * 3600
+    minutes = now.hour * 60 + now.minute
+    return 120 if 9 * 60 + 10 <= minutes <= 15 * 60 + 10 else 6 * 3600
+
+
+def cached_features(code: str) -> Optional[Dict[str, Any]]:
+    """形态特征:内存 → SQLite 未过期条目 → None(需要重新取日K)。"""
+    ttl = _cache_ttl()
+    hit = _FEATURE_MEMORY.get(code)
+    if hit and (ttl <= 0 or time.time() - hit[0] <= ttl):
+        return hit[1]
+    cache = _disk_cache()
+    if not cache:
+        return None
+    feat = cache.get_feature(code, ttl or None)
+    if feat:
+        _remember_feature(code, feat)
+        return feat
+    return None
+
+
+def _remember_feature(code: str, feat: Dict[str, Any]) -> None:
+    if len(_FEATURE_MEMORY) >= _FEATURE_MEMORY_MAX:
+        _FEATURE_MEMORY.clear()
+    _FEATURE_MEMORY[code] = (time.time(), feat)
+
+
+def _persist_features(rows: List[tuple], ttl: Optional[int] = None) -> int:
+    """主线程批量写回 (code, bars, features),单事务,避免 worker 争写锁。"""
+    cache = _disk_cache()
+    if not cache or not rows:
+        return 0
+    try:
+        return cache.put_many(rows, ttl=ttl)
+    except Exception:  # noqa: BLE001
+        return 0
+
 
 SORT_KEYS = {"main_net_wan", "change_pct", "activity", "accum_score", "opp_score",
              "dragon_net_wan", "turnover", "quant_buy", "rsi",
@@ -715,16 +798,26 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
            opportunity_fn: Optional[Callable[[], Dict[str, Any]]] = None,
            kline_fetcher: Optional[Callable[[str, int], List[Dict[str, Any]]]] = None,
            ) -> Dict[str, Any]:
-    """按条件选股:激活维度 AND 过滤,返回命中列表 + 数据新鲜度 meta。"""
+    """按条件选股:激活维度 AND 过滤,返回命中列表 + 数据新鲜度 meta。
+
+    日K维度走「内存 → 本地库 → 网络」三级:同一天内重复选股几乎零网络,
+    首次冷启动受 ``SCREEN_BUDGET_SECONDS`` 预算保护,超时先返回已评估部分。
+    """
     cond = conditions or {}
     notes: List[str] = []
     applied: List[str] = []
     dates: Dict[str, str] = {}
+    timings: Dict[str, Any] = {}
+    started = time.monotonic()
+    partial = False
 
     # ---------- 基座:全市场行情 ----------
     market_rows = (market_rows_fn or (lambda: []))() or []
+    timings["market_ms"] = int((time.monotonic() - started) * 1000)
+    flow_started = time.monotonic()
     flow_rows = (flow_window_fn or _default_flow_window)(FLOW_STREAK_WINDOW)
     flow_map = build_flow_map(flow_rows)
+    timings["flow_ms"] = int((time.monotonic() - flow_started) * 1000)
     if flow_map:
         dates["flow"] = next(iter(flow_map.values()))["date"]
     base: Dict[str, Dict[str, Any]] = {}
@@ -917,6 +1010,11 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
     feat_needed = tech_active or preset_active
     tech_map: Dict[str, Dict[str, Any]] = {}
     quant_map: Dict[str, Dict[str, int]] = {}
+    kline_started = time.monotonic()
+    # refresh_features=true:跳过本地形态缓存,强制重新取日K(盘中想立刻看最新价时用)
+    allow_cached = not bool(cond.get("refresh_features"))
+    if cond.get("refresh_features"):
+        _FEATURE_MEMORY.clear()
     if feat_needed or quant_active:
         applied.extend([d for d, a in (("tech", tech_active), ("preset", preset_active),
                                        ("quant", quant_active)) if a])
@@ -929,19 +1027,54 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                              f"(原候选 {len(survivors)} 只),请先用其他条件收窄")
                 survivors = survivors[:TECH_CAP]
 
-            def _one(code: str):
-                try:
-                    bars = kline_fetcher(code, 180) or []
-                except Exception:
-                    return code, None, None
-                return (code,
-                        tech_features(bars, code) if feat_needed else None,
-                        _quant_signals(bars) if quant_active else None)
+            persist: List[tuple] = []
 
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                results = list(pool.map(_one, survivors))
+            def _one(code: str):
+                """返回 (code, features, quant_signals, 命中缓存)。命中缓存的股票零网络。"""
+                feat = cached_features(code) if (feat_needed and allow_cached) else None
+                if feat is not None and not quant_active:
+                    return code, feat, None, True
+                try:
+                    bars = kline_fetcher(code, KLINE_BARS) or []
+                except Exception:
+                    bars = []
+                if not bars:
+                    return code, feat, None, feat is not None
+                new_feat = tech_features(bars, code) if feat_needed else None
+                qs = _quant_signals(bars) if quant_active else None
+                if new_feat is not None:
+                    _remember_feature(code, new_feat)
+                    persist.append((code, bars, new_feat))
+                return code, (new_feat or feat), qs, False
+
+            budget = _num(cond.get("budget_seconds"))
+            budget = SCREEN_BUDGET_SECONDS if budget is None else max(1.0, float(budget))
+            deadline = time.monotonic() + budget
+            pool = ThreadPoolExecutor(max_workers=KLINE_WORKERS)
+            futures = [pool.submit(_one, code) for code in survivors]
+            results: List[tuple] = []
+            partial = False
+            try:
+                for future in as_completed(futures, timeout=max(0.1, deadline - time.monotonic())):
+                    results.append(future.result())
+                    if time.monotonic() >= deadline:
+                        partial = True
+                        break
+            except FuturesTimeout:
+                partial = True
+            finally:
+                # 不等未完成的网络请求:它们的结果已用不上,继续跑只会占住 worker。
+                pool.shutdown(wait=False, cancel_futures=True)
+            cache_hits = sum(1 for r in results if r[3])
+            if persist:
+                _persist_features(persist)
+            if partial:
+                notes.append(f"已达 {int(budget)} 秒预算,先返回已评估的 {len(results)} 只"
+                             f"(其余 {len(survivors) - len(results)} 只本次跳过);"
+                             "再次选股会命中断点前的本地缓存,明显更快")
+
             kept = []
-            for code, feat, qs in results:
+            for code, feat, qs, _hit in results:
                 hits: List[str] = []
                 if tech_active:
                     ok, hits = _tech_pass(feat, tech_cond)
@@ -968,23 +1101,42 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                 tech_map[code] = {"hits": hits, **(feat or {})}
                 kept.append(code)
             survivors = kept
+            timings["kline_ms"] = int((time.monotonic() - kline_started) * 1000)
+            timings["kline_cache_hits"] = cache_hits
+            timings["kline_evaluated"] = len(results)
 
     # ---------- 列表形态字段回填(未启用日K维度时,仅前 ENRICH_CAP 只供展示) ----------
     if not tech_map and kline_fetcher is not None and survivors:
         pick = sorted(survivors,
                       key=lambda c: -(flow_map.get(c, {}).get("main_net_wan") or -1e18))
         pick = pick[:ENRICH_CAP]
+        enrich_started = time.monotonic()
+        persist: List[tuple] = []
 
         def _enrich(code: str):
+            feat = cached_features(code) if allow_cached else None  # 有缓存直接命中,不再打网络
+            if feat is not None:
+                return code, feat
             try:
-                return code, tech_features(kline_fetcher(code, 180) or [], code)
+                bars = kline_fetcher(code, KLINE_BARS) or []
             except Exception:
                 return code, None
+            feat = tech_features(bars, code) if bars else None
+            if feat:
+                _remember_feature(code, feat)
+                persist.append((code, bars, feat))
+            return code, feat
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        pool = ThreadPoolExecutor(max_workers=KLINE_WORKERS)
+        try:
             for code, feat in pool.map(_enrich, pick):
                 if feat:
                     tech_map[code] = {"hits": [], **feat}
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        if persist:
+            _persist_features(persist)
+        timings["enrich_ms"] = int((time.monotonic() - enrich_started) * 1000)
         if len(survivors) > ENRICH_CAP:
             notes.append(f"未启用形态条件,仅回填按主力净流入排序前 {ENRICH_CAP} 只的形态/量能列")
 
@@ -1062,6 +1214,8 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
         "stocks": stocks,
         "dates": dates,
         "notes": notes,
+        "partial": partial,
+        "timings": {**timings, "total_ms": int((time.monotonic() - started) * 1000)},
         "disclaimer": "选股结果为公开数据规则筛选,不构成投资建议;涨跌幅/资金口径以各源最新可得交易日为准。",
     }
 
@@ -1154,4 +1308,11 @@ def meta() -> Dict[str, Any]:
     opp = _default_opportunity()
     out["dims"]["opportunity"] = {"date": str(opp.get("date") or ""),
                                   "rows": len(opp.get("by_code") or {})}
+    cache = _disk_cache()
+    if cache:
+        try:
+            out["cache"] = cache.stats()
+            out["cache"]["ttl_seconds"] = _cache_ttl()
+        except Exception:  # noqa: BLE001
+            out["cache"] = {}
     return out

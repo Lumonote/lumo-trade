@@ -10,6 +10,17 @@ import pytest
 from webui.services import stock_screener_service as sc
 
 
+@pytest.fixture(autouse=True)
+def _isolate_feature_cache(monkeypatch):
+    """隔离选股缓存:关掉磁盘层并清空进程内特征缓存,避免用例之间互相命中。"""
+    monkeypatch.setenv("LUMO_SCREENER_CACHE", "0")
+    monkeypatch.setattr(sc, "_DISK_CACHE_READY", True)
+    monkeypatch.setattr(sc, "_DISK_CACHE", None)
+    sc._FEATURE_MEMORY.clear()
+    yield
+    sc._FEATURE_MEMORY.clear()
+
+
 def _market_rows():
     return [
         {"code": "600000", "name": "浦发银行", "price": 10.0, "change_pct": 2.5,
@@ -238,6 +249,7 @@ def test_tech_condition_rsi_and_golden_cross_filters():
                       kline_fetcher=lambda code, limit: _v_bars() if code == "600000" else _bars(up=False))
     assert {s["code"] for s in payload["stocks"]} == {"600000"}
     assert "MACD金叉" in payload["stocks"][0]["hits"]
+    sc._FEATURE_MEMORY.clear()  # 上一轮把其余三只下跌K线的特征写进了进程内缓存
     payload2 = _screen({"tech": {"rsi_max": 30}},
                        kline_fetcher=lambda code, limit: _v_bars())
     assert payload2["stocks"] == []  # V形尾部RSI偏高,30以下无命中
@@ -274,3 +286,93 @@ def test_limit_absent_returns_all_matches():
     assert payload["returned"] == 4  # 不再默认截断
     payload2 = _screen({"limit": 2})
     assert payload2["returned"] == 2 and payload2["total_matched"] == 4
+
+
+# ----------------------------- 提速:特征缓存 / 时间预算 / 本地库 -----------------------------
+
+def test_feature_cache_skips_second_fetch():
+    calls = []
+
+    def fetcher(code, limit):
+        calls.append(code)
+        return _bars(up=True)
+
+    first = _screen({"preset": {"labels": ["ma_trend"]}}, kline_fetcher=fetcher)
+    assert first["ok"] and len(calls) == 4
+    second = _screen({"preset": {"labels": ["ma_trend"]}}, kline_fetcher=fetcher)
+    assert len(calls) == 4, "第二次选股应全部命中特征缓存,不再取日K"
+    assert second["timings"]["kline_cache_hits"] == 4
+    assert second["timings"]["kline_ms"] <= first["timings"]["kline_ms"]
+
+
+def test_refresh_features_bypasses_cache():
+    calls = []
+
+    def fetcher(code, limit):
+        calls.append(code)
+        return _bars(up=True)
+
+    _screen({"preset": {"labels": ["ma_trend"]}}, kline_fetcher=fetcher)
+    _screen({"preset": {"labels": ["ma_trend"]}}, kline_fetcher=fetcher)
+    assert len(calls) == 4
+    _screen({"preset": {"labels": ["ma_trend"]}, "refresh_features": True}, kline_fetcher=fetcher)
+    assert len(calls) == 8, "refresh_features 应强制重新取日K"
+
+
+def test_budget_returns_partial_with_note(monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(sc, "KLINE_WORKERS", 1)
+
+    def slow_fetcher(code, limit):
+        _time.sleep(0.4)
+        return _bars(up=True)
+
+    payload = _screen({"tech": {"above_ma20": True}, "budget_seconds": 1},
+                      kline_fetcher=slow_fetcher)
+    assert payload["ok"] is True
+    assert payload["partial"] is True
+    assert payload["timings"]["kline_evaluated"] < 4  # 预算内只评估了一部分
+    assert any("预算" in n for n in payload["notes"])
+
+
+def test_display_fields_present_without_kline_dimension():
+    payload = _screen({"flow": {"main_net_min": 500}})
+    row = payload["stocks"][0]
+    assert row["ma20_dev"] is not None  # 回填段补上了形态列
+    assert row["ret5"] is not None
+
+
+def test_screener_cache_repo_roundtrip_and_ttl(monkeypatch):
+    """缓存的写入/读取/TTL 过期/清理四段闭环(用项目内临时库,不碰真实数据)。"""
+    import os
+    import shutil
+    from pathlib import Path
+
+    from data_store import connection
+    from data_store import screener_cache_repo as repo
+
+    base = Path(__file__).resolve().parent / ".tmp_screener_cache"
+    base.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("KRONOS_SQLITE_PATH", str(base / f"cache_{os.getpid()}.sqlite"))
+    connection.reset_for_testing()
+    try:
+        bars = [{"date": "2026-10-23", "close": 10.0}]
+        feat = {"ma20_dev": 1.23, "ret5": 2.5}
+        assert repo.put_kline("600000", bars) == 1
+        assert repo.put_feature("600000", feat) == 1
+        assert repo.get_kline("600000", ttl=3600) == bars
+        assert repo.get_feature("600000", ttl=3600) == feat
+
+        # 把更新时间推到很久以前 → 读请求按 TTL 判过期
+        connection.get_conn().execute(
+            "UPDATE kv_cache SET updated_at='2020-01-01T00:00:00' WHERE namespace IN (?,?)",
+            (repo.NS_KLINE, repo.NS_FEAT),
+        )
+        assert repo.get_kline("600000") is None
+        assert repo.get_feature("600000") is None
+        assert repo.purge(stale_days=1) >= 2
+    finally:
+        connection.reset_for_testing()
+        shutil.rmtree(base, ignore_errors=True)
+

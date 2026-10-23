@@ -7291,3 +7291,8 @@ body[data-page="market_cloud"] .mc-empty {
   .scr-preset-params { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
   .scr-result-wrap { max-height: 60vh; }
 }
+.scr-inline-check {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.8rem; color: var(--muted); cursor: pointer;
+}
+.scr-timing { font-size: 0.76rem; color: var(--faint); margin-left: 6px; }

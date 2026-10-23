@@ -285,6 +285,65 @@ class StockKlineService:
             "direction": match.get("direction"),
         } for match in matches[:12]]
 
+    def get_bars(
+        self,
+        stock_code: str,
+        period: str = 'daily',
+        limit: int | str = 120,
+        use_cache: bool = True,
+        cache_write: bool = True,
+    ) -> list[dict[str, Any]]:
+        """轻量日K:只返回 records,不叠加实时报价、不跑形态/操作分析。
+
+        选股这类批量场景(几百只)只需要 K 线数组,走 :meth:`get_payload` 会额外
+        发起一次单只实时报价请求并跑两套分析(结果直接丢弃),单只成本约 2–3 倍,
+        300 只叠加起来就是几十秒。这里直达新浪日K(TTL 60s),外层再接一层
+        :mod:`data_store.screener_cache_repo` 的跨进程磁盘缓存。
+        """
+        codes = normalize_stock_codes([stock_code])
+        if not codes:
+            return []
+        code = codes[0]
+        normalized_limit = safe_int(limit, 120, minimum=30, maximum=500) or 120
+        if use_cache:
+            cached = self._cached_bars(code, period, normalized_limit)
+            if cached:
+                return cached
+        records: list[dict[str, Any]] = []
+        try:
+            records = self._fetch_sina_kline_cached(code, period, normalized_limit)
+        except Exception:  # noqa: BLE001 — 网络不可用时回退本地文件
+            records = []
+        if not records:
+            local_records, _source = self.load_local_kline(code, period, normalized_limit)
+            records = local_records or []
+        if records and period == 'daily' and cache_write:
+            self._write_bars_cache(code, records)
+        return records
+
+    @staticmethod
+    def _cached_bars(code: str, period: str, limit: int) -> list[dict[str, Any]]:
+        if period != 'daily':
+            return []
+        try:
+            from data_store import screener_cache_repo
+
+            cached = screener_cache_repo.get_kline(code)
+        except Exception:  # noqa: BLE001 — 缓存层不可用就当未命中
+            return []
+        if not cached or len(cached) < max(21, min(limit, 60)):
+            return []
+        return cached[-limit:]
+
+    @staticmethod
+    def _write_bars_cache(code: str, records: list[dict[str, Any]]) -> None:
+        try:
+            from data_store import screener_cache_repo
+
+            screener_cache_repo.put_kline(code, records)
+        except Exception:  # noqa: BLE001 — 写缓存失败不影响本次结果
+            pass
+
     def get_payload(
         self,
         stock_code: str,
