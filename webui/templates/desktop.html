@@ -368,13 +368,53 @@
         <section class="screener-layout">
           <div class="panel">
             <div class="panel-header">
-              <h2 class="panel-title">筛选条件（留空的条件不参与，各维度之间取交集）</h2>
+              <h2 class="panel-title">条件选股</h2>
               <div class="panel-header-actions">
                 <span class="panel-meta" id="scrMetaLine">数据面读取中…</span>
+                <button class="button secondary compact" type="button" id="scrToggleAdv"
+                        aria-expanded="false" aria-controls="scrAdv">展开高级条件 ▾</button>
               </div>
             </div>
             <div class="panel-body">
-              <div class="screener-groups">
+              <div class="scr-preset-block">
+                <div class="scr-preset-head">
+                  <span class="scr-preset-title">形态标签 <em>多选取交集,参数留空用默认</em></span>
+                  <button class="button secondary compact" type="button" id="scrPresetClear">清空标签</button>
+                </div>
+                <div class="scr-preset-chips" id="scrPresetChips">
+                  <button class="scr-chip" type="button" data-preset="vol_burst">连续爆量</button>
+                  <button class="scr-chip" type="button" data-preset="break_ma20">放量突破MA20</button>
+                  <button class="scr-chip" type="button" data-preset="oversold_rebound">超跌反弹</button>
+                  <button class="scr-chip" type="button" data-preset="new_high_n">创N日新高</button>
+                  <button class="scr-chip" type="button" data-preset="new_low_n">创N日新低</button>
+                  <button class="scr-chip" type="button" data-preset="vol_spike">单日放量</button>
+                  <button class="scr-chip" type="button" data-preset="yang_through">一阳穿N线</button>
+                  <button class="scr-chip" type="button" data-preset="ma_bull_align">N线多头排列</button>
+                  <button class="scr-chip" type="button" data-preset="ma_golden">均线金叉</button>
+                  <button class="scr-chip" type="button" data-preset="vol_dod">量能日环比</button>
+                  <button class="scr-chip" type="button" data-preset="ma_support">均线支撑博反弹</button>
+                  <button class="scr-chip" type="button" data-preset="ma_trend">均线方向</button>
+                  <button class="scr-chip" type="button" data-preset="vol_shrink">量能峰值缩量</button>
+                  <button class="scr-chip" type="button" data-preset="pair_bottom">对子底</button>
+                  <button class="scr-chip" type="button" data-preset="halve_double">翻倍又腰斩</button>
+                  <button class="scr-chip" type="button" data-preset="recent_20cm">近期20cm</button>
+                  <button class="scr-chip" type="button" data-preset="ma_trend_combo">均线方向组合</button>
+                  <button class="scr-chip" type="button" data-preset="first_above_ma20">首次站上MA20</button>
+                </div>
+                <div class="scr-preset-params">
+                  <label>量能倍数 ≥<input id="scrVolMult" type="number" step="0.1" min="0" value="2" /></label>
+                  <label>5日涨幅 ≥ %<input id="scrRet5Min" type="number" step="1" value="15" /></label>
+                  <label>5日均额 ≥ 亿<input id="scrAmountMin" type="number" step="0.5" min="0" value="2" /></label>
+                  <label>新高/新低 N<input id="scrHighN" type="number" step="10" min="5" value="20" /></label>
+                  <label>单日放量 ≥ 倍<input id="scrSpikeMult" type="number" step="0.1" min="0" value="2" /></label>
+                  <label>日环比 ≥ 倍<input id="scrDodMult" type="number" step="0.1" min="0" value="1.5" /></label>
+                  <label>峰值缩量 ≤ 比例<input id="scrShrinkRatio" type="number" step="0.05" min="0" max="1" value="0.4" /></label>
+                </div>
+                <p class="panel-meta control-help">形态标签基于个股日K(逐股拉取,候选超过 300 只时按主力净流入截取),与下方高级条件取交集。</p>
+              </div>
+
+              <div class="screener-adv" id="scrAdv" hidden>
+                <div class="screener-groups">
                 <fieldset class="screener-group">
                   <legend>行情快照</legend>
                   <div class="capital-filter-grid">
@@ -483,12 +523,21 @@
                   </div>
                   <p class="panel-meta control-help">逐股跑机会挖掘同一套 30 个量化交易模型统计末根K多空票数；与技术形态共用日K，候选多时仅评估前300只。</p>
                 </fieldset>
+                </div>
               </div>
               <div class="actions screener-actions">
                 <label>排序
                   <select id="scrSort">
                     <option value="main_net_wan" selected>主力净流入</option>
                     <option value="change_pct">涨跌幅</option>
+                    <option value="ret5">5日涨幅</option>
+                    <option value="ret20">20日涨幅</option>
+                    <option value="ret60">60日涨幅</option>
+                    <option value="ma20_dev">MA20偏离</option>
+                    <option value="vol_energy">量能倍数</option>
+                    <option value="vol_ratio">单日量倍</option>
+                    <option value="amount_ma5_yi">5日均额</option>
+                    <option value="limit_up_20">20日涨停数</option>
                     <option value="activity">量化活跃度</option>
                     <option value="accum_score">吸筹评分</option>
                     <option value="opp_score">机会评分</option>
@@ -499,6 +548,7 @@
                 </label>
                 <button class="button" type="button" id="scrRunBtn">开始选股</button>
                 <button class="button secondary" type="button" id="scrResetBtn">重置条件</button>
+                <span class="scr-applied" id="scrApplied"></span>
               </div>
             </div>
           </div>
@@ -506,12 +556,21 @@
           <div class="panel">
             <div class="panel-header">
               <h2 class="panel-title">选股结果</h2>
-              <span class="panel-meta" id="scrResultMeta">--</span>
+              <div class="panel-header-actions">
+                <input id="scrSearch" class="scr-search" type="search" placeholder="搜索代码 / 名称" />
+                <select id="scrPageSize" class="canvas-date-select" title="每页条数">
+                  <option value="30">每页 30</option>
+                  <option value="50" selected>每页 50</option>
+                  <option value="100">每页 100</option>
+                </select>
+                <button class="button secondary compact" type="button" id="scrExportCsv">导出 CSV</button>
+                <span class="panel-meta" id="scrResultMeta">--</span>
+              </div>
             </div>
             <div class="panel-body">
               <div id="scrNotes"></div>
-              <div class="capital-table-wrap compact" id="scrResultTable">
-                <p class="muted">设置条件后点击「开始选股」。</p>
+              <div class="capital-table-wrap compact scr-result-wrap" id="scrResultTable">
+                <p class="muted">勾选形态标签或展开高级条件后点击「开始选股」。</p>
               </div>
             </div>
           </div>
@@ -1675,6 +1734,9 @@
     <script src="/static/provider_context_menu.js"></script>
     <script src="/static/lumo_open_external.js?v={{ asset_v('lumo_open_external.js') }}"></script>
     <script src="/static/lumo_desktop_app.js?v={{ asset_v('lumo_desktop_app.js') }}"></script>
+    {% if active_page == 'screener' %}
+    <script src="/static/lumo_screener.js?v={{ asset_v('lumo_screener.js') }}"></script>
+    {% endif %}
     <script>
       if (typeof JOB_TYPE_LABELS !== 'undefined') JOB_TYPE_LABELS.growth_research = '成长研究';
     </script>

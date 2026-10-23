@@ -7211,3 +7211,83 @@ body[data-page="market_cloud"] .mc-empty {
   background: var(--surface-tint); color: var(--ink-2);
   font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums;
 }
+
+/* 条件选股 v2 (2026-10-23):高级条件折叠 + 形态标签 + 多列结果列表 */
+.scr-preset-block {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  padding: 10px 12px 12px;
+  margin-bottom: 12px;
+}
+.scr-preset-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 8px; flex-wrap: wrap;
+}
+.scr-preset-title { font-size: 0.84rem; font-weight: 700; color: var(--ink-2); }
+.scr-preset-title em {
+  font-style: normal; font-weight: 400; color: var(--muted);
+  font-size: 0.76rem; margin-left: 6px;
+}
+.scr-preset-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.scr-chip {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink-2);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+.scr-chip:hover { border-color: var(--blue); color: var(--blue); }
+.scr-chip.active {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(47, 111, 221, 0.28);
+}
+.scr-preset-params {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+  gap: 8px 12px;
+  margin-top: 10px;
+}
+.scr-preset-params label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.78rem; color: var(--muted); min-width: 0;
+}
+.scr-preset-params input {
+  width: 68px; min-width: 0; padding: 4px 6px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--ink); font: inherit; font-size: 0.8rem;
+}
+.screener-adv {
+  border-top: 1px dashed var(--line);
+  padding-top: 12px;
+  margin-bottom: 12px;
+}
+.scr-applied { font-size: 0.78rem; color: var(--muted); align-self: center; }
+.scr-search {
+  padding: 6px 10px; min-width: 170px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); color: var(--ink); font: inherit; font-size: 0.82rem;
+}
+.scr-result-wrap { overflow: auto; max-height: 68vh; }
+.scr-result-table { font-size: 12px; }
+.scr-result-table th, .scr-result-table td { padding: 7px 9px; white-space: nowrap; }
+.scr-result-table th { position: sticky; top: 0; z-index: 2; background: #f1f5f9; }
+.scr-result-table th.sortable-col { cursor: pointer; user-select: none; }
+.scr-result-table th.sortable-col:hover { background: #e2e8f0; color: var(--ink); }
+.scr-result-table th.sorted { color: var(--blue-dark); background: #e7eefc; }
+.scr-result-table td.scr-num { text-align: right; font-variant-numeric: tabular-nums; }
+.scr-result-table tbody tr:hover td { background: var(--surface-tint); }
+.scr-result-table .scr-col-idx { width: 34px; color: var(--muted); text-align: right; }
+.scr-result-table .scr-col-code { text-align: left; }
+.scr-result-table .scr-col-code small { color: var(--muted); margin-left: 4px; font-size: 10px; }
+.scr-result-table .scr-col-name { text-align: left; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 720px) {
+  .scr-preset-params { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .scr-result-wrap { max-height: 60vh; }
+}

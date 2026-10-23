@@ -21,10 +21,33 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 TECH_CAP = 300          # 技术/量化模型条件最多评估的候选数(逐股日K成本约束)
+ENRICH_CAP = 60         # 未启用日K维度时,仅回填前N只的形态/量能列(纯展示用)
 FLOW_STREAK_WINDOW = 10  # 连续净流入天数的回看窗口(交易日)
 
 SORT_KEYS = {"main_net_wan", "change_pct", "activity", "accum_score", "opp_score",
-             "dragon_net_wan", "turnover", "quant_buy", "rsi"}
+             "dragon_net_wan", "turnover", "quant_buy", "rsi",
+             # 形态列表新增排序键(见 FEATURE_KEYS)
+             "ma20_dev", "ret5", "ret20", "ret60", "vol_energy", "vol_ratio",
+             "vol_step", "vol_peak_ratio", "amount_ma5_yi", "limit_up_20", "dist_pct"}
+
+# 服务端下发给前端列表的形态字段(缺值为 None → 表格显示 --)
+FEATURE_KEYS = ("ma5", "ma10", "ma20", "ma60", "open", "high", "low",
+                "ma20_dev", "ret5", "ret20", "ret60",
+                "vol_energy", "vol_step", "vol_peak_ratio", "amount_ma5_yi",
+                "limit_up_20", "max_gain_60", "drawdown_60",
+                "dist_pct", "touch_pct", "line_ref")
+
+# 预设形态标签(与前端标签页一一对应;未知 key 一律忽略)
+PRESET_KEYS = ("vol_burst", "break_ma20", "oversold_rebound", "new_high_n",
+               "new_low_n", "vol_spike", "yang_through", "ma_bull_align",
+               "ma_golden", "vol_dod", "ma_support", "ma_trend",
+               "vol_shrink", "pair_bottom", "halve_double", "recent_20cm",
+               "ma_trend_combo", "first_above_ma20")
+
+# 预设参数默认值(前端「连续爆量」输入框留空时回退到这里)
+PRESET_DEFAULTS = {"vol_mult": 2.0, "ret5_min": 15.0, "amount_min": 2.0,
+                   "high_n": 20, "low_n": 20, "spike_mult": 2.0,
+                   "dod_mult": 1.5, "shrink_ratio": 0.4, "surge_days": 10}
 
 BOARD_PREFIX = {
     "main": ("60", "00"),      # 沪深主板
@@ -250,27 +273,110 @@ def build_dragon_map(rows: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]
 
 # ----------------------------- 纯函数:技术条件 -----------------------------
 
-def tech_features(bars: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """日K(≥21根升序) → 均线/新高/量比 + RSI/MACD金叉/KDJ金叉(机会挖掘同源指标)。
+def _pair_digits(price: Optional[float]) -> bool:
+    """最低价小数两位为「对子」(3.33/12.22) —— 游资对子底近似口径。"""
+    if price is None or price <= 0:
+        return False
+    cents = int(round(price * 100)) % 100
+    return cents >= 10 and cents % 11 == 0
+
+
+def _limit_threshold(code: str) -> float:
+    """按板块取涨停幅度阈值(主板9.8/创业科创19.8/北交所29.8)。"""
+    return _LIMIT_UP_PCT.get(_board_of(code), 9.8) if code else 9.8
+
+
+def tech_features(bars: List[Dict[str, Any]], code: str = "") -> Optional[Dict[str, Any]]:
+    """日K(≥21根升序) → 均线/区间涨幅/量能/形态 + RSI/MACD金叉/KDJ金叉。
 
     指标计算复用 :mod:`analysis.technical_analysis`;金叉口径=最近3根内上穿。
     不足 21 根 → None;指标子集失败单独置 None(条件按不命中)。
+
+    ``code`` 可选:给出时按板块决定涨停阈值(20日涨停次数/近期20cm),否则按主板 9.8%。
     """
     rows = sorted((b for b in bars or [] if _num(b.get("close")) is not None),
                   key=lambda b: str(b.get("date")))
     if len(rows) < 21:
         return None
     closes = [float(b["close"]) for b in rows]
+    opens = [float(b.get("open") or b["close"]) for b in rows]
+    highs = [float(b.get("high") or b["close"]) for b in rows]
+    lows = [float(b.get("low") or b["close"]) for b in rows]
     vols = [float(b.get("volume") or 0.0) for b in rows]
+    amounts = [float(b.get("amount") or 0.0) for b in rows]
 
-    def ma(n: int) -> float:
-        return sum(closes[-n:]) / n
+    def ma(n: int, end: Optional[int] = None) -> Optional[float]:
+        end = len(closes) if end is None else end
+        if n <= 0 or end - n < 0:
+            return None
+        return sum(closes[end - n:end]) / n
 
-    last = closes[-1]
+    def ma_up(n: int) -> Optional[bool]:
+        cur, prev_ma = ma(n), ma(n, len(closes) - 1)
+        if cur is None or prev_ma is None:
+            return None
+        return cur > prev_ma
+
+    def ret(n: int) -> Optional[float]:
+        if len(closes) > n and closes[-n - 1] > 0:
+            return round((closes[-1] / closes[-n - 1] - 1) * 100, 2)
+        return None
+
+    last, prev_close = closes[-1], closes[-2]
+    ma5, ma10, ma20, ma60 = ma(5), ma(10), ma(20), ma(60)
     vol_ratio = None
     if len(vols) >= 6 and vols[-1] > 0:
         base = sum(vols[-6:-1]) / 5
         vol_ratio = round(vols[-1] / base, 2) if base > 0 else None
+
+    # ---- 量能形态 ----
+    vol_ma5 = sum(vols[-5:]) / 5 if len(vols) >= 5 else None
+    vol_ma60 = sum(vols[-60:]) / len(vols[-60:]) if len(vols) >= 20 else None
+    vol_energy = round(vol_ma5 / vol_ma60, 2) if vol_ma5 and vol_ma60 else None
+    vol_step = round(vols[-1] / vols[-2], 2) if len(vols) >= 2 and vols[-2] > 0 else None
+    vol_peak_ratio = round(vols[-1] / max(vols[-20:]), 2) if vols[-1] > 0 and max(vols[-20:]) > 0 else None
+    amount_ma5_yi = round(sum(amounts[-5:]) / 5 / 1e8, 2) if len(amounts) >= 5 else None
+
+    # ---- 涨跌幅序列派生:涨停次数 / 20cm / 翻倍腰斩 ----
+    pcts = [(closes[i] / closes[i - 1] - 1) * 100
+            for i in range(1, len(closes)) if closes[i - 1] > 0]
+    limit_thr = _limit_threshold(code)
+    limit_up_20 = sum(1 for p in pcts[-20:] if p >= limit_thr)
+    window60 = closes[-60:]
+    max_gain_60 = round((max(window60) / min(window60) - 1) * 100, 2) if min(window60) > 0 else None
+    drawdown_60 = round((last / max(window60) - 1) * 100, 2) if max(window60) > 0 else None
+    surge_20cm = sum(1 for p in pcts[-10:] if p >= 19.0) if pcts else 0
+
+    # ---- 均线形态:突破/首次站上/金叉/回踩支撑 ----
+    prev_ma20 = ma(20, len(closes) - 1)
+    above_ma20 = ma20 is not None and last >= ma20
+    prev_above_ma20 = prev_ma20 is not None and prev_close >= prev_ma20
+    first_above = bool(above_ma20 and not prev_above_ma20
+                       and all(c < (ma(20, len(closes) - 5 + i) or c)
+                               for i, c in enumerate(closes[-5:])))
+    ma_golden_5_10 = None
+    if ma5 is not None and ma10 is not None:
+        ma_golden_5_10 = False
+        for back in range(1, 4):
+            end = len(closes) - back + 1
+            a1, b1 = ma(5, end), ma(10, end)          # 当日
+            a0, b0 = ma(5, end - 1), ma(10, end - 1)  # 前一日
+            if None in (a1, b1, a0, b0):
+                continue
+            if a1 > b1 and a0 <= b0:
+                ma_golden_5_10 = True
+                break
+
+    # ---- 参考均线:取离现价最近的一条,供列表「触线%/距线%」使用 ----
+    line_ref = ""
+    line_val = None
+    for name, value in (("MA5", ma5), ("MA10", ma10), ("MA20", ma20)):
+        if value and value > 0:
+            if line_val is None or abs(last / value - 1) < abs(last / line_val - 1):
+                line_ref, line_val = name, value
+    dist_pct = round((last / line_val - 1) * 100, 2) if line_val else None
+    touch_pct = round((lows[-1] / line_val - 1) * 100, 2) if line_val else None
+
     rsi_val = macd_golden = kdj_golden = None
     try:
         import pandas as pd
@@ -290,21 +396,57 @@ def tech_features(bars: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
         macd_line, signal_line, _hist = TA.calculate_macd(close_s)
         macd_golden = _golden(macd_line - signal_line)
-        high_s = pd.Series([float(b.get("high") or b["close"]) for b in rows], dtype=float)
-        low_s = pd.Series([float(b.get("low") or b["close"]) for b in rows], dtype=float)
+        high_s = pd.Series(highs, dtype=float)
+        low_s = pd.Series(lows, dtype=float)
         k, d, _j = TA.calculate_kdj(high_s, low_s, close_s)
         kdj_golden = _golden(k - d)
     except Exception:
         pass
     return {
-        "above_ma20": last >= ma(20),
-        "ma_bull": ma(5) > ma(10) > ma(20),
+        # —— 原有技术条件字段 ——
+        "above_ma20": above_ma20,
+        "ma_bull": (ma5 is not None and ma10 is not None and ma20 is not None
+                    and ma5 > ma10 > ma20),
         "new_high_20": last >= max(closes[-20:]),  # 收盘创20日收盘新高
         "vol_ratio": vol_ratio,
         "rsi": rsi_val,
         "macd_golden": macd_golden,
         "kdj_golden": kdj_golden,
+        # —— 列表展示字段 ——
+        "close": round(last, 2),
+        "open": round(opens[-1], 2),
+        "high": round(highs[-1], 2),
+        "low": round(lows[-1], 2),
+        "ma5": round(ma5, 2) if ma5 else None,
+        "ma10": round(ma10, 2) if ma10 else None,
+        "ma20": round(ma20, 2) if ma20 else None,
+        "ma60": round(ma60, 2) if ma60 else None,
+        "ma20_dev": round((last / ma20 - 1) * 100, 2) if ma20 else None,
+        "ret5": ret(5), "ret20": ret(20), "ret60": ret(60),
+        "vol_energy": vol_energy,
+        "vol_step": vol_step,
+        "vol_peak_ratio": vol_peak_ratio,
+        "amount_ma5_yi": amount_ma5_yi,
+        "limit_up_20": limit_up_20,
+        "max_gain_60": max_gain_60,
+        "drawdown_60": drawdown_60,
+        "dist_pct": dist_pct,
+        "touch_pct": touch_pct,
+        "line_ref": line_ref,
+        # —— 预设形态判定用字段 ——
+        "new_high_60": last >= max(closes[-60:]) if len(closes) >= 60 else None,
+        "new_low_20": last <= min(closes[-20:]),
+        "new_low_60": last <= min(closes[-60:]) if len(closes) >= 60 else None,
+        "prev_above_ma20": prev_above_ma20,
+        "first_above_ma20": first_above,
+        "ma_golden_5_10": ma_golden_5_10,
+        "ma5_up": ma_up(5), "ma10_up": ma_up(10), "ma20_up": ma_up(20),
+        "yang": last > opens[-1],
+        "surge_20cm_10": surge_20cm,
+        "pair_bottom": _pair_digits(lows[-1]) and lows[-1] <= min(lows[-20:]) * 1.03,
+        "pct_chg": round((last / prev_close - 1) * 100, 2) if prev_close > 0 else None,
     }
+
 
 
 def _quant_signals(bars: List[Dict[str, Any]]) -> Optional[Dict[str, int]]:
@@ -368,6 +510,196 @@ def _tech_pass(feat: Optional[Dict[str, Any]], cond: Dict[str, Any]) -> (bool, L
         if not feat.get("kdj_golden"):
             return False, []
         hits.append("KDJ金叉")
+    return True, hits
+
+
+# ----------------------------- 纯函数:预设形态标签 -----------------------------
+
+def _t_vol_burst(f: Dict[str, Any], p: Dict[str, float]):
+    """连续爆量:5日均量/60日均量 ≥ N 倍 + 近5日大涨 + 5日均额达标。"""
+    energy, r5, amt = f.get("vol_energy"), f.get("ret5"), f.get("amount_ma5_yi")
+    if energy is None or r5 is None or amt is None:
+        return False, ""
+    if energy < p["vol_mult"] or r5 < p["ret5_min"] or amt < p["amount_min"]:
+        return False, ""
+    return True, f"5日量能{energy}x·5日涨{r5}%·均额{amt}亿"
+
+
+def _t_break_ma20(f, p):
+    """放量突破MA20:今日站上、昨日还在下方,且当日量比达标。"""
+    if not f.get("above_ma20") or f.get("prev_above_ma20"):
+        return False, ""
+    vr = f.get("vol_ratio")
+    if vr is None or vr < p["vol_mult"]:
+        return False, ""
+    return True, f"放量突破MA20({vr}x)"
+
+
+def _t_oversold_rebound(f, p):
+    """超跌反弹:20日跌幅超阈值后当日收阳并站上MA5。"""
+    r20, pct, ma5 = f.get("ret20"), f.get("pct_chg"), f.get("ma5")
+    if r20 is None or pct is None or ma5 is None:
+        return False, ""
+    if r20 > -15 or pct <= 0 or (f.get("close") or 0) < ma5:
+        return False, ""
+    return True, f"20日跌{r20}%后反弹"
+
+
+def _t_new_high_n(f, p):
+    key = "new_high_60" if int(p["high_n"]) >= 60 else "new_high_20"
+    if not f.get(key):
+        return False, ""
+    return True, f"创{int(p['high_n'])}日新高"
+
+
+def _t_new_low_n(f, p):
+    key = "new_low_60" if int(p["low_n"]) >= 60 else "new_low_20"
+    if not f.get(key):
+        return False, ""
+    return True, f"创{int(p['low_n'])}日新低"
+
+
+def _t_vol_spike(f, p):
+    """单日放量:当日量 / 前5日均量 ≥ 倍数。"""
+    vr = f.get("vol_ratio")
+    if vr is None or vr < p["spike_mult"]:
+        return False, ""
+    return True, f"单日量比{vr}x"
+
+
+def _t_yang_through(f, p):
+    """一阳穿N线:开盘在MA5/10/20之下,收盘同时站上三条均线。"""
+    open_px = f.get("open")
+    mas = [m for m in (f.get("ma5"), f.get("ma10"), f.get("ma20")) if m]
+    if open_px is None or len(mas) < 2 or not f.get("yang"):
+        return False, ""
+    if open_px >= min(mas) or (f.get("close") or 0) <= max(mas):
+        return False, ""
+    return True, "一阳穿%d线" % len(mas)
+
+
+def _t_ma_bull_align(f, p):
+    """N线多头排列:MA5>MA10>MA20(有MA60时要求MA20>MA60)。"""
+    ma5, ma10, ma20, ma60 = f.get("ma5"), f.get("ma10"), f.get("ma20"), f.get("ma60")
+    if None in (ma5, ma10, ma20):
+        return False, ""
+    if not (ma5 > ma10 > ma20 and (ma60 is None or ma20 > ma60)):
+        return False, ""
+    return True, "多头排列" + ("(含MA60)" if ma60 else "")
+
+
+def _t_ma_golden(f, p):
+    if not f.get("ma_golden_5_10"):
+        return False, ""
+    return True, "MA5金叉MA10"
+
+
+def _t_vol_dod(f, p):
+    """量能日环比:当日量 / 昨日量 ≥ 倍数。"""
+    step = f.get("vol_step")
+    if step is None or step < p["dod_mult"]:
+        return False, ""
+    return True, f"量能日环比{step}x"
+
+
+def _t_ma_support(f, p):
+    """均线支撑博反弹:最低价回踩MA20(1%内)不破,收盘站上且收阳。"""
+    ma20, low, close, pct = f.get("ma20"), f.get("low"), f.get("close"), f.get("pct_chg")
+    if None in (ma20, low, close) or not pct or pct <= 0:
+        return False, ""
+    if low > ma20 * 1.01 or close < ma20:
+        return False, ""
+    return True, "回踩MA20反弹"
+
+
+def _t_ma_trend(f, p):
+    if not f.get("ma20_up"):
+        return False, ""
+    return True, "MA20向上"
+
+
+def _t_vol_shrink(f, p):
+    """量能峰值缩量:当日量 ≤ 近20日峰值量 × 比例。"""
+    ratio = f.get("vol_peak_ratio")
+    if ratio is None or ratio > p["shrink_ratio"]:
+        return False, ""
+    return True, f"峰值缩量至{ratio}x"
+
+
+def _t_pair_bottom(f, p):
+    if not f.get("pair_bottom"):
+        return False, ""
+    return True, "对子底"
+
+
+def _t_halve_double(f, p):
+    """翻倍又腰斩:60日内区间翻倍且自高点回撤≥40%。"""
+    gain, dd = f.get("max_gain_60"), f.get("drawdown_60")
+    if gain is None or dd is None or gain < 100 or dd > -40:
+        return False, ""
+    return True, f"60日最高{gain}%·回撤{dd}%"
+
+
+def _t_recent_20cm(f, p):
+    n = f.get("surge_20cm_10")
+    if not n:
+        return False, ""
+    return True, f"近10日{n}次20cm"
+
+
+def _t_ma_trend_combo(f, p):
+    if not (f.get("ma5_up") and f.get("ma10_up") and f.get("ma20_up")):
+        return False, ""
+    return True, "MA5/10/20同向上"
+
+
+def _t_first_above_ma20(f, p):
+    if not f.get("first_above_ma20"):
+        return False, ""
+    return True, "首次站上MA20"
+
+
+_PRESET_TESTS = {
+    "vol_burst": _t_vol_burst,
+    "break_ma20": _t_break_ma20,
+    "oversold_rebound": _t_oversold_rebound,
+    "new_high_n": _t_new_high_n,
+    "new_low_n": _t_new_low_n,
+    "vol_spike": _t_vol_spike,
+    "yang_through": _t_yang_through,
+    "ma_bull_align": _t_ma_bull_align,
+    "ma_golden": _t_ma_golden,
+    "vol_dod": _t_vol_dod,
+    "ma_support": _t_ma_support,
+    "ma_trend": _t_ma_trend,
+    "vol_shrink": _t_vol_shrink,
+    "pair_bottom": _t_pair_bottom,
+    "halve_double": _t_halve_double,
+    "recent_20cm": _t_recent_20cm,
+    "ma_trend_combo": _t_ma_trend_combo,
+    "first_above_ma20": _t_first_above_ma20,
+}
+
+
+def preset_pass(feat: Optional[Dict[str, Any]], cond: Dict[str, Any]):
+    """预设形态标签(多标签 AND)评估 → (是否命中, 命中说明列表)。"""
+    if feat is None:
+        return False, []
+    labels = [k for k in (cond.get("labels") or []) if k in PRESET_KEYS]
+    if not labels:
+        return True, []
+    params = dict(PRESET_DEFAULTS)
+    for key in PRESET_DEFAULTS:
+        value = _num(cond.get(key))
+        if value is not None:
+            params[key] = value
+    hits: List[str] = []
+    for key in labels:
+        ok, hit = _PRESET_TESTS[key](feat, params)
+        if not ok:
+            return False, []
+        if hit:
+            hits.append(hit)
     return True, hits
 
 
@@ -575,30 +907,35 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
             kept.append(code)
         survivors = kept
 
-    # ---------- 技术条件 + 量化模型信号(共用日K,候选封顶) ----------
+    # ---------- 技术条件 + 预设形态 + 量化模型信号(共用日K,候选封顶) ----------
     tech_cond = cond.get("tech") or {}
     quant_cond = cond.get("quant") or {}
+    preset_cond = cond.get("preset") or {}
+    preset_labels = [k for k in (preset_cond.get("labels") or []) if k in PRESET_KEYS]
     tech_active, quant_active = _active(tech_cond), _active(quant_cond)
+    preset_active = bool(preset_labels)
+    feat_needed = tech_active or preset_active
     tech_map: Dict[str, Dict[str, Any]] = {}
     quant_map: Dict[str, Dict[str, int]] = {}
-    if tech_active or quant_active:
-        applied.extend([d for d, a in (("tech", tech_active), ("quant", quant_active)) if a])
+    if feat_needed or quant_active:
+        applied.extend([d for d, a in (("tech", tech_active), ("preset", preset_active),
+                                       ("quant", quant_active)) if a])
         if kline_fetcher is None:
-            notes.append("未接入日K服务,技术/量化模型条件被跳过")
+            notes.append("未接入日K服务,技术/形态/量化模型条件被跳过")
         else:
             if len(survivors) > TECH_CAP:
                 survivors.sort(key=lambda c: -(flow_map.get(c, {}).get("main_net_wan") or -1e18))
-                notes.append(f"技术/量化模型条件仅评估按主力净流入排序的前 {TECH_CAP} 只候选"
+                notes.append(f"技术/形态/量化模型条件仅评估按主力净流入排序的前 {TECH_CAP} 只候选"
                              f"(原候选 {len(survivors)} 只),请先用其他条件收窄")
                 survivors = survivors[:TECH_CAP]
 
             def _one(code: str):
                 try:
-                    bars = kline_fetcher(code, 120) or []
+                    bars = kline_fetcher(code, 180) or []
                 except Exception:
                     return code, None, None
                 return (code,
-                        tech_features(bars) if tech_active else None,
+                        tech_features(bars, code) if feat_needed else None,
                         _quant_signals(bars) if quant_active else None)
 
             with ThreadPoolExecutor(max_workers=8) as pool:
@@ -610,6 +947,11 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                     ok, hits = _tech_pass(feat, tech_cond)
                     if not ok:
                         continue
+                if preset_active:
+                    ok, preset_hits = preset_pass(feat, preset_cond)
+                    if not ok:
+                        continue
+                    hits = hits + [h for h in preset_hits if h not in hits]
                 if quant_active:
                     if qs is None:
                         continue
@@ -626,6 +968,25 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                 tech_map[code] = {"hits": hits, **(feat or {})}
                 kept.append(code)
             survivors = kept
+
+    # ---------- 列表形态字段回填(未启用日K维度时,仅前 ENRICH_CAP 只供展示) ----------
+    if not tech_map and kline_fetcher is not None and survivors:
+        pick = sorted(survivors,
+                      key=lambda c: -(flow_map.get(c, {}).get("main_net_wan") or -1e18))
+        pick = pick[:ENRICH_CAP]
+
+        def _enrich(code: str):
+            try:
+                return code, tech_features(kline_fetcher(code, 180) or [], code)
+            except Exception:
+                return code, None
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for code, feat in pool.map(_enrich, pick):
+                if feat:
+                    tech_map[code] = {"hits": [], **feat}
+        if len(survivors) > ENRICH_CAP:
+            notes.append(f"未启用形态条件,仅回填按主力净流入排序前 {ENRICH_CAP} 只的形态/量能列")
 
     # ---------- 组装结果 ----------
     stocks: List[Dict[str, Any]] = []
@@ -677,6 +1038,8 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
             "rsi": (tech_map.get(code) or {}).get("rsi"),
             "quant_buy": (quant_map.get(code) or {}).get("buy"),
             "quant_sell": (quant_map.get(code) or {}).get("sell"),
+            # 形态/量能字段(未启用日K维度时全为 None,前端显示 --)
+            **{k: (tech_map.get(code) or {}).get(k) for k in FEATURE_KEYS},
             "hits": hits,
         })
 
