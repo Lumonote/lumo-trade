@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="/static/lumo_panic.css?v={{ asset_v('lumo_panic.css') }}" />
     {% if active_page == 'market_health' %}
     <link rel="stylesheet" href="/static/lumo_market_health.css?v={{ asset_v('lumo_market_health.css') }}" />
+    <link rel="stylesheet" href="/static/lumo_market_capital.css?v={{ asset_v('lumo_market_capital.css') }}" />
     {% endif %}
     {% if active_page == 'growth_research' %}
     <link rel="stylesheet" href="/static/lumo_growth_research.css?v={{ asset_v('lumo_growth_research.css') }}" />
@@ -1741,12 +1742,17 @@
     <script src="/static/lumo_screener.js?v={{ asset_v('lumo_screener.js') }}"></script>
     {% endif %}
     <script>
-      if (typeof JOB_TYPE_LABELS !== 'undefined') JOB_TYPE_LABELS.growth_research = '成长研究';
+      if (typeof JOB_TYPE_LABELS !== 'undefined') {
+        JOB_TYPE_LABELS.growth_research = '成长研究';
+        JOB_TYPE_LABELS.market_capital_financing = '融资风险研究';
+        JOB_TYPE_LABELS.market_capital_participants = '市场资金研究';
+      }
     </script>
     <script src="/static/lumo_panic.js?v={{ asset_v('lumo_panic.js') }}"></script>
     {% if active_page == 'market_health' %}
     <script src="/static/lumo_market_health.js?v={{ asset_v('lumo_market_health.js') }}"></script>
     <script src="/static/lumo_sector_depth.js?v={{ asset_v('lumo_sector_depth.js') }}"></script>
+    <script src="/static/lumo_market_capital.js?v={{ asset_v('lumo_market_capital.js') }}"></script>
     {% endif %}
     <script src="/static/lumo_operations.js?v={{ asset_v('lumo_operations.js') }}"></script>
     <script src="/static/lumo_quant_sector_clicks.js?v={{ asset_v('lumo_quant_sector_clicks.js') }}"></script>

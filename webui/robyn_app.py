@@ -33,6 +33,7 @@ from webui.services import stock_screener_service
 from webui.services import growth_research_service
 from webui.services import market_health_service
 from webui.services import sector_depth_service
+from webui.services import market_capital_service
 from webui.services.watchlist_service import WatchlistStorageError
 from data_store import quant_radar_repo, star_orbit_repo
 
@@ -926,6 +927,35 @@ def market_health_sectors_detail(request: Request) -> Response:
         return _json_response(sector_depth_service.detail(str(_query_value(request,"code","")).strip(),refresh=_query_value(request,"refresh","")=="1"))
     except ValueError as exc:
         return _json_response({"error":str(exc)},status_code=400)
+
+
+@_native_get("/api/market-health/financing")
+def market_health_financing(request: Request) -> Response:
+    try:
+        params = {key: _query_value(request, key, default) for key, default in (("window", 20), ("deposit", 80), ("warning", 150), ("closeout", 130))}
+        return _json_response(market_capital_service.financing(webui_core.JOB_SERVICE, **params))
+    except (ValueError, TypeError):
+        return _json_response({"error": "测算参数无效：窗口5/10/20日，保证金20–300%，100%≤平仓情景线<预警情景线≤300%"}, status_code=400)
+
+
+@_native_post("/api/market-health/financing/refresh")
+def market_health_financing_refresh(request: Request) -> Response:
+    return _json_response({"job": market_capital_service.start_refresh("financing", webui_core.JOB_SERVICE)}, status_code=202)
+
+
+@_native_get("/api/market-health/participants")
+def market_health_participants(request: Request) -> Response:
+    try:
+        params = {key: _query_value(request, key, "") for key in ("start", "end", "keyword", "sector")}
+        params["participant"] = _query_value(request, "participant", "main")
+        return _json_response(market_capital_service.participants(webui_core.JOB_SERVICE, **params))
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_post("/api/market-health/participants/refresh")
+def market_health_participants_refresh(request: Request) -> Response:
+    return _json_response({"job": market_capital_service.start_refresh("participants", webui_core.JOB_SERVICE)}, status_code=202)
 
 
 # ----------------------------- 模拟盘 paper trading -----------------------------

@@ -78,3 +78,32 @@ def test_sector_research_routes_include_real_dated_baseline_and_constituents(run
         page=client.get("/desktop/market_health").text
         assert 'id="mhView-sectors"' in page and "lumo_sector_depth.js" in page
         assert client.get("/static/lumo_sector_depth.js").status_code==200
+
+
+def test_financing_and_participants_native_routes_and_assets(runtime, monkeypatch):
+    from robyn.testing import TestClient
+    calls=[]
+    monkeypatch.setattr(runtime.market_capital_service,"financing",lambda jobs,**params: calls.append(params) or {"as_of":"2026-10-29","rows":[]})
+    monkeypatch.setattr(runtime.market_capital_service,"participants",lambda jobs,**params: {"participant":params["participant"],"start":params["start"]})
+    monkeypatch.setattr(runtime.market_capital_service,"start_refresh",lambda kind,jobs: {"id":kind,"status":"queued"})
+    with TestClient(runtime.app) as client:
+        assert client.get("/api/market-health/financing",query_params={"window":"5"}).json()["as_of"]=="2026-10-29"
+        assert calls[0]["window"]=="5"
+        data=client.get("/api/market-health/participants",query_params={"participant":"etf","start":"2026-10-21"}).json()
+        assert data=={"participant":"etf","start":"2026-10-21"}
+        for kind in ("financing","participants"):
+            response=client.post(f"/api/market-health/{kind}/refresh",json_data={})
+            assert response.status_code==202 and response.json()["job"]["id"]==kind
+        page=client.get("/desktop/market_health").text
+        assert 'id="mhView-financing"' in page and 'id="mhView-participants"' in page
+        for name in ("lumo_market_capital.js","lumo_market_capital.css"):
+            assert name in page and client.get("/static/"+name).status_code==200
+
+
+def test_capital_routes_reject_invalid_queries(runtime):
+    from robyn.testing import TestClient
+    with TestClient(runtime.app) as client:
+        assert client.get("/api/market-health/financing",query_params={"deposit":"nan"}).status_code==400
+        assert client.get("/api/market-health/financing",query_params={"window":"wrong"}).status_code==400
+        assert client.get("/api/market-health/participants",query_params={"participant":"unverified"}).status_code==400
+        assert client.get("/api/market-health/participants",query_params={"start":"2026-10-30","end":"2026-10-20"}).status_code==400
