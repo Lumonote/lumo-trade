@@ -206,6 +206,9 @@ def test_tech_cap_limits_candidates_with_note(monkeypatch):
     assert len(calls) == 1
     assert calls[0] == "300005"  # 主力净流入最高者优先评估
     assert any("前 1 只" in n for n in payload["notes"])
+    assert payload["partial"] is True
+    assert payload["timings"]["kline_candidates"] == 4
+    assert payload["timings"]["kline_evaluated"] == 1
 
 
 def test_sort_key_and_limit():
@@ -375,4 +378,135 @@ def test_screener_cache_repo_roundtrip_and_ttl(monkeypatch):
     finally:
         connection.reset_for_testing()
         shutil.rmtree(base, ignore_errors=True)
+
+
+# ----------------------------- 默认条件与设计口径回归 -----------------------------
+
+def _price_bars(prices):
+    import datetime
+
+    start = datetime.date(2026, 1, 1)
+    return [{"date": (start + datetime.timedelta(days=i)).isoformat(),
+             "open": price - 0.05, "high": price + 0.1, "low": price - 0.1,
+             "close": price, "volume": 1e6, "amount": 0}
+            for i, price in enumerate(prices)]
+
+
+def test_default_sustained_volume_can_match_without_sina_amount():
+    bars = _price_bars([20.0] * 55 + [20.25, 20.5, 20.75, 21.0, 21.25])
+    for bar in bars[-5:]:
+        bar["volume"] = 1.8e6
+    payload = _screen({"preset": {"labels": ["vol_burst"]}},
+                      kline_fetcher=lambda code, limit: bars)
+    assert payload["total_matched"] == 4
+    row = payload["stocks"][0]
+    assert row["amount_ma5_yi"] is None
+    assert 1.5 <= row["vol_energy"] < 2
+    assert 5 <= row["ret5"] < 15
+    assert all("均额" not in hit for hit in row["hits"])
+    restricted = _screen({"preset": {"labels": ["vol_burst"], "amount_min": 0.5}},
+                         kline_fetcher=lambda code, limit: bars)
+    assert restricted["total_matched"] == 0
+    assert any("缺少5日成交额" in note for note in restricted["notes"])
+
+
+def test_sustained_volume_requires_sixty_bars():
+    feat = sc.tech_features(_price_bars([10.0] * 30))
+    assert feat["vol_energy"] is None
+    assert not sc.preset_pass(feat, {"labels": ["vol_burst"]})[0]
+
+
+def test_breakout_volume_parameter_is_independent_for_new_clients():
+    feat = {"above_ma20": True, "prev_above_ma20": False,
+            "vol_ratio": 1.4, "vol_energy": 1.7, "ret5": 6, "amount_ma5_yi": None}
+    cond = {"labels": ["vol_burst", "break_ma20"], "mode": "all", "vol_mult": 1.6}
+    assert sc.preset_pass(feat, cond)[0]
+    assert not sc.preset_pass(feat, {**cond, "break_mult": 2})[0]
+    assert not sc.preset_pass(feat, {"labels": ["break_ma20"], "vol_mult": 2})[0]
+
+
+def test_preset_union_reports_only_the_labels_that_matched():
+    feat = {"ma20_up": True, "vol_ratio": 1.0}
+    labels = ["ma_trend", "vol_spike"]
+    ok, hits = sc.preset_pass(feat, {"labels": labels, "mode": "any"})
+    assert ok and hits == ["MA20向上"]
+    assert sc.preset_pass(feat, {"labels": labels, "mode": "all"}) == (False, [])
+    assert sc.preset_pass(feat, {"labels": labels}) == (False, [])  # 旧 API 保留交集
+
+
+@pytest.mark.parametrize("n,prices,expected", [
+    (5, [20.0] * 16 + [5.0, 6.0, 7.0, 8.0, 10.0], True),
+    (30, [9.0] * 50 + [15.0] + [8.0] * 28 + [10.0], False),
+    (90, [9.0] * 10 + [15.0] + [8.0] * 78 + [10.0], False),
+    (120, [9.0] * 89 + [10.0], False),
+])
+@pytest.mark.parametrize("label,param", [("new_high_n", "high_n"), ("new_low_n", "low_n")])
+def test_new_extreme_uses_the_requested_window(n, prices, expected, label, param):
+    if label == "new_low_n":
+        prices = [30 - price for price in prices]
+    feat = sc.tech_features(_price_bars(prices))
+    assert sc.preset_pass(feat, {"labels": [label], param: n})[0] is expected
+
+
+def test_first_above_ma20_checks_the_previous_five_days():
+    prices = [10.0] * 19 + [9.0] * 5 + [11.0]
+    feat = sc.tech_features(_price_bars(prices))
+    assert feat["first_above_ma20"] is True
+    assert sc.preset_pass(feat, {"labels": ["first_above_ma20"]})[0]
+    prices[-2] = 10.0  # 昨日已经站上,不能称首次
+    assert sc.tech_features(_price_bars(prices))["first_above_ma20"] is False
+
+
+def test_zero_change_and_turnover_are_available_values():
+    payload = _screen({"market": {"pct_min": 0, "pct_max": 0, "turnover_min": 0}},
+                      market_rows_fn=lambda: [{"code": "600000", "price": 10,
+                                              "change_pct": 0, "turnover_rate": 0}],
+                      kline_fetcher=None)
+    assert payload["total_matched"] == 1
+    assert payload["stocks"][0]["change_pct"] == 0
+    assert payload["stocks"][0]["turnover"] == 0
+
+
+@pytest.mark.parametrize("conditions,reason", [
+    ({"market": {"pct_min": 5, "pct_max": 1}}, "涨跌幅下限"),
+    ({"market": {"price_min": 20, "price_max": 10}}, "现价下限"),
+    ({"tech": {"rsi_min": 70, "rsi_max": 30}}, "RSI下限"),
+    ({"preset": {"labels": ["new_high_n"], "high_n": 30.5}}, "整数"),
+    ({"preset": {"labels": ["new_high_n"], "high_n": 121}}, "整数"),
+    ({"preset": {"labels": ["vol_spike"], "spike_mult": float("nan")}}, "有限数值"),
+    ({"preset": {"labels": ["vol_spike"], "spike_mult": -1}}, "不能为负数"),
+    ({"preset": {"labels": ["vol_shrink"], "shrink_ratio": 1.2}}, "0 至 1"),
+    ({"preset": {"labels": ["ma_trend"], "mode": "invalid"}}, "组合方式"),
+])
+def test_invalid_conditions_are_rejected_before_loading_data(conditions, reason):
+    def unexpected_load():
+        pytest.fail("条件无效时不应读取行情")
+
+    payload = _screen(conditions, market_rows_fn=unexpected_load)
+    assert payload["ok"] is False
+    assert reason in payload["error"]
+
+
+def test_missing_kline_service_does_not_silently_skip_requested_filters():
+    payload = _screen({"tech": {"above_ma20": True}}, kline_fetcher=None)
+    assert payload["total_matched"] == 0
+    assert payload["timings"]["kline_evaluated"] == 0
+    assert payload["funnel"] == [{"dimension": "kline", "before": 4, "after": 0, "missing": 4}]
+
+
+def test_funnel_distinguishes_missing_data_from_threshold_rejection():
+    missing = _screen({"radar": {"activity_min": 10}}, radar_rows_fn=lambda: [])
+    assert missing["funnel"] == [{"dimension": "radar", "before": 4, "after": 0, "missing": 4}]
+    strict = _screen({"radar": {"activity_min": 99}})
+    assert strict["funnel"] == [{"dimension": "radar", "before": 4, "after": 0, "missing": 2}]
+
+
+def test_previous_feature_schema_is_not_reused():
+    import time
+
+    sc._FEATURE_MEMORY["600000"] = (time.time(), {"_version": 1, "first_above_ma20": False})
+    assert sc.cached_features("600000") is None
+    fresh = sc.tech_features(_price_bars([10.0] * 19 + [9.0] * 5 + [11.0]))
+    sc._remember_feature("600000", fresh)
+    assert sc.cached_features("600000")["first_above_ma20"] is True
 

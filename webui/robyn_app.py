@@ -34,6 +34,7 @@ from webui.services import growth_research_service
 from webui.services import market_health_service
 from webui.services import sector_depth_service
 from webui.services import market_capital_service
+from webui.services import market_macro_service
 from webui.services.watchlist_service import WatchlistStorageError
 from data_store import quant_radar_repo, star_orbit_repo
 
@@ -956,6 +957,21 @@ def market_health_participants(request: Request) -> Response:
 @_native_post("/api/market-health/participants/refresh")
 def market_health_participants_refresh(request: Request) -> Response:
     return _json_response({"job": market_capital_service.start_refresh("participants", webui_core.JOB_SERVICE)}, status_code=202)
+
+
+@_native_get("/api/market-health/macro")
+def market_health_macro(request: Request) -> Response:
+    try:
+        defaults = {"equity": "csi300", "factor": "real10y", "frequency": "daily", "window": 252, "lag": 0,
+                    "category": "all", "keyword": "", "earnings": 0, "pe": 0, "discount_bp": -25, "duration": 10}
+        return _json_response(market_macro_service.query(webui_core.JOB_SERVICE, **{key: _query_value(request, key, value) for key, value in defaults.items()}))
+    except (ValueError, TypeError, OverflowError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_post("/api/market-health/macro/refresh")
+def market_health_macro_refresh(request: Request) -> Response:
+    return _json_response({"job": market_macro_service.start_refresh(webui_core.JOB_SERVICE)}, status_code=202)
 
 
 # ----------------------------- 模拟盘 paper trading -----------------------------

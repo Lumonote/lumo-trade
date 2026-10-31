@@ -13,7 +13,7 @@
   <div id="mhError" class="mh-notice mh-error" role="alert" hidden></div>
   <div id="mhJob" class="mh-job" role="status" hidden></div>
   <nav id="mhTabs" class="mh-tabs" aria-label="体检分区" role="tablist">
-    {% for key, label in [('overview','综合总览'),('cross','跨市场研判'),('sectors','板块深度'),('financing','融资风险'),('participants','谁买谁卖'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
+    {% for key, label in [('overview','综合总览'),('cross','跨市场研判'),('sectors','板块深度'),('financing','融资风险'),('participants','谁买谁卖'),('macro','宏观经济'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
     <button type="button" role="tab" id="mhTab-{{ key }}" aria-controls="mhView-{{ key }}" aria-selected="{{ 'true' if key == 'overview' else 'false' }}" tabindex="{{ '0' if key == 'overview' else '-1' }}" data-mh-tab="{{ key }}">{{ label }}</button>
     {% endfor %}
   </nav>
@@ -28,6 +28,7 @@
     <details class="mh-box mh-method"><summary>数据来源、完整窗口与计算口径</summary><p>当日资金强度是同类型板块的净额百分位与净流入占比百分位均值；持续性刻度由五日正流入天数40%、净额/绝对资金总额20%、前20%排名驻留20%、跑赢沪深300与否20%组成。综合承接强度为两项均值，属于描述刻度，不是未来上涨概率。</p><p>连续窗口逐日对齐交易所交易日历。缺日或缺值不会补零，缺失窗口不计算；同日反复刷新也不增加连续天数。五日相对强度采用板块与沪深300复合收益之比。排行仅比较所列类型板块，概念成分重叠，不能把各概念资金加总成全市场资金。</p><p>板块资金 <a href="https://tushare.pro/document/2?doc_id=344" target="_blank" rel="noopener">moneyflow_ind_dc</a> 为元；个股资金 <a href="https://tushare.pro/document/2?doc_id=349" target="_blank" rel="noopener">moneyflow_dc</a> 为万元，已转换为元。成分使用 <a href="https://tushare.pro/document/2?doc_id=363" target="_blank" rel="noopener">dc_member 同日成分</a>；板块量价使用 <a href="https://tushare.pro/document/2?doc_id=382" target="_blank" rel="noopener">dc_daily</a>。主力是订单规模口径，不等于识别了机构身份。</p></details>
   </section>
   {% include 'market_capital_panel.html' %}
+  {% include 'market_macro_panel.html' %}
   <section id="mhView-signals" role="tabpanel" aria-labelledby="mhTab-signals" hidden></section>
   <section id="mhView-indices" role="tabpanel" aria-labelledby="mhTab-indices" hidden></section>
   <section id="mhView-breadth" role="tabpanel" aria-labelledby="mhTab-breadth" hidden></section>

@@ -146,3 +146,61 @@ def test_partial_amount_coverage_and_requested_dates_are_explicit(sample):
     assert report["totals"]["net"] is None and report["totals"]["amount_covered"] == 0
     report = capital_report(sample, start="2026-09-01")
     assert report["range_note"] and not report["rows"][0]["complete"]
+
+
+@pytest.mark.parametrize("missing", [float("nan"), float("inf"), 3.0, "NaN", None, " "])
+@pytest.mark.parametrize("participant", ["main", "sm", "etf"])
+def test_search_with_missing_classification_in_existing_cache(sample, missing, participant):
+    sample["stocks"].append({"ts_code": "600001.SH", "name": "样本新股", "industry": missing})
+    sample["flows"].append({**sample["flows"][-1], "ts_code": "600001.SH"})
+    sample["etf_meta"] = [{"ts_code": "510300.SH", "index_name": "银行"}, {"ts_code": "510301.SH", "index_name": missing}]
+    sample["etf"] = [{"ts_code": code, "trade_date": date, "etf_name": "样本ETF", "total_share": shares, "nav": 2}
+                     for code in ("510300.SH", "510301.SH") for date, shares in (("20261020", 100), ("20261021", 110))]
+    report = capital_report(sample, participant=participant, keyword="样本")
+    assert len(report["rows"]) == 2
+    assert all(isinstance(r["name"], str) for r in report["sectors"])
+    assert {r["sector"] for r in report["rows"]} == {"银行", "跟踪指数未取得" if participant == "etf" else "未分类"}
+    assert report["totals"]["net"] == (400000 if participant == "etf" else 60000 if participant == "main" else -40000)
+    assert len(capital_report(sample, participant=participant, keyword="不存在")["rows"]) == 0
+
+
+def test_financing_and_identity_classifications_handle_nan_without_mutating_cache(sample):
+    sample["stocks"][0]["industry"] = float("nan")
+    assert margin_report(sample)["sectors"][0]["name"] == "未分类"
+    sample["quant"] = [{"code": "600000", "name": float("nan"), "sector": float("nan"), "as_of": sample["as_of"], "net": None}]
+    report = capital_report(sample, participant="quant")
+    assert report["rows"][0]["name"] == "样本股票" and report["sectors"][0]["name"] == "未分类"
+    assert isinstance(sample["quant"][0]["sector"], float)
+
+
+def test_metadata_resolves_bare_codes_and_excludes_non_stock_instruments(sample):
+    sample["quant"] = [{"code": "600000", "name": "600000", "sector": None, "as_of": sample["as_of"], "net": None},
+                       {"code": "200029", "name": "B股样本", "as_of": sample["as_of"], "net": None}]
+    sample["national"] = [{"code": "600000.SH", "name": "600000.SH", "sector": float("nan"), "as_of": sample["as_of"], "net": None},
+                          {"code": "360001.SZ", "name": "360001.SZ", "sector": None, "as_of": sample["as_of"], "net": None}]
+    sample["institutions"] = [{"trade_date": sample["as_of"], "ts_code": code, "exalter": "机构专用", "reason": "日涨幅偏离", "buy": 100, "sell": 20}
+                              for code in ("600000.SH", "123267.SZ")]
+    for kind in ("quant", "national", "institution"):
+        report = capital_report(sample, participant=kind)
+        assert len(report["rows"]) == 1
+        assert report["rows"][0]["name"] == "样本股票" and report["rows"][0]["sector"] == "银行"
+        assert report["rows"][0]["code"] == "600000.SH"
+        assert report["excluded_nonstock"] == 1
+        assert report["metadata_coverage"] == {"missing_names": 0, "missing_sectors": 0}
+
+
+def test_missing_master_name_and_industry_can_use_existing_observations(sample):
+    sample["stocks"][0].update(name=None, industry=float("nan"))
+    sample["flows"][-1]["name"] = "已披露名称"
+    sample["quant"] = [{"code": "600000", "name": "600000", "sector": "银行", "as_of": sample["as_of"], "net": None}]
+    row = capital_report(sample, participant="quant")["rows"][0]
+    assert row["name"] == "已披露名称" and row["sector"] == "银行"
+
+
+def test_etf_name_and_index_can_use_other_verified_metadata(sample):
+    sample["etf_meta"] = [{"ts_code": "510300.SH", "extname": "样本ETF", "index_code": "000300.SH", "index_name": float("nan")},
+                          {"ts_code": "510301.SH", "index_code": "000300.SH", "index_name": "沪深300"}]
+    sample["etf"] = [{"ts_code": "510300.SH", "trade_date": date, "etf_name": "510300.SH", "total_share": shares, "nav": 2}
+                     for date, shares in (("20261020", 100), ("20261021", 110))]
+    row = capital_report(sample, participant="etf")["rows"][0]
+    assert row["name"] == "样本ETF" and row["sector"] == "沪深300"

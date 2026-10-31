@@ -2,10 +2,39 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 from statistics import median
 
 from analysis.market_health import number
 from analysis.market_health_fusion import iso, margin_metrics
+
+
+def text(value, fallback=""):
+    """分类/代码须为有效文本；旧缓存中的NaN、数值和空串不参与文本排序。"""
+    if not isinstance(value, str):
+        return fallback
+    value = value.strip()
+    return fallback if value.lower() in ("", "nan", "none", "null", "nat", "<na>", "—", "--", "未分类", "名称未取得", "行业未取得", "跟踪指数未取得") else value
+
+
+def security_code(value):
+    code = text(value).upper()
+    if re.fullmatch(r"(?:SH|SZ|BJ)\d{6}", code):
+        code = f"{code[2:]}.{code[:2]}"
+    if re.fullmatch(r"\d{6}", code):
+        suffix = "SH" if code.startswith("6") else "SZ" if code.startswith(("0", "30")) else "BJ" if code.startswith(("4", "8", "92")) else None
+        if suffix:
+            code += "." + suffix
+    return code
+
+
+def is_a_stock(code):
+    return bool(re.fullmatch(r"(?:6\d{5}\.SH|(?:00|30)\d{4}\.SZ|(?:[48]\d{5}|92\d{4})\.BJ)", code))
+
+
+def security_name(value, code, fallback="名称未取得"):
+    name = text(value)
+    return name if name and name not in (code, code.split(".")[0]) else fallback
 
 
 def total(rows, key):
@@ -22,7 +51,7 @@ def dated(rows, date):
 
 
 def indexed(rows):
-    return {(iso(r.get("trade_date")), r.get("ts_code")): r for r in rows if iso(r.get("trade_date")) and r.get("ts_code")}
+    return {(iso(r.get("trade_date")), text(r.get("ts_code"))): r for r in rows if iso(r.get("trade_date")) and text(r.get("ts_code"))}
 
 
 def window_rows(index, code, dates, n):
@@ -31,7 +60,21 @@ def window_rows(index, code, dates, n):
 
 
 def stock_meta(bundle):
-    return {r["ts_code"]: r for r in bundle.get("stocks", [])}
+    meta = {security_code(r.get("ts_code")): {**r, "ts_code": security_code(r.get("ts_code")), "name": security_name(r.get("name"), security_code(r.get("ts_code"))),
+                                             "industry": text(r.get("industry"), "未分类"), "market": text(r.get("market"), "未分类")}
+            for r in bundle.get("stocks", []) if is_a_stock(security_code(r.get("ts_code")))}
+    for row in bundle.get("quant", []):
+        code = security_code(row.get("code"))
+        if code in meta:
+            meta[code]["name"] = text(meta[code]["name"], security_name(row.get("name"), code))
+            meta[code]["industry"] = text(meta[code]["industry"], text(row.get("sector"), text(row.get("industry"), "未分类")))
+    if any(not text(r["name"]) for r in meta.values()):
+        for key in ("flows", "details"):
+            for row in bundle.get(key, []):
+                code = security_code(row.get("ts_code"))
+                if code in meta and not text(meta[code]["name"]):
+                    meta[code]["name"] = security_name(row.get("name"), code)
+    return meta
 
 
 def margin_report(bundle, *, window=20, deposit=80, warning=150, closeout=130):
@@ -154,21 +197,22 @@ def institution_rows(raw_rows):
     """只汇总机构专用的单日席位；去掉买卖榜重复和多日累计榜。"""
     unique = {}
     for r in raw_rows:
-        seat = str(r.get("exalter") or "")
-        reason = str(r.get("reason") or "")
+        seat = text(r.get("exalter"))
+        reason = text(r.get("reason"))
         if "机构专用" not in seat or not reason or any(t in reason for t in ("连续", "累计", "三个", "3个", "三日", "3日")):
             continue
         buy, sell = number(r.get("buy")), number(r.get("sell"))
         if buy is None or sell is None:
             continue
-        key = (iso(r.get("trade_date")), r.get("ts_code"), seat, buy, sell)
+        key = (iso(r.get("trade_date")), security_code(r.get("ts_code")), seat, buy, sell)
         unique[key] = {"date": key[0], "code": key[1], "seat": seat, "buy": buy, "sell": sell, "net": buy - sell, "reason": reason}
     return list(unique.values())
 
 
 def etf_rows(bundle):
     raw = indexed(bundle.get("etf", []))
-    meta = {r["ts_code"]: r for r in bundle.get("etf_meta", [])}
+    meta = {text(r.get("ts_code")): r for r in bundle.get("etf_meta", []) if text(r.get("ts_code"))}
+    index_names = {text(r.get("index_code")): text(r.get("index_name")) for r in meta.values() if text(r.get("index_code")) and text(r.get("index_name"))}
     dates = bundle.get("calendar", [])
     result = []
     for (date, code), r in sorted(raw.items()):
@@ -178,8 +222,11 @@ def etf_rows(bundle):
         old = raw.get((previous, code), {})
         current, before, nav = number(r.get("total_share")), number(old.get("total_share")), number(r.get("nav"))
         delta = (current - before) * 1e4 if current is not None and before is not None else None
-        result.append({"date": date, "previous_date": previous, "code": code, "name": r.get("etf_name") or meta.get(code, {}).get("extname") or code,
-                       "sector": meta.get(code, {}).get("index_name") or "跟踪指数未取得", "shares": current * 1e4 if current is not None else None,
+        info = meta.get(code, {})
+        index_code = text(info.get("index_code"))
+        index_name = text(info.get("index_name"), index_names.get(index_code, "跟踪指数未取得"))
+        result.append({"date": date, "previous_date": previous, "code": code, "name": security_name(r.get("etf_name"), code, security_name(info.get("extname"), code)),
+                       "sector": index_name, "index_code": index_code or None, "shares": current * 1e4 if current is not None else None,
                        "share_change": delta, "net": delta * nav if delta is not None and nav is not None and nav > 0 else None,
                        "nav": nav, "size": number(r.get("total_size")) * 1e4 if number(r.get("total_size")) is not None else None})
     return result
@@ -217,9 +264,18 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
                 group[r["code"]].append(r)
         rows = [{**items[-1], "net": total(items, "net"), "share_change": total(items, "share_change"), "days": len(items), "as_of": items[-1]["date"]} for items in group.values()]
     elif participant == "national":
-        rows = bundle.get("national", [])
+        rows = [dict(r) for r in bundle.get("national", [])]
     elif participant == "quant":
-        rows = bundle.get("quant", [])
+        rows = [dict(r) for r in bundle.get("quant", [])]
+    excluded_nonstock = sum(not is_a_stock(security_code(r.get("code"))) for r in rows) if participant != "etf" else 0
+    if participant != "etf":
+        rows = [r for r in rows if is_a_stock(security_code(r.get("code")))]
+    for row in rows:
+        row["code"] = security_code(row.get("code"))
+        info = meta.get(row["code"], {}) if participant != "etf" else {}
+        row["name"] = security_name(row.get("name"), row["code"], text(info.get("name"), "名称未取得"))
+        row["sector"] = text(info.get("industry"), text(row.get("sector"), "跟踪指数未取得" if participant == "etf" else "未分类"))
+        row["net"] = number(row.get("net"))
     rows = [r for r in rows if (not keyword or keyword.casefold() in " ".join(str(r.get(k) or "") for k in ("code", "name", "sector", "holder", "seat")).casefold())
             and (not sector or r.get("sector") == sector)
             and (participant not in ("quant", "national") or start and start <= (r.get("as_of") or "") <= end)]
@@ -230,7 +286,7 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
             row["expected_days"] = expected
             row["complete"] = row.get("days", 0) == expected and expected > 0 and not outside_window
     selected_codes = {r["code"] for r in rows}
-    by_bare = {str(r["ts_code"]).split(".")[0]: r["ts_code"] for r in bundle.get("stocks", [])}
+    by_bare = {code.split(".")[0]: code for code in meta}
     canonical_codes = selected_codes | {by_bare.get(str(code).split(".")[0], code) for code in selected_codes}
     matrix = []
     if participant != "etf":
@@ -265,4 +321,6 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
                        "amount_covered": sum(r.get("net") is not None for r in rows),
                        "buying": sum(r.get("net") is not None and r["net"] > 0 for r in rows), "selling": sum(r.get("net") is not None and r["net"] < 0 for r in rows)},
             "matrix": matrix, "range_note": "查询起点早于已采集交易日窗口，仅展示已取得数据，不宣称区间完整" if outside_window else "",
+            "excluded_nonstock": excluded_nonstock,
+            "metadata_coverage": {"missing_names": sum(not text(r["name"]) for r in rows), "missing_sectors": sum(not text(r["sector"]) for r in rows)},
             "calendar": dates, "sources": bundle.get("sources", []), "flow_as_of": bundle.get("flow_as_of")}

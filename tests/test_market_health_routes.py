@@ -107,3 +107,28 @@ def test_capital_routes_reject_invalid_queries(runtime):
         assert client.get("/api/market-health/financing",query_params={"window":"wrong"}).status_code==400
         assert client.get("/api/market-health/participants",query_params={"participant":"unverified"}).status_code==400
         assert client.get("/api/market-health/participants",query_params={"start":"2026-10-30","end":"2026-10-20"}).status_code==400
+
+
+def test_macro_native_query_refresh_and_packaged_assets(runtime, monkeypatch):
+    from robyn.testing import TestClient
+    monkeypatch.setattr(runtime.market_macro_service, "start_refresh", lambda jobs: {"id": "macro", "status": "queued"})
+    with TestClient(runtime.app) as client:
+        response = client.get("/api/market-health/macro", query_params={"factor": "gold"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["factor"] == "gold" and len(payload["metrics"]) == 21
+        assert len(payload["sector_sensitivity"]) == 31 and payload["relationship"]["n"] > 200
+        assert payload["valuation"]["available"] and payload["events"]["total"] == len(payload["events"]["rows"])
+        job = client.post("/api/market-health/macro/refresh", json_data={})
+        assert job.status_code == 202 and job.json()["job"]["id"] == "macro"
+        page = client.get("/desktop/market_health").text
+        assert 'id="mhView-macro"' in page and "宏观经济" in page
+        for name in ("lumo_market_macro.js", "lumo_market_macro.css"):
+            assert name in page and client.get("/static/" + name).status_code == 200
+
+
+def test_macro_rejects_invalid_frequency_window_and_nonfinite_scenario(runtime):
+    from robyn.testing import TestClient
+    with TestClient(runtime.app) as client:
+        for params in ({"factor": "m2"}, {"window": "bad"}, {"earnings": "nan"}, {"duration": "100"}, {"frequency": "monthly", "lag": "5"}):
+            assert client.get("/api/market-health/macro", query_params=params).status_code == 400

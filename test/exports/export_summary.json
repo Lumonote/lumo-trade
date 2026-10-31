@@ -1,0 +1,42 @@
+[
+  {
+    "data_type": "fund_holdings",
+    "requested_period": "2020-03-31",
+    "status": "no_data",
+    "records": 0,
+    "actual_period": null,
+    "source": "fund_hold_detail",
+    "data_nature": "historical_snapshot",
+    "csv": "/Users/palmer/IdeaProjects/projectSync/AI/project/Kronos/test/exports/600519_fund_holdings_2020-03-31.csv"
+  },
+  {
+    "data_type": "fund_holdings",
+    "requested_period": "2026-03-31",
+    "status": "ok",
+    "records": 50,
+    "actual_period": "2026-03-31",
+    "source": "fund_hold_detail",
+    "data_nature": "historical_snapshot",
+    "csv": "/Users/palmer/IdeaProjects/projectSync/AI/project/Kronos/test/exports/600519_fund_holdings_2026-03-31.csv"
+  },
+  {
+    "data_type": "top10_floatholders",
+    "requested_period": "2020-03-31",
+    "status": "ok",
+    "records": 10,
+    "actual_period": "2020-03-31",
+    "source": "top10_floatholders",
+    "data_nature": "historical_snapshot",
+    "csv": "/Users/palmer/IdeaProjects/projectSync/AI/project/Kronos/test/exports/600519_top10_floatholders_2020-03-31.csv"
+  },
+  {
+    "data_type": "top10_floatholders",
+    "requested_period": "2026-03-31",
+    "status": "ok",
+    "records": 10,
+    "actual_period": "2026-03-31",
+    "source": "top10_floatholders",
+    "data_nature": "historical_snapshot",
+    "csv": "/Users/palmer/IdeaProjects/projectSync/AI/project/Kronos/test/exports/600519_top10_floatholders_2026-03-31.csv"
+  }
+]

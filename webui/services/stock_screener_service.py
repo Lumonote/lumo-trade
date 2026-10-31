@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -40,6 +41,7 @@ _FEATURE_MEMORY: Dict[str, tuple] = {}
 _FEATURE_MEMORY_MAX = 8000
 _DISK_CACHE = None
 _DISK_CACHE_READY = False
+_FEATURE_VERSION = 2
 
 
 def _disk_cache():
@@ -78,13 +80,14 @@ def cached_features(code: str) -> Optional[Dict[str, Any]]:
     """形态特征:内存 → SQLite 未过期条目 → None(需要重新取日K)。"""
     ttl = _cache_ttl()
     hit = _FEATURE_MEMORY.get(code)
-    if hit and (ttl <= 0 or time.time() - hit[0] <= ttl):
+    if hit and hit[1].get("_version") == _FEATURE_VERSION \
+            and (ttl <= 0 or time.time() - hit[0] <= ttl):
         return hit[1]
     cache = _disk_cache()
     if not cache:
         return None
     feat = cache.get_feature(code, ttl or None)
-    if feat:
+    if feat and feat.get("_version") == _FEATURE_VERSION:
         _remember_feature(code, feat)
         return feat
     return None
@@ -127,10 +130,10 @@ PRESET_KEYS = ("vol_burst", "break_ma20", "oversold_rebound", "new_high_n",
                "vol_shrink", "pair_bottom", "halve_double", "recent_20cm",
                "ma_trend_combo", "first_above_ma20")
 
-# 预设参数默认值(前端「连续爆量」输入框留空时回退到这里)
-PRESET_DEFAULTS = {"vol_mult": 2.0, "ret5_min": 15.0, "amount_min": 2.0,
-                   "high_n": 20, "low_n": 20, "spike_mult": 2.0,
-                   "dod_mult": 1.5, "shrink_ratio": 0.4, "surge_days": 10}
+# 预设参数默认值:用于发现候选;成交额缺失常见,默认不启用金额门槛。
+PRESET_DEFAULTS = {"vol_mult": 1.5, "ret5_min": 5.0, "amount_min": 0.0,
+                   "break_mult": 1.3, "high_n": 20, "low_n": 20, "spike_mult": 1.5,
+                   "dod_mult": 1.2, "shrink_ratio": 0.5, "surge_days": 10}
 
 BOARD_PREFIX = {
     "main": ("60", "00"),      # 沪深主板
@@ -145,9 +148,47 @@ def _num(v: Any, ndigits: int = 2) -> Optional[float]:
     try:
         if v in (None, "", "-"):
             return None
-        return round(float(v), ndigits)
+        value = float(v)
+        return round(value, ndigits) if math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
+
+
+def _conditions_error(cond: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(cond, dict):
+        return "选股条件必须为对象"
+    for dim in ("market", "flow", "radar", "accum", "dragon", "opportunity", "tech", "quant", "preset"):
+        if cond.get(dim) is not None and not isinstance(cond[dim], dict):
+            return f"{dim} 条件必须为对象"
+    for dim, lo, hi, label in (
+        ("market", "pct_min", "pct_max", "涨跌幅"),
+        ("market", "price_min", "price_max", "现价"),
+        ("tech", "rsi_min", "rsi_max", "RSI"),
+    ):
+        values = cond.get(dim) or {}
+        lower, upper = _num(values.get(lo)), _num(values.get(hi))
+        for key in (lo, hi):
+            if values.get(key) not in (None, "") and _num(values[key]) is None:
+                return f"{label}条件必须为有限数值"
+        if lower is not None and upper is not None and lower > upper:
+            return f"{label}下限不能大于上限"
+    preset = cond.get("preset") or {}
+    if preset.get("mode", "all") not in ("all", "any"):
+        return "形态标签组合方式必须为全部满足或满足任一"
+    for key in PRESET_DEFAULTS:
+        raw = preset.get(key)
+        if raw in (None, ""):
+            continue
+        value = _num(raw)
+        if value is None:
+            return "形态参数必须为有限数值"
+        if key in ("high_n", "low_n") and (not float(raw).is_integer() or not 5 <= value <= KLINE_BARS):
+            return f"新高/新低天数必须为 5 至 {KLINE_BARS} 的整数"
+        if key in ("vol_mult", "break_mult", "spike_mult", "dod_mult", "amount_min") and value < 0:
+            return "量能倍数和成交额不能为负数"
+        if key == "shrink_ratio" and not 0 <= value <= 1:
+            return "峰值缩量比例必须在 0 至 1 之间"
+    return None
 
 
 def _code6(value: Any) -> str:
@@ -386,7 +427,7 @@ def tech_features(bars: List[Dict[str, Any]], code: str = "") -> Optional[Dict[s
     highs = [float(b.get("high") or b["close"]) for b in rows]
     lows = [float(b.get("low") or b["close"]) for b in rows]
     vols = [float(b.get("volume") or 0.0) for b in rows]
-    amounts = [float(b.get("amount") or 0.0) for b in rows]
+    amounts = [_num(b.get("amount")) for b in rows]
 
     def ma(n: int, end: Optional[int] = None) -> Optional[float]:
         end = len(closes) if end is None else end
@@ -414,11 +455,13 @@ def tech_features(bars: List[Dict[str, Any]], code: str = "") -> Optional[Dict[s
 
     # ---- 量能形态 ----
     vol_ma5 = sum(vols[-5:]) / 5 if len(vols) >= 5 else None
-    vol_ma60 = sum(vols[-60:]) / len(vols[-60:]) if len(vols) >= 20 else None
+    vol_ma60 = sum(vols[-60:]) / 60 if len(vols) >= 60 else None
     vol_energy = round(vol_ma5 / vol_ma60, 2) if vol_ma5 and vol_ma60 else None
     vol_step = round(vols[-1] / vols[-2], 2) if len(vols) >= 2 and vols[-2] > 0 else None
     vol_peak_ratio = round(vols[-1] / max(vols[-20:]), 2) if vols[-1] > 0 and max(vols[-20:]) > 0 else None
-    amount_ma5_yi = round(sum(amounts[-5:]) / 5 / 1e8, 2) if len(amounts) >= 5 else None
+    # 新浪日K缺成交额时归零;不能把这些零展示为真实的5日均额。
+    amount_ma5_yi = (round(sum(amounts[-5:]) / 5 / 1e8, 2)
+                     if all(a is not None and a > 0 for a in amounts[-5:]) else None)
 
     # ---- 涨跌幅序列派生:涨停次数 / 20cm / 翻倍腰斩 ----
     pcts = [(closes[i] / closes[i - 1] - 1) * 100
@@ -434,9 +477,9 @@ def tech_features(bars: List[Dict[str, Any]], code: str = "") -> Optional[Dict[s
     prev_ma20 = ma(20, len(closes) - 1)
     above_ma20 = ma20 is not None and last >= ma20
     prev_above_ma20 = prev_ma20 is not None and prev_close >= prev_ma20
-    first_above = bool(above_ma20 and not prev_above_ma20
-                       and all(c < (ma(20, len(closes) - 5 + i) or c)
-                               for i, c in enumerate(closes[-5:])))
+    first_above = bool(above_ma20 and len(closes) >= 25
+                       and all(closes[-back - 1] < ma(20, len(closes) - back)
+                               for back in range(1, 6)))
     ma_golden_5_10 = None
     if ma5 is not None and ma10 is not None:
         ma_golden_5_10 = False
@@ -486,6 +529,9 @@ def tech_features(bars: List[Dict[str, Any]], code: str = "") -> Optional[Dict[s
     except Exception:
         pass
     return {
+        "_version": _FEATURE_VERSION,
+        "bar_date": str(rows[-1].get("date") or "")[:10],
+        "close_history": closes[-KLINE_BARS:],
         # —— 原有技术条件字段 ——
         "above_ma20": above_ma20,
         "ma_bull": (ma5 is not None and ma10 is not None and ma20 is not None
@@ -599,21 +645,23 @@ def _tech_pass(feat: Optional[Dict[str, Any]], cond: Dict[str, Any]) -> (bool, L
 # ----------------------------- 纯函数:预设形态标签 -----------------------------
 
 def _t_vol_burst(f: Dict[str, Any], p: Dict[str, float]):
-    """连续爆量:5日均量/60日均量 ≥ N 倍 + 近5日大涨 + 5日均额达标。"""
+    """持续放量:5日均量/60日均量达标 + 近5日涨幅;成交额门槛可选。"""
     energy, r5, amt = f.get("vol_energy"), f.get("ret5"), f.get("amount_ma5_yi")
-    if energy is None or r5 is None or amt is None:
+    if energy is None or r5 is None:
         return False, ""
-    if energy < p["vol_mult"] or r5 < p["ret5_min"] or amt < p["amount_min"]:
+    if energy < p["vol_mult"] or r5 < p["ret5_min"]:
         return False, ""
-    return True, f"5日量能{energy}x·5日涨{r5}%·均额{amt}亿"
+    if p["amount_min"] > 0 and (amt is None or amt < p["amount_min"]):
+        return False, ""
+    return True, f"5日量能{energy}x·5日涨{r5}%" + (f"·均额{amt}亿" if amt is not None else "")
 
 
 def _t_break_ma20(f, p):
-    """放量突破MA20:今日站上、昨日还在下方,且当日量比达标。"""
+    """放量突破MA20:今日站上、昨日还在下方,且日K量倍达标。"""
     if not f.get("above_ma20") or f.get("prev_above_ma20"):
         return False, ""
     vr = f.get("vol_ratio")
-    if vr is None or vr < p["vol_mult"]:
+    if vr is None or vr < p["break_mult"]:
         return False, ""
     return True, f"放量突破MA20({vr}x)"
 
@@ -629,15 +677,17 @@ def _t_oversold_rebound(f, p):
 
 
 def _t_new_high_n(f, p):
-    key = "new_high_60" if int(p["high_n"]) >= 60 else "new_high_20"
-    if not f.get(key):
+    n = int(p["high_n"])
+    closes = f.get("close_history") or []
+    if len(closes) < n or closes[-1] < max(closes[-n:]):
         return False, ""
     return True, f"创{int(p['high_n'])}日新高"
 
 
 def _t_new_low_n(f, p):
-    key = "new_low_60" if int(p["low_n"]) >= 60 else "new_low_20"
-    if not f.get(key):
+    n = int(p["low_n"])
+    closes = f.get("close_history") or []
+    if len(closes) < n or closes[-1] > min(closes[-n:]):
         return False, ""
     return True, f"创{int(p['low_n'])}日新低"
 
@@ -647,7 +697,7 @@ def _t_vol_spike(f, p):
     vr = f.get("vol_ratio")
     if vr is None or vr < p["spike_mult"]:
         return False, ""
-    return True, f"单日量比{vr}x"
+    return True, f"日K量倍{vr}x"
 
 
 def _t_yang_through(f, p):
@@ -765,7 +815,7 @@ _PRESET_TESTS = {
 
 
 def preset_pass(feat: Optional[Dict[str, Any]], cond: Dict[str, Any]):
-    """预设形态标签(多标签 AND)评估 → (是否命中, 命中说明列表)。"""
+    """预设形态标签评估;mode=any 取并集,省略 mode 保留旧 API 的交集语义。"""
     if feat is None:
         return False, []
     labels = [k for k in (cond.get("labels") or []) if k in PRESET_KEYS]
@@ -776,14 +826,20 @@ def preset_pass(feat: Optional[Dict[str, Any]], cond: Dict[str, Any]):
         value = _num(cond.get(key))
         if value is not None:
             params[key] = value
+    # 兼容旧客户端用 vol_mult 调整「放量突破」;新页面使用独立的 break_mult。
+    if "mode" not in cond and "break_mult" not in cond and _num(cond.get("vol_mult")) is not None:
+        params["break_mult"] = _num(cond["vol_mult"])
     hits: List[str] = []
+    any_mode = cond.get("mode") == "any"
+    matched = False
     for key in labels:
         ok, hit = _PRESET_TESTS[key](feat, params)
-        if not ok:
+        if not ok and not any_mode:
             return False, []
-        if hit:
+        matched = matched or ok
+        if ok and hit:
             hits.append(hit)
-    return True, hits
+    return matched, hits
 
 
 # ----------------------------- 主入口 -----------------------------
@@ -804,12 +860,20 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
     首次冷启动受 ``SCREEN_BUDGET_SECONDS`` 预算保护,超时先返回已评估部分。
     """
     cond = conditions or {}
+    error = _conditions_error(cond)
+    if error:
+        return {"ok": False, "error": error, "stocks": [], "notes": [], "total_matched": 0}
     notes: List[str] = []
     applied: List[str] = []
+    funnel: List[Dict[str, Any]] = []
     dates: Dict[str, str] = {}
     timings: Dict[str, Any] = {}
     started = time.monotonic()
     partial = False
+
+    def record_step(dimension: str, before: int, missing: int = 0) -> None:
+        funnel.append({"dimension": dimension, "before": before,
+                       "after": len(survivors), "missing": missing})
 
     # ---------- 基座:全市场行情 ----------
     market_rows = (market_rows_fn or (lambda: []))() or []
@@ -828,9 +892,9 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
         base[code] = {
             "code": code,
             "name": str(r.get("name") or ""),
-            "price": _num(r.get("price") or r.get("close")),
-            "change_pct": _num(r.get("change_pct") or r.get("pct_change")),
-            "turnover": _num(r.get("turnover_rate") or r.get("turnover")),
+            "price": _num(r.get("price") if r.get("price") is not None else r.get("close")),
+            "change_pct": _num(r.get("change_pct") if r.get("change_pct") is not None else r.get("pct_change")),
+            "turnover": _num(r.get("turnover_rate") if r.get("turnover_rate") is not None else r.get("turnover")),
             "industry": str(r.get("industry") or ""),
         }
     if not base and flow_map:  # 云图不可用:退化用资金流最新日做基座
@@ -857,11 +921,16 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
 
     mkt = cond.get("market") or {}
     if _active(mkt):
+        before = len(survivors)
         applied.append("market")
         boards = [b for b in (mkt.get("boards") or []) if b in BOARD_PREFIX]
         pct_min, pct_max = _num(mkt.get("pct_min")), _num(mkt.get("pct_max"))
         price_min, price_max = _num(mkt.get("price_min")), _num(mkt.get("price_max"))
         turnover_min = _num(mkt.get("turnover_min"))
+        missing = sum(1 for code in survivors if
+                      ((pct_min is not None or pct_max is not None) and base[code]["change_pct"] is None)
+                      or ((price_min is not None or price_max is not None) and base[code]["price"] is None)
+                      or (turnover_min is not None and base[code]["turnover"] is None))
         kept = []
         for code in survivors:
             row = base[code]
@@ -886,13 +955,18 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                 continue
             kept.append(code)
         survivors = kept
+        record_step("market", before, missing)
 
     flow_cond = cond.get("flow") or {}
     if _active(flow_cond):
+        before = len(survivors)
         applied.append("flow")
         main_min = _num(flow_cond.get("main_net_min"))
         rate_min = _num(flow_cond.get("net_rate_min"))
         streak_min = int(_num(flow_cond.get("streak_days")) or 0)
+        missing = sum(1 for code in survivors if not flow_map.get(code)
+                      or (main_min is not None and flow_map[code]["main_net_wan"] is None)
+                      or (rate_min is not None and flow_map[code]["net_rate"] is None))
         kept = []
         for code in survivors:
             f = flow_map.get(code)
@@ -907,19 +981,23 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                 continue
             kept.append(code)
         survivors = kept
+        record_step("flow", before, missing)
 
     radar_cond = cond.get("radar") or {}
     if _active(radar_cond):
+        before = len(survivors)
         applied.append("radar")
         act_min = _num(radar_cond.get("activity_min"))
         chg_min = int(_num(radar_cond.get("changes_min")) or 0)
         direction = str(radar_cond.get("direction") or "")
+        missing = sum(1 for code in survivors if not radar_map.get(code)
+                      or (act_min is not None and radar_map[code]["activity"] is None))
         kept = []
         for code in survivors:
             q = radar_map.get(code)
             if not q:
                 continue
-            if act_min is not None and (q["activity"] or 0) < act_min:
+            if act_min is not None and (q["activity"] is None or q["activity"] < act_min):
                 continue
             if chg_min and q["changes_total"] < chg_min:
                 continue
@@ -930,10 +1008,12 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                 continue
             kept.append(code)
         survivors = kept
+        record_step("radar", before, missing)
 
     accum_cond = cond.get("accum") or {}
     accum_map: Dict[str, Dict[str, Any]] = {}
     if _active(accum_cond):
+        before = len(survivors)
         applied.append("accum")
         window = int(_num(accum_cond.get("window")) or 40)
         payload = (accum_fn or _default_accum)(window)
@@ -943,6 +1023,8 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
         if not accum_map:
             notes.append("吸筹榜数据为空,吸筹维度全部不命中(本地资金流历史不足)")
         score_min = _num(accum_cond.get("score_min"))
+        missing = sum(1 for code in survivors if not accum_map.get(code)
+                      or (score_min is not None and accum_map[code]["score"] is None))
         kept = []
         for code in survivors:
             a = accum_map.get(code)
@@ -954,11 +1036,13 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                 continue
             kept.append(code)
         survivors = kept
+        record_step("accum", before, missing)
 
     dragon_cond = cond.get("dragon") or {}
     dragon_map: Dict[str, Dict[str, Any]] = {}
     seats_map: Dict[str, bool] = {}
     if _active(dragon_cond):
+        before = len(survivors)
         applied.append("dragon")
         days = int(_num(dragon_cond.get("days")) or 5)
         dragon_map = build_dragon_map((dragon_fn or _default_dragon)(days))
@@ -967,6 +1051,8 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
         if not dragon_map:
             notes.append("龙虎榜数据为空,龙虎榜维度全部不命中(可先在资金榜单页回补)")
         net_min = _num(dragon_cond.get("net_min_wan"))
+        missing = sum(1 for code in survivors if not dragon_map.get(code)
+                      or (net_min is not None and dragon_map[code]["net_wan"] is None))
         kept = []
         for code in survivors:
             d = dragon_map.get(code)
@@ -978,10 +1064,12 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                 continue
             kept.append(code)
         survivors = kept
+        record_step("dragon", before, missing)
 
     opp_cond = cond.get("opportunity") or {}
     opp: Dict[str, Any] = {}
     if _active(opp_cond):
+        before = len(survivors)
         applied.append("opportunity")
         opp = (opportunity_fn or _default_opportunity)() or {}
         by_code = opp.get("by_code") or {}
@@ -990,6 +1078,8 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
         if not by_code:
             notes.append("本地无机会挖掘结果,机会分维度全部不命中(先在工作台跑一次挖掘)")
         score_min = _num(opp_cond.get("score_min"))
+        missing = sum(1 for code in survivors if not by_code.get(code)
+                      or (score_min is not None and by_code[code].get("score") is None))
         kept = []
         for code in survivors:
             o = by_code.get(code)
@@ -999,6 +1089,7 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                 continue
             kept.append(code)
         survivors = kept
+        record_step("opportunity", before, missing)
 
     # ---------- 技术条件 + 预设形态 + 量化模型信号(共用日K,候选封顶) ----------
     tech_cond = cond.get("tech") or {}
@@ -1016,12 +1107,18 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
     if cond.get("refresh_features"):
         _FEATURE_MEMORY.clear()
     if feat_needed or quant_active:
+        before = len(survivors)
+        timings["kline_candidates"] = before
         applied.extend([d for d, a in (("tech", tech_active), ("preset", preset_active),
                                        ("quant", quant_active)) if a])
         if kline_fetcher is None:
-            notes.append("未接入日K服务,技术/形态/量化模型条件被跳过")
+            notes.append("未接入日K服务,无法验证技术/形态/量化模型条件,按不命中处理")
+            survivors = []
+            timings["kline_evaluated"] = 0
+            record_step("kline", before, before)
         else:
             if len(survivors) > TECH_CAP:
+                partial = True
                 survivors.sort(key=lambda c: -(flow_map.get(c, {}).get("main_net_wan") or -1e18))
                 notes.append(f"技术/形态/量化模型条件仅评估按主力净流入排序的前 {TECH_CAP} 只候选"
                              f"(原候选 {len(survivors)} 只),请先用其他条件收窄")
@@ -1053,25 +1150,42 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
             pool = ThreadPoolExecutor(max_workers=KLINE_WORKERS)
             futures = [pool.submit(_one, code) for code in survivors]
             results: List[tuple] = []
-            partial = False
+            timed_out = False
             try:
                 for future in as_completed(futures, timeout=max(0.1, deadline - time.monotonic())):
                     results.append(future.result())
                     if time.monotonic() >= deadline:
                         partial = True
+                        timed_out = True
                         break
             except FuturesTimeout:
                 partial = True
+                timed_out = True
             finally:
                 # 不等未完成的网络请求:它们的结果已用不上,继续跑只会占住 worker。
                 pool.shutdown(wait=False, cancel_futures=True)
             cache_hits = sum(1 for r in results if r[3])
             if persist:
                 _persist_features(persist)
-            if partial:
+            if timed_out:
                 notes.append(f"已达 {int(budget)} 秒预算,先返回已评估的 {len(results)} 只"
                              f"(其余 {len(survivors) - len(results)} 只本次跳过);"
                              "再次选股会命中断点前的本地缓存,明显更快")
+
+            missing = sum(1 for _, feat, qs, _ in results
+                          if (feat_needed and feat is None) or (quant_active and qs is None))
+            if missing:
+                notes.append(f"{missing} 只候选缺少可用日K或模型数据,按不命中处理")
+            if "vol_burst" in preset_labels and (_num(preset_cond.get("amount_min")) or 0) > 0:
+                amount_missing = sum(1 for _, feat, _, _ in results
+                                     if feat is not None and feat.get("amount_ma5_yi") is None)
+                if amount_missing:
+                    notes.append(f"{amount_missing} 只候选缺少5日成交额,无法验证均额门槛;"
+                                 "可将5日均额留空设为不限")
+            now = _dt.datetime.now()
+            if now.weekday() < 5 and now.hour < 15 and any(
+                    feat and feat.get("bar_date") == now.date().isoformat() for _, feat, _, _ in results):
+                notes.append("最新日K尚未收盘,日K量倍按盘中累计量计算,不等同于行情软件的盘中量比")
 
             kept = []
             for code, feat, qs, _hit in results:
@@ -1101,6 +1215,7 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
                 tech_map[code] = {"hits": hits, **(feat or {})}
                 kept.append(code)
             survivors = kept
+            record_step("kline", before, missing)
             timings["kline_ms"] = int((time.monotonic() - kline_started) * 1000)
             timings["kline_cache_hits"] = cache_hits
             timings["kline_evaluated"] = len(results)
@@ -1156,7 +1271,8 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
             if f.get("streak"):
                 hits.append(f"连续净流入{f['streak']}日")
         if "radar" in applied and q:
-            hits.append(f"量化活跃{q['activity']:.0f}" + (f"·{q['direction']}" if q.get("direction") else ""))
+            hits.append((f"量化活跃{q['activity']:.0f}" if q["activity"] is not None else "盘口异动")
+                        + (f"·{q['direction']}" if q.get("direction") else ""))
         if "accum" in applied and a:
             hits.append(f"吸筹{a['accum_days']}天" + (f"·评分{a['score']:.0f}" if a.get("score") is not None else ""))
         if "dragon" in applied and d:
@@ -1214,6 +1330,7 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
         "stocks": stocks,
         "dates": dates,
         "notes": notes,
+        "funnel": funnel,
         "partial": partial,
         "timings": {**timings, "total_ms": int((time.monotonic() - started) * 1000)},
         "disclaimer": "选股结果为公开数据规则筛选,不构成投资建议;涨跌幅/资金口径以各源最新可得交易日为准。",
@@ -1278,7 +1395,7 @@ def watchlist_alerts(items: List[Dict[str, Any]],
 
 def meta() -> Dict[str, Any]:
     """各维度数据新鲜度(日期+覆盖行数),供选股页顶部展示与条件可用性提示。"""
-    out: Dict[str, Any] = {"ok": True, "dims": {}}
+    out: Dict[str, Any] = {"ok": True, "dims": {}, "presets": {"defaults": dict(PRESET_DEFAULTS)}}
     try:
         from data_store import moneyflow_repo
 

@@ -7250,7 +7250,7 @@ body[data-page="market_cloud"] .mc-empty {
 }
 .scr-preset-params {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 8px 12px;
   margin-top: 10px;
 }
@@ -7288,7 +7288,7 @@ body[data-page="market_cloud"] .mc-empty {
 .scr-result-table .scr-col-code small { color: var(--muted); margin-left: 4px; font-size: 10px; }
 .scr-result-table .scr-col-name { text-align: left; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 720px) {
-  .scr-preset-params { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .scr-preset-params { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
   .scr-result-wrap { max-height: 60vh; }
 }
 .scr-inline-check {

@@ -1,7 +1,7 @@
 /* 条件选股页增强(2026-10-23)
  *
  * 1) 高级条件折叠:默认收起,状态记 localStorage;形态标签(chips)常驻页面顶部。
- * 2) 形态标签:18 个预设(连续爆量/放量突破MA20/超跌反弹/…)多选取交集,参数留空走服务端默认。
+ * 2) 形态标签:18 个预设,默认多选取并集,可切换交集;只显示关联参数,留空走服务端默认。
  * 3) 结果列表:扩展列(MA20偏离/5·20·60日涨幅/量能倍数/单日量倍/量能环比/峰倍比/换手/5日均额/
  *    20日涨停/距线/触线)+ 本地排序 + 代码名称搜索 + 分页 + 导出 CSV + 双击进个股分析。
  *
@@ -18,6 +18,8 @@
   var ADV_KEY = 'lumo.screener.advOpen';
   var state = { payload: null, page: 1, pageSize: 50, sortKey: '', sortDir: -1, query: '', limit: 2000 };
   var PRESET_TEXT = {};
+  var DIM_TEXT = { market: '行情', flow: '主力资金', radar: '盘口异动', accum: '吸筹',
+    dragon: '龙虎榜', opportunity: '机会评分', tech: '技术形态', quant: '量化模型', kline: '日K条件' };
 
   // ---------- 接管旧事件(避免双绑定) ----------
   ['scrRunBtn', 'scrResetBtn', 'scrResultTable'].forEach(function (id) {
@@ -35,14 +37,14 @@
     var el = $(id);
     if (!el) return null;
     var raw = el.value;
-    if (raw === '' || raw === null) return null;
+    if (raw === null || String(raw).trim() === '') return null;
     var n = Number(raw);
-    return isNaN(n) ? null : n;
+    return Number.isFinite(n) ? n : null;
   }
   function checked(id) { var el = $(id); return !!(el && el.checked); }
   function selVal(id) { var el = $(id); return el ? el.value : ''; }
   function putNum(obj, key, id) { var v = nv(id); if (v !== null) obj[key] = v; }
-  function isNum(v) { return typeof v === 'number' && !isNaN(v); }
+  function isNum(v) { return typeof v === 'number' && Number.isFinite(v); }
   function toast(msg) { if (typeof window.showToast === 'function') window.showToast(msg); }
 
   function fmtNum(v, d) {
@@ -83,8 +85,10 @@
     var chips = document.querySelectorAll('.scr-chip');
     Array.prototype.forEach.call(chips, function (chip) {
       PRESET_TEXT[chip.dataset.preset] = chip.textContent.trim();
+      chip.setAttribute('aria-pressed', chip.classList.contains('active') ? 'true' : 'false');
       chip.addEventListener('click', function () {
         chip.classList.toggle('active');
+        chip.setAttribute('aria-pressed', chip.classList.contains('active') ? 'true' : 'false');
         updateAppliedHint();
       });
     });
@@ -92,6 +96,7 @@
     if (clear) clear.addEventListener('click', function () {
       Array.prototype.forEach.call(document.querySelectorAll('.scr-chip.active'), function (c) {
         c.classList.remove('active');
+        c.setAttribute('aria-pressed', 'false');
       });
       updateAppliedHint();
     });
@@ -101,10 +106,24 @@
       .map(function (c) { return c.dataset.preset; });
   }
   function updateAppliedHint() {
+    var keys = activeLabels();
+    Array.prototype.forEach.call(document.querySelectorAll('[data-scr-presets]'), function (label) {
+      var owners = label.dataset.scrPresets.split(' ');
+      label.hidden = !keys.some(function (key) { return owners.indexOf(key) >= 0; });
+      var input = label.querySelector('input');
+      if (input) input.disabled = label.hidden;
+    });
     var box = $('scrApplied');
     if (!box) return;
-    var labels = activeLabels().map(function (k) { return PRESET_TEXT[k] || k; });
-    box.textContent = labels.length ? '形态标签: ' + labels.join(' + ') : '';
+    var labels = keys.map(function (k) { return PRESET_TEXT[k] || k; });
+    var bits = [];
+    if (labels.length) bits.push('形态: ' + labels.join(selVal('scrPresetMode') === 'all' ? ' + ' : ' / ') +
+      (selVal('scrPresetMode') === 'all' ? '（全部满足）' : '（满足任一）'));
+    var cond = buildPayload();
+    Object.keys(DIM_TEXT).forEach(function (dim) {
+      if (cond[dim]) bits.push(DIM_TEXT[dim] + ' ' + Object.keys(cond[dim]).length + ' 项');
+    });
+    box.textContent = bits.length ? bits.join(' · ') : '未启用筛选条件';
   }
 
   // ---------- 条件组装 ----------
@@ -174,15 +193,19 @@
 
     var labels = activeLabels();
     if (labels.length) {
-      var preset = { labels: labels };
-      putNum(preset, 'vol_mult', 'scrVolMult');
-      putNum(preset, 'ret5_min', 'scrRet5Min');
-      putNum(preset, 'amount_min', 'scrAmountMin');
-      putNum(preset, 'spike_mult', 'scrSpikeMult');
-      putNum(preset, 'dod_mult', 'scrDodMult');
-      putNum(preset, 'shrink_ratio', 'scrShrinkRatio');
-      var hn = nv('scrHighN');
-      if (hn !== null) { preset.high_n = hn; preset.low_n = hn; }
+      var preset = { labels: labels, mode: selVal('scrPresetMode') || 'any' };
+      Array.prototype.forEach.call(document.querySelectorAll('[data-scr-param]'), function (input) {
+        if (input.disabled) return;
+        var value = nv(input.id);
+        if (value === null) return;
+        var key = input.dataset.scrParam;
+        if (key === 'high_n') {
+          if (labels.indexOf('new_high_n') >= 0) preset.high_n = value;
+          if (labels.indexOf('new_low_n') >= 0) preset.low_n = value;
+        } else {
+          preset[key] = value;
+        }
+      });
       cond.preset = preset;
     }
 
@@ -203,8 +226,8 @@
     { key: 'ret5', label: '5日%', fmt: fmtPct, num: true, sort: true },
     { key: 'ret20', label: '20日%', fmt: fmtPct, num: true, sort: true },
     { key: 'ret60', label: '60日%', fmt: fmtPct, num: true, sort: true },
-    { key: 'vol_energy', label: '量能倍数', fmt: fmtX, num: true, sort: true },
-    { key: 'vol_ratio', label: '单日量倍', fmt: fmtX, num: true, sort: true },
+    { key: 'vol_energy', label: '5/60日量倍', fmt: fmtX, num: true, sort: true },
+    { key: 'vol_ratio', label: '日K量倍', fmt: fmtX, num: true, sort: true },
     { key: 'vol_step', label: '量能环比', fmt: fmtX, num: true, sort: true },
     { key: 'vol_peak_ratio', label: '峰倍比', fmt: fmtX, num: true },
     { key: 'turnover', label: '换手%', fmt: function (v) { return fmtNum(v, 1); }, num: true, sort: true },
@@ -316,7 +339,8 @@
       var t = payload.timings || {};
       if (t.total_ms) bits.push((t.total_ms / 1000).toFixed(1) + 's');
       if (t.kline_cache_hits) bits.push('日K缓存命中 ' + t.kline_cache_hits);
-      if (payload.partial) bits.push('部分结果(超时间预算)');
+      if (t.kline_evaluated !== undefined) bits.push('日K已评估 ' + t.kline_evaluated + ' 只');
+      if (payload.partial) bits.push('部分候选已评估');
       bits.push(String(payload.updated_at || '').replace('T', ' '));
       meta.textContent = bits.join(' · ');
     }
@@ -324,10 +348,26 @@
       notes.innerHTML = (payload.notes || []).map(function (n) {
         return '<p class="muted screener-note">· ' + esc(n) + '</p>';
       }).join('');
+      var steps = (payload.funnel || []).filter(function (step) { return step.before > 0; });
+      if (steps.length) notes.innerHTML += '<p class="muted screener-note">筛选过程: ' + steps.map(function (step) {
+        return esc(DIM_TEXT[step.dimension] || step.dimension) + ' ' + step.before + ' → ' + step.after + ' 只' +
+          (step.missing ? '（' + step.missing + ' 只缺数据）' : '');
+      }).join(' · ') + '</p>';
     }
 
     if (!rows.length) {
-      wrap.innerHTML = '<p class="muted">' + (state.query ? '没有匹配「' + esc(state.query) + '」的股票。' : '无命中股票,试着放宽条件或去掉部分形态标签。') + '</p>';
+      var empty = '无命中股票，可调整条件或切换形态标签的多选方式。';
+      var exhausted = (payload.funnel || []).find(function (step) { return step.before > 0 && step.after === 0; });
+      if (state.query) {
+        empty = '没有匹配「' + esc(state.query) + '」的股票。';
+      } else if (payload.partial) {
+        empty = '已评估的部分候选中无命中，其余候选尚未评估。请先收窄行情或资金条件，再进行日K筛选。';
+      } else if (exhausted && exhausted.missing === exhausted.before) {
+        empty = esc(DIM_TEXT[exhausted.dimension] || exhausted.dimension) + '数据不足，无法验证该组条件。可补齐数据后重试。';
+      } else if (exhausted) {
+        empty = esc(DIM_TEXT[exhausted.dimension] || exhausted.dimension) + '条件将 ' + exhausted.before + ' 只候选筛为 0 只，可调整该组条件。';
+      }
+      wrap.innerHTML = '<p class="muted">' + empty + '</p>';
       return;
     }
 
@@ -350,9 +390,34 @@
   }
 
   // ---------- 运行 ----------
+  function validateInputs() {
+    var inputs = Array.prototype.slice.call(document.querySelectorAll('.screener-layout input[type="number"]'));
+    inputs.forEach(function (el) { el.setCustomValidity(''); });
+    [['scrPctMin', 'scrPctMax', '涨跌幅'], ['scrPriceMin', 'scrPriceMax', '现价'],
+      ['scrTechRsiMin', 'scrTechRsiMax', 'RSI']].forEach(function (pair) {
+      var lo = nv(pair[0]);
+      var hi = nv(pair[1]);
+      if (lo !== null && hi !== null && lo > hi) $(pair[0]).setCustomValidity(pair[2] + '下限不能大于上限');
+    });
+    for (var i = 0; i < inputs.length; i += 1) {
+      var el = inputs[i];
+      if (!el.disabled && !el.checkValidity()) {
+        if (el.closest('#scrAdv')) setAdv(true);
+        el.reportValidity();
+        renderError(el.validationMessage || '请检查条件参数');
+        return false;
+      }
+    }
+    return true;
+  }
+
   async function run() {
+    if (!validateInputs()) return;
     var btn = $('scrRunBtn');
     if (btn) { btn.disabled = true; btn.textContent = '选股中…'; }
+    state.payload = null;
+    if ($('scrNotes')) $('scrNotes').textContent = '';
+    if ($('scrResultMeta')) $('scrResultMeta').textContent = '选股中…';
     renderLoading();
     try {
       var payload = await window.fetchJson('/api/screener/run', {
@@ -402,26 +467,24 @@
   var RESET_CHECKS = ['scrExcludeLimitUp', 'scrDragonQuantSeat', 'scrTechMa20', 'scrTechMaBull',
     'scrTechNewHigh', 'scrTechMacdGolden', 'scrTechKdjGolden', 'scrRefresh'];
   var RESET_SELECTS = ['scrDirection', 'scrAccumEnable', 'scrDragonDays'];
-  var PRESET_DEFAULTS = {
-    scrVolMult: '2', scrRet5Min: '15', scrAmountMin: '2', scrHighN: '20',
-    scrSpikeMult: '2', scrDodMult: '1.5', scrShrinkRatio: '0.4'
-  };
-
   function resetAll() {
     RESET_INPUTS.forEach(function (id) { var el = $(id); if (el) el.value = ''; });
     RESET_CHECKS.forEach(function (id) { var el = $(id); if (el) el.checked = false; });
     Array.prototype.forEach.call(document.querySelectorAll('.scr-board'), function (el) { el.checked = false; });
     RESET_SELECTS.forEach(function (id) { var el = $(id); if (el) el.value = ''; });
-    Object.keys(PRESET_DEFAULTS).forEach(function (id) {
-      var el = $(id);
-      if (el) el.value = PRESET_DEFAULTS[id];
+    Array.prototype.forEach.call(document.querySelectorAll('[data-scr-param]'), function (el) {
+      el.value = '';
+      el.setCustomValidity('');
     });
+    if ($('scrPresetMode')) $('scrPresetMode').value = 'any';
+    if ($('scrAccumWindow')) $('scrAccumWindow').value = '40';
     var st = $('scrExcludeST');
     if (st) st.checked = true;
     var sort = $('scrSort');
     if (sort) sort.value = 'main_net_wan';
     Array.prototype.forEach.call(document.querySelectorAll('.scr-chip.active'), function (c) {
       c.classList.remove('active');
+      c.setAttribute('aria-pressed', 'false');
     });
     state.query = '';
     state.sortKey = '';
@@ -433,7 +496,7 @@
     var rows = rowsForView();
     if (!rows.length) { toast('没有可导出的数据'); return; }
     var header = ['代码', '名称', '现价', '今日%', 'MA20偏离%', '5日%', '20日%', '60日%',
-      '量能倍数', '单日量倍', '量能环比', '峰倍比', '换手%', '5日均额(亿)', '20日涨停',
+      '5/60日量倍', '日K量倍', '量能环比', '峰倍比', '换手%', '5日均额(亿)', '20日涨停',
       '距线%', '触线%', '主力净流入(万)', '命中条件'];
     var lines = [header.join(',')];
     rows.forEach(function (r) {
@@ -464,6 +527,10 @@
 
   // ---------- 事件 ----------
   function bind() {
+    Array.prototype.forEach.call(document.querySelectorAll('#scrAdv input, #scrAdv select, [data-scr-param], #scrPresetMode'), function (el) {
+      el.addEventListener('input', updateAppliedHint);
+      el.addEventListener('change', updateAppliedHint);
+    });
     var runBtn = $('scrRunBtn');
     if (runBtn) runBtn.addEventListener('click', run);
     var resetBtn = $('scrResetBtn');
@@ -554,6 +621,12 @@
     try {
       var data = await window.fetchJson('/api/screener/meta');
       var dims = (data && data.dims) || {};
+      var defaults = (data && data.presets && data.presets.defaults) || {};
+      Array.prototype.forEach.call(document.querySelectorAll('[data-scr-param]'), function (input) {
+        var key = input.dataset.scrParam;
+        if (defaults[key] !== undefined) input.placeholder = key === 'amount_min' && defaults[key] === 0
+          ? '不限' : '默认 ' + defaults[key];
+      });
       var bits = [];
       if (dims.flow) bits.push('资金流 ' + (dims.flow.date || '无') + '(' + (dims.flow.rows || 0) + '只)');
       if (dims.radar) bits.push('量化雷达 ' + (dims.radar.date || '无') + '(' + (dims.radar.rows || 0) + ')');

@@ -11,6 +11,7 @@
     {% if active_page == 'market_health' %}
     <link rel="stylesheet" href="/static/lumo_market_health.css?v={{ asset_v('lumo_market_health.css') }}" />
     <link rel="stylesheet" href="/static/lumo_market_capital.css?v={{ asset_v('lumo_market_capital.css') }}" />
+    <link rel="stylesheet" href="/static/lumo_market_macro.css?v={{ asset_v('lumo_market_macro.css') }}" />
     {% endif %}
     {% if active_page == 'growth_research' %}
     <link rel="stylesheet" href="/static/lumo_growth_research.css?v={{ asset_v('lumo_growth_research.css') }}" />
@@ -379,15 +380,21 @@
             <div class="panel-body">
               <div class="scr-preset-block">
                 <div class="scr-preset-head">
-                  <span class="scr-preset-title">形态标签 <em>多选取交集,参数留空用默认</em></span>
+                  <span class="scr-preset-title">形态标签 <em>仅启用选中的标签</em></span>
+                  <label>多选方式
+                    <select id="scrPresetMode" class="canvas-date-select">
+                      <option value="any">满足任一（并集）</option>
+                      <option value="all">全部满足（交集）</option>
+                    </select>
+                  </label>
                   <button class="button secondary compact" type="button" id="scrPresetClear">清空标签</button>
                 </div>
                 <div class="scr-preset-chips" id="scrPresetChips">
-                  <button class="scr-chip" type="button" data-preset="vol_burst">连续爆量</button>
+                  <button class="scr-chip" type="button" data-preset="vol_burst" title="5日均量相对60日均量放大，且5日涨幅达标；成交额门槛可选">持续放量</button>
                   <button class="scr-chip" type="button" data-preset="break_ma20">放量突破MA20</button>
                   <button class="scr-chip" type="button" data-preset="oversold_rebound">超跌反弹</button>
-                  <button class="scr-chip" type="button" data-preset="new_high_n">创N日新高</button>
-                  <button class="scr-chip" type="button" data-preset="new_low_n">创N日新低</button>
+                  <button class="scr-chip" type="button" data-preset="new_high_n" title="最新日K收盘价达到所选N日的最高收盘价">创N日新高</button>
+                  <button class="scr-chip" type="button" data-preset="new_low_n" title="最新日K收盘价达到所选N日的最低收盘价">创N日新低</button>
                   <button class="scr-chip" type="button" data-preset="vol_spike">单日放量</button>
                   <button class="scr-chip" type="button" data-preset="yang_through">一阳穿N线</button>
                   <button class="scr-chip" type="button" data-preset="ma_bull_align">N线多头排列</button>
@@ -400,18 +407,20 @@
                   <button class="scr-chip" type="button" data-preset="halve_double">翻倍又腰斩</button>
                   <button class="scr-chip" type="button" data-preset="recent_20cm">近期20cm</button>
                   <button class="scr-chip" type="button" data-preset="ma_trend_combo">均线方向组合</button>
-                  <button class="scr-chip" type="button" data-preset="first_above_ma20">首次站上MA20</button>
+                  <button class="scr-chip" type="button" data-preset="first_above_ma20" title="此前5个交易日收盘均低于各日MA20，最新日K收盘站上MA20">首次站上MA20</button>
                 </div>
                 <div class="scr-preset-params">
-                  <label>量能倍数 ≥<input id="scrVolMult" type="number" step="0.1" min="0" value="2" /></label>
-                  <label>5日涨幅 ≥ %<input id="scrRet5Min" type="number" step="1" value="15" /></label>
-                  <label>5日均额 ≥ 亿<input id="scrAmountMin" type="number" step="0.5" min="0" value="2" /></label>
-                  <label>新高/新低 N<input id="scrHighN" type="number" step="10" min="5" value="20" /></label>
-                  <label>单日放量 ≥ 倍<input id="scrSpikeMult" type="number" step="0.1" min="0" value="2" /></label>
-                  <label>日环比 ≥ 倍<input id="scrDodMult" type="number" step="0.1" min="0" value="1.5" /></label>
-                  <label>峰值缩量 ≤ 比例<input id="scrShrinkRatio" type="number" step="0.05" min="0" max="1" value="0.4" /></label>
+                  <label data-scr-presets="vol_burst" hidden title="最近5日均量 / 最近60日均量">5/60日均量 ≥ 倍<input id="scrVolMult" data-scr-param="vol_mult" type="number" step="0.1" min="0" placeholder="默认 1.5" /></label>
+                  <label data-scr-presets="vol_burst" hidden>5日涨幅 ≥ %<input id="scrRet5Min" data-scr-param="ret5_min" type="number" step="0.1" placeholder="默认 5" /></label>
+                  <label data-scr-presets="vol_burst" hidden title="留空不限制成交额；填写门槛后，缺少成交额数据的股票不命中">5日均额 ≥ 亿<input id="scrAmountMin" data-scr-param="amount_min" type="number" step="0.1" min="0" placeholder="不限" /></label>
+                  <label data-scr-presets="break_ma20" hidden title="最新日K成交量 / 此前5个交易日均量">突破日K量倍 ≥<input id="scrBreakMult" data-scr-param="break_mult" type="number" step="0.1" min="0" placeholder="默认 1.3" /></label>
+                  <label data-scr-presets="new_high_n new_low_n" hidden>新高/新低 N<input id="scrHighN" data-scr-param="high_n" type="number" step="1" min="5" max="120" placeholder="默认 20" /></label>
+                  <label data-scr-presets="vol_spike" hidden title="最新日K成交量 / 此前5个交易日均量">单日K量倍 ≥<input id="scrSpikeMult" data-scr-param="spike_mult" type="number" step="0.1" min="0" placeholder="默认 1.5" /></label>
+                  <label data-scr-presets="vol_dod" hidden title="最新日K成交量 / 上一交易日成交量">日环比 ≥ 倍<input id="scrDodMult" data-scr-param="dod_mult" type="number" step="0.1" min="0" placeholder="默认 1.2" /></label>
+                  <label data-scr-presets="vol_shrink" hidden>峰值缩量 ≤ 比例<input id="scrShrinkRatio" data-scr-param="shrink_ratio" type="number" step="0.05" min="0" max="1" placeholder="默认 0.5" /></label>
                 </div>
-                <p class="panel-meta control-help">形态标签基于个股日K(逐股拉取,候选超过 300 只时按主力净流入截取),与下方高级条件取交集。</p>
+                <p class="panel-meta control-help">标签参数留空使用所示默认值；高级条件留空不启用，默认仅排除ST。形态标签与高级条件同时满足。</p>
+                <p class="panel-meta control-help">日K量倍使用最新日K累计成交量，盘中数值会随交易推进变化，与行情软件的盘中量比口径不同。日K条件每次最多评估主力净流入靠前的300只候选，结果会显示评估范围。</p>
               </div>
 
               <div class="screener-adv" id="scrAdv" hidden>
@@ -513,7 +522,7 @@
                   <div class="capital-filter-grid">
                     <label>RSI ≥<input id="scrTechRsiMin" type="number" min="0" max="100" placeholder="如 40" /></label>
                     <label>RSI ≤<input id="scrTechRsiMax" type="number" min="0" max="100" placeholder="如 65" /></label>
-                    <label>当日量 / 5日均量 ≥<input id="scrTechVolRatio" type="number" step="0.1" placeholder="如 1.5" /></label>
+                    <label title="最新日K累计成交量 / 此前5个交易日均量；盘中尚未收盘">日K量 / 前5日均量 ≥<input id="scrTechVolRatio" type="number" step="0.1" min="0" placeholder="留空不限" /></label>
                   </div>
                 </fieldset>
                 <fieldset class="screener-group">
@@ -1746,6 +1755,7 @@
         JOB_TYPE_LABELS.growth_research = '成长研究';
         JOB_TYPE_LABELS.market_capital_financing = '融资风险研究';
         JOB_TYPE_LABELS.market_capital_participants = '市场资金研究';
+        JOB_TYPE_LABELS.market_macro = '宏观经济研究';
       }
     </script>
     <script src="/static/lumo_panic.js?v={{ asset_v('lumo_panic.js') }}"></script>
@@ -1753,6 +1763,7 @@
     <script src="/static/lumo_market_health.js?v={{ asset_v('lumo_market_health.js') }}"></script>
     <script src="/static/lumo_sector_depth.js?v={{ asset_v('lumo_sector_depth.js') }}"></script>
     <script src="/static/lumo_market_capital.js?v={{ asset_v('lumo_market_capital.js') }}"></script>
+    <script src="/static/lumo_market_macro.js?v={{ asset_v('lumo_market_macro.js') }}"></script>
     {% endif %}
     <script src="/static/lumo_operations.js?v={{ asset_v('lumo_operations.js') }}"></script>
     <script src="/static/lumo_quant_sector_clicks.js?v={{ asset_v('lumo_quant_sector_clicks.js') }}"></script>

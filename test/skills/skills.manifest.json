@@ -1,0 +1,149 @@
+{
+  "package": "kronos-data-query-skills",
+  "version": "1.0.0",
+  "read_only": true,
+  "compliance": "query-only; no stock recommendation, no investment advice",
+  "generated_at": "2026-10-29T11:14:29",
+  "default_db": "data/lumo_data.sqlite",
+  "shared_runtime": "_shared/",
+  "skills": [
+    {
+      "name": "market-calendar-query",
+      "entry": "market-calendar-query/run.py",
+      "skill_md": "market-calendar-query/SKILL.md",
+      "functions": [
+        {
+          "name": "is_trading_day",
+          "call": "python3 market-calendar-query/run.py query --function is_trading_day"
+        },
+        {
+          "name": "list_open_days",
+          "call": "python3 market-calendar-query/run.py query --function list_open_days"
+        },
+        {
+          "name": "nearest_trading_day",
+          "call": "python3 market-calendar-query/run.py query --function nearest_trading_day"
+        },
+        {
+          "name": "data_availability",
+          "call": "python3 market-calendar-query/run.py query --function data_availability"
+        }
+      ]
+    },
+    {
+      "name": "market-overview-query",
+      "entry": "market-overview-query/run.py",
+      "skill_md": "market-overview-query/SKILL.md",
+      "functions": [
+        {
+          "name": "index_daily",
+          "call": "python3 market-overview-query/run.py query --function index_daily"
+        },
+        {
+          "name": "market_breadth",
+          "call": "python3 market-overview-query/run.py query --function market_breadth"
+        },
+        {
+          "name": "daily_basic_snapshot",
+          "call": "python3 market-overview-query/run.py query --function daily_basic_snapshot"
+        },
+        {
+          "name": "market_daily_snapshot",
+          "call": "python3 market-overview-query/run.py query --function market_daily_snapshot"
+        }
+      ]
+    },
+    {
+      "name": "stock-research-query",
+      "entry": "stock-research-query/run.py",
+      "skill_md": "stock-research-query/SKILL.md",
+      "functions": [
+        {
+          "name": "daily_kline",
+          "call": "python3 stock-research-query/run.py query --function daily_kline"
+        },
+        {
+          "name": "valuation",
+          "call": "python3 stock-research-query/run.py query --function valuation"
+        },
+        {
+          "name": "financial_statements",
+          "call": "python3 stock-research-query/run.py query --function financial_statements"
+        },
+        {
+          "name": "stock_context",
+          "call": "python3 stock-research-query/run.py query --function stock_context"
+        }
+      ]
+    },
+    {
+      "name": "capital-flow-query",
+      "entry": "capital-flow-query/run.py",
+      "skill_md": "capital-flow-query/SKILL.md",
+      "functions": [
+        {
+          "name": "moneyflow_ranking",
+          "call": "python3 capital-flow-query/run.py query --function moneyflow_ranking"
+        },
+        {
+          "name": "moneyflow_stock",
+          "call": "python3 capital-flow-query/run.py query --function moneyflow_stock"
+        },
+        {
+          "name": "dragon_tiger",
+          "call": "python3 capital-flow-query/run.py query --function dragon_tiger"
+        },
+        {
+          "name": "hsgt_hold",
+          "call": "python3 capital-flow-query/run.py query --function hsgt_hold"
+        }
+      ]
+    },
+    {
+      "name": "holders-survey-query",
+      "entry": "holders-survey-query/run.py",
+      "skill_md": "holders-survey-query/SKILL.md",
+      "functions": [
+        {
+          "name": "top_floatholders",
+          "call": "python3 holders-survey-query/run.py query --function top_floatholders"
+        },
+        {
+          "name": "holder_number",
+          "call": "python3 holders-survey-query/run.py query --function holder_number"
+        },
+        {
+          "name": "institution_survey",
+          "call": "python3 holders-survey-query/run.py query --function institution_survey"
+        },
+        {
+          "name": "fund_holdings",
+          "call": "python3 holders-survey-query/run.py query --function fund_holdings"
+        }
+      ]
+    },
+    {
+      "name": "data-provenance-query",
+      "entry": "data-provenance-query/run.py",
+      "skill_md": "data-provenance-query/SKILL.md",
+      "functions": [
+        {
+          "name": "sync_log",
+          "call": "python3 data-provenance-query/run.py query --function sync_log"
+        },
+        {
+          "name": "cache_status",
+          "call": "python3 data-provenance-query/run.py query --function cache_status"
+        },
+        {
+          "name": "data_freshness",
+          "call": "python3 data-provenance-query/run.py query --function data_freshness"
+        },
+        {
+          "name": "source_diagnostics",
+          "call": "python3 data-provenance-query/run.py query --function source_diagnostics"
+        }
+      ]
+    }
+  ]
+}
