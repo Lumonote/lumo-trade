@@ -4,6 +4,7 @@ import csv
 from pathlib import Path
 import sys
 import urllib.request
+from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import sync_playwright, expect, Error
 
@@ -32,7 +33,7 @@ with sync_playwright() as p:
     # 现有大盘自动行情和自动全量采集使用只读快照，新增API保持真实请求。
     page.route("**/api/market-health?*", lambda route: route.fulfill(json=snapshot))
     page.route("**/api/market-health/refresh", lambda route: route.fulfill(json={"job": {"status": "failed", "error": "浏览器检查不启动全量采集"}}))
-    page.goto(URL + "/desktop/market_health?section=financing", wait_until="networkidle", timeout=60000)
+    page.goto(URL + "/desktop/market_health?section=financing", wait_until="domcontentloaded", timeout=60000)
     if page.locator("#riskDisclaimerModal").is_visible():
         page.locator("#riskDisclaimerAckBtn").click()
     expect(page.locator("#mfCount")).to_contain_text(str(len(finance_snapshot["rows"])), timeout=30000)
@@ -107,12 +108,52 @@ with sync_playwright() as p:
     matrix_header.click();matrix_header.click()
     matrix_max=max((r for r in capital_snapshot["matrix"] if r.get("main") is not None),key=lambda r:r["main"])
     assert page.locator("#mpMatrix tbody tr").first.locator("td").first.inner_text()==matrix_max["name"]
+    # 明细卡片不能继承大盘云图的深色底，标签与数值都要达到可读对比度。
+    page.locator('#mpStocks [data-mp-row]').first.click()
+    expect(page.locator('#mpDetail')).to_be_visible()
+    expect(page.locator('#mpDetail')).to_contain_text('股票 / 基金代码')
+    expect(page.locator('#mpDetail')).to_contain_text('窗口完整性')
+    contrast = page.locator('#mpDetail .mc-detail-grid').evaluate('''grid => {
+      const luminance = color => {
+        const values = color.match(/[\\d.]+/g).slice(0,3).map(Number).map(v => {
+          const s=v/255;return s<=0.04045?s/12.92:((s+0.055)/1.055)**2.4;
+        });return values[0]*0.2126+values[1]*0.7152+values[2]*0.0722;
+      };
+      return Array.from(grid.querySelectorAll('dt,dd')).map(el=>{
+        const text=luminance(getComputedStyle(el).color),bg=luminance(getComputedStyle(el.parentElement).backgroundColor);
+        return (Math.max(text,bg)+0.05)/(Math.min(text,bg)+0.05);
+      });
+    }''')
+    assert contrast and min(contrast)>=4.5, contrast
+    page.locator('#mpDetail').screenshot(path=str(OUT / 'participants_detail.png'))
+    def check_sector_click(selector, expected_total):
+        target=page.locator(selector).first
+        sector=target.get_attribute('data-mp-sector')
+        if sector is None:
+            sector=target.locator('..').get_attribute('data-mp-sector')
+        with page.expect_response(lambda response:'/participants?' in response.url and parse_qs(urlsplit(response.url).query).get('sector')==[sector]) as matched:
+            target.click()
+        result=matched.value.json()
+        assert result['rows'] and all(r['sector']==sector for r in result['rows'])
+        expect(page.locator('#mpSector')).to_have_value(sector)
+        expect(page.locator('#mpCount')).to_contain_text('行业 / 跟踪指数：'+sector,timeout=30000)
+        expect(page.locator('#mpDetail')).to_be_hidden()
+        expect(page.locator('#mpStocks')).to_be_in_viewport(ratio=.1,timeout=10000)
+        with page.expect_response(lambda response:'/participants?' in response.url and not parse_qs(urlsplit(response.url).query).get('sector')):
+            page.locator('#mpSector').select_option('')
+        expect(page.locator('#mpCount')).to_contain_text(f'当前 {expected_total} 项',timeout=30000)
+    check_sector_click('#mpSectors button[data-mp-sector]',len(capital_snapshot['rows']))
+    check_sector_click('#mpSectors .mc-bar[data-mp-sector]>div',len(capital_snapshot['rows']))
+    check_sector_click('#mpMatrix button[data-mp-sector]',len(capital_snapshot['rows']))
     page.screenshot(path=str(OUT / "participants.png"), full_page=True)
     page.locator('[data-mp-days="5"]').click()
     expect(page.locator("#mpMeta")).to_contain_text("2026-10-26", timeout=30000)
     for kind in ("institution", "etf", "national", "quant", "sm"):
-        with page.expect_response(lambda response: "/participants?" in response.url and "participant=" + kind in response.url):
+        with page.expect_response(lambda response: "/participants?" in response.url and "participant=" + kind in response.url) as changed:
             page.locator(f'[data-mp-type="{kind}"]').click()
+        current=changed.value.json()
+        expect(page.locator('#mpCount')).to_contain_text(f"当前 {len(current['rows'])} 项",timeout=30000)
+        expect(page.locator('#mpSector')).to_have_value('')
         expect(page.locator(f'[data-mp-type="{kind}"]')).to_have_attribute("aria-pressed", "true")
         print("participant",kind,flush=True)
         if kind == "etf":
@@ -126,6 +167,7 @@ with sync_playwright() as p:
             expect(page.locator("#mpCount")).to_contain_text(str(len(quant_snapshot["rows"])),timeout=30000)
             assert "不可识别" in page.locator("#mpStocks").inner_text()
             assert not any(r["name"] in (r["code"],r["code"].split(".")[0]) for r in quant_snapshot["rows"])
+        check_sector_click('#mpSectors button[data-mp-sector]',len(current['rows']))
     page.locator('[data-mp-type="main"]').click()
     expect(page.locator("#mpDirection")).to_be_enabled()
     page.locator("#mpSearch").fill("银行")

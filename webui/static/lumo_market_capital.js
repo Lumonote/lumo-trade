@@ -69,7 +69,7 @@
     const x=i=>48+i*602/(valid.length-1),y=v=>168-(v-lo)/span*136;
     return `<div class="mc-legend">${series.map(s=>`<span>${esc(s.label)}</span>`).join("")}</div><svg class="mh-chart" viewBox="0 0 690 210" role="img" aria-label="${esc(label)}">${[0,.5,1].map(f=>`<line class="mh-chart-grid" x1="48" x2="650" y1="${32+136*f}" y2="${32+136*f}"/><text x="0" y="${36+136*f}">${num((hi-f*span)/1e8,0)}亿</text>`).join("")}${series.map((s,j)=>{let path="",previous=false;valid.forEach((r,i)=>{if(r[s.key]==null){previous=false;return;}path+=`${previous?"L":"M"}${x(i)},${y(r[s.key])} `;previous=true;});return `<path d="${path}" fill="none" stroke="${["#14766d","#b88951","#8a9cab"][j]}" stroke-width="2"><title>${esc(s.label)}</title></path>`;}).join("")}<text x="48" y="197">${esc(valid[0].date)}</text><text x="650" y="197" text-anchor="end">${esc(valid.at(-1).date)}</text></svg>`;
   }
-  function bars(rows,key,label,attribute="") {const max=Math.max(1,...rows.map(r=>Math.abs(r[key]||0)));return rows.map(r=>`<div class="mc-bar">${attribute?`<button type="button" ${attribute}="${esc(r.name)}">${esc(r.name)}</button>`:`<span>${esc(r.name||r.label)}</span>`}<div><i style="width:${Math.abs(r[key]||0)/max*100}%;background:${(r[key]||0)<0?"#4e9377":"#bc7464"}"></i></div><b class="${tone(r[key])}">${esc(label(r))}</b></div>`).join("")||empty("尚无有效记录");}
+  function bars(rows,key,label,attribute="") {const max=Math.max(1,...rows.map(r=>Math.abs(r[key]||0)));return rows.map(r=>`<div class="mc-bar"${attribute?` ${attribute}="${esc(r.name)}"`:""}>${attribute?`<button type="button" ${attribute}="${esc(r.name)}">${esc(r.name)}</button>`:`<span>${esc(r.name||r.label)}</span>`}<div><i style="width:${Math.abs(r[key]||0)/max*100}%;background:${(r[key]||0)<0?"#4e9377":"#bc7464"}"></i></div><b class="${tone(r[key])}">${esc(label(r))}</b></div>`).join("")||empty("尚无有效记录");}
   const state={financing:{data:null,page:1,started:false,poll:null,id:0},participants:{data:null,page:1,started:false,poll:null,id:0}};
   let participant="main";
   const financeFields=[r=>[r.name,r.sector,r.code],"rzye","rzmre","rzche","net",r=>[r.net5,r.net20],r=>[r.rqye,r.rqyl],r=>[r.rqmcl,r.rqchl],r=>[r.close,r.cost],"model_ratio","buffer","float_ratio","buy_ratio",r=>(r.flags||[]).join("；")];
@@ -127,7 +127,7 @@
   function renderParticipantStocks() {
     const rows=participantRows(),s=state.participants,identity=["national","quant"].includes(participant);s.page=Math.min(s.page,Math.max(1,Math.ceil(rows.length/50)));
     $("mpDirection").disabled=identity;$("mpSort").disabled=identity;
-    $("mpCount").textContent=`当前 ${rows.length} 项 · 点击表头切换升降序，全部结果排序后分页 · 缺失值始终置后，每条保留来源日期`;
+    $("mpCount").textContent=`${$("mpSector").value?`行业 / 跟踪指数：${$("mpSector").value} · `:""}当前 ${rows.length} 项 · 点击表头切换升降序，全部结果排序后分页 · 缺失值始终置后，每条保留来源日期`;
     let labels=["股票 / 行业","所选净额","超大单","大单","中单","小单","正流入天数 / 观测","数据日期"];
     if(participant==="institution")labels=["股票 / 行业","机构买入","机构卖出","机构净额","单日上榜天数","数据日期"];
     if(participant==="etf")labels=["ETF / 跟踪指数","申赎估算","份额变化（份）","总份额（份）","总规模","净值","观测交易日","数据日期"];
@@ -145,6 +145,10 @@
   }
   function renderParticipants(data) {
     typeButtons();const kind=types.find(r=>r[0]===participant)||types[1],t=data.totals,identity=["national","quant"].includes(participant);
+    const sectorSelect=$("mpSector"),selectedSector=sectorSelect.value;
+    const sectorNames=selectedSector?new Set([...Array.from(sectorSelect.options,o=>o.value).filter(Boolean),...data.sectors.map(r=>r.name)]):new Set(data.sectors.map(r=>r.name));
+    sectorSelect.replaceChildren(new Option("全部行业 / 跟踪指数",""),...[...sectorNames].sort((a,b)=>a.localeCompare(b,"zh-CN")).map(name=>new Option(name,name)));
+    sectorSelect.value=selectedSector;
     $("mpMeta").textContent=`查询 ${data.start||"未取得"} 至 ${data.as_of||"未取得"} · ${kind[1]} · 采集 ${data.updated_at||"尚未采集"}`;
     $("mpBoundary").textContent=kind[3];$("mpDisclosure").textContent=data.disclosure;$("mpRankTitle").textContent=`${kind[1]} · ${participant==="national"?"持仓披露查询":participant==="quant"?"疑似行为观测":"买卖与资金去向"}`;
     if(data.excluded_nonstock)$("mpBoundary").textContent+=` A股榜已排除 ${data.excluded_nonstock} 条非A股记录（含可转债、优先股、B股等）。`;
@@ -154,7 +158,7 @@
     const best=data.sectors.find(r=>r.net>0),worst=[...data.sectors].reverse().find(r=>r.net<0);
     $("mpInsights").textContent=identity?`${kind[1]}使用${kind[2]}。当前查询得到${t.count}条证据，行业覆盖${data.sectors.length}项；明细可追溯到观测日或公告日，不能据此判断当日买入卖出金额。`:`已取得观测中，${best?`${best.name}承接最强（${money(best.net)}）`:"没有正净额行业"}，${worst?`${worst.name}净卖出最强（${money(worst.net)}）`:"没有负净额行业"}。当前${t.complete}/${t.count}项具备所选完整交易日窗口；净额仅描述所列公开样本，不作为上涨概率。`;
     $("mpTrend").innerHTML=head("所选资金的逐日轨迹",identity?"身份类证据不伪造资金曲线":"按查询的股票与日期统计 / 金额元已换算亿元")+(data.history.length?chart(data.history,[{key:"net",label:"逐日净额"}],"资金净额逐日轨迹"):empty(identity?"该维度不提供可验证的每日净额；请查看下方日期与证据。":"当前维度未提供可比的日资金序列。"));
-    $("mpSectors").innerHTML=head(participant==="etf"?"ETF流向的跟踪指数":"行业影响与覆盖",identity?"按证据条目数量展示":"点击行业名称，查询对应个股")+(identity?bars(data.sectors.slice(0,12),"count",r=>`${r.count}项`):bars([...data.sectors].sort((a,b)=>Math.abs(b.net||0)-Math.abs(a.net||0)).slice(0,12),"net",r=>money(r.net),"data-mp-sector"));
+    $("mpSectors").innerHTML=head(participant==="etf"?"ETF流向的跟踪指数":"行业影响与覆盖",`点击${participant==="etf"?"跟踪指数":"行业"}名称，筛选并定位到对应${participant==="etf"?"ETF":"股票"}列表${identity?"；按证据条目数量展示":""}`)+(identity?bars(data.sectors.slice(0,12),"count",r=>`${r.count}项`,"data-mp-sector"):bars([...data.sectors].sort((a,b)=>Math.abs(b.net||0)-Math.abs(a.net||0)).slice(0,12),"net",r=>money(r.net),"data-mp-sector"));
     if(["main","elg","lg","md"].includes(participant))$("mpBoundary").innerHTML+=` <label for="mpAmountKind">订单口径</label> <select id="mpAmountKind" class="mc-mini-select">${[["main","主力（大单+超大单）"],["elg","超大单"],["lg","大单"],["md","中单"]].map(([k,v])=>`<option value="${k}" ${participant===k?"selected":""}>${v}</option>`).join("")}</select>`;
     $("mpSources").innerHTML=sourceTable(data.sources,"mpSources");renderParticipantStocks();
     if(data.range_note)$("mpInsights").textContent+=` ${data.range_note}。`;
@@ -162,21 +166,30 @@
   }
   function participantDetail(index) {
     const r=participantRows()[index];if(!r)return;$("mpDetail").hidden=false;
-    $("mpDetail").innerHTML=head(`${r.name} · 公开证据`,`${r.code} / ${r.sector} / ${r.as_of}`)+(r.evidence?table(["交易日","公开席位","买入","卖出","净额","上榜依据"],r.evidence.map(v=>`<tr><td>${esc(v.date)}</td><td>${esc(v.seat)}</td><td>${money(v.buy)}</td><td>${money(v.sell)}</td><td>${money(v.net)}</td><td>${esc(v.reason)}</td></tr>`),"",{id:"mpEvidence",fields:["date","seat","buy","sell","net","reason"],records:r.evidence}):`<dl class="mc-detail-grid">${Object.entries(r).filter(([k,v])=>!Array.isArray(v)&&v!=null).map(([k,v])=>`<div><dt>${esc(({net:"所选净额（元）",shares:"持有份额 / 股数",holder:"披露股东",as_of:"数据日期",period:"报告期",share_change:"份额变化",sector:"行业 / 跟踪指数",nav:"净值",activity:"疑似活跃刻度",direction:"行为方向",main:"主力净额（元）",elg:"超大单净额（元）",lg:"大单净额（元）",md:"中单净额（元）",sm:"小单净额（元）"})[k]||k)}</dt><dd>${esc(typeof v==="number"?num(v,2):String(v))}</dd></div>`).join("")}</dl>`)+`<p class="mc-boundary">${esc($("mpBoundary").textContent)}</p>${stockButton(r)}`;$("mpDetail").scrollIntoView({behavior:"smooth",block:"nearest"});
+    const labels={code:"股票 / 基金代码",name:"股票 / 基金名称",net:"所选净额（元）",shares:"持有份额 / 股数",holder:"披露股东",as_of:"数据日期",period:"报告期",date:"交易日",previous_date:"前一交易日",index_code:"跟踪指数代码",share_change:"份额变化（份）",sector:"行业 / 跟踪指数",nav:"净值",size:"总规模（元）",activity:"疑似活跃刻度",direction:"行为方向",main:"主力净额（元）",elg:"超大单净额（元）",lg:"大单净额（元）",md:"中单净额（元）",sm:"小单净额（元）",buy:"买入金额（元）",sell:"卖出金额（元）",days:"已取得交易日数",positive_days:"主力正流入天数",expected_days:"窗口交易日数",complete:"窗口完整性",hold_ratio:"持股占比（%）",change_shares:"披露持股变化（股）",bull:"偏多行为数",bear:"偏空行为数"};
+    const counts=new Set(["days","positive_days","expected_days","bull","bear"]);
+    const value=(key,v)=>typeof v==="boolean"?(key==="complete"?(v?"完整":"不完整"):(v?"是":"否")):typeof v==="number"?num(v,counts.has(key)?0:2):String(v);
+    $("mpDetail").innerHTML=head(`${r.name} · 公开证据`,`${r.code} / ${r.sector} / ${r.as_of}`)+(r.evidence?table(["交易日","公开席位","买入","卖出","净额","上榜依据"],r.evidence.map(v=>`<tr><td>${esc(v.date)}</td><td>${esc(v.seat)}</td><td>${money(v.buy)}</td><td>${money(v.sell)}</td><td>${money(v.net)}</td><td>${esc(v.reason)}</td></tr>`),"",{id:"mpEvidence",fields:["date","seat","buy","sell","net","reason"],records:r.evidence}):`<dl class="mc-detail-grid">${Object.entries(r).filter(([k,v])=>!Array.isArray(v)&&v!=null).map(([k,v])=>`<div><dt>${esc(labels[k]||k)}</dt><dd>${esc(value(k,v))}</dd></div>`).join("")}</dl>`)+`<p class="mc-boundary">${esc($("mpBoundary").textContent)}</p>${stockButton(r)}`;$("mpDetail").scrollIntoView({behavior:"smooth",block:"nearest"});
   }
   function query(kind) {
     if(kind==="financing")return new URLSearchParams({window:$("mfWindow").value,deposit:$("mfDeposit").value,warning:$("mfWarning").value,closeout:$("mfCloseout").value});
-    return new URLSearchParams({participant,start:$("mpStart").value,end:$("mpEnd").value,keyword:$("mpSearch").value});
+    return new URLSearchParams({participant,start:$("mpStart").value,end:$("mpEnd").value,keyword:$("mpSearch").value,sector:$("mpSector").value});
   }
   async function load(kind) {
     const s=state[kind],prefix=kind==="financing"?"mf":"mp",id=++s.id;clearTimeout(s.poll);error(prefix);
     try {
-      const data=await api(`/api/market-health/${kind}?${query(kind)}`);if(id!==s.id)return;s.data=data;
+      const data=await api(`/api/market-health/${kind}?${query(kind)}`);if(id!==s.id)return false;s.data=data;
       if(kind==="financing")renderFinance(data);else renderParticipants(data);
       const busy=data.job&&["queued","running"].includes(data.job.status);$(prefix+"Refresh").disabled=Boolean(busy);$(prefix+"Export").disabled=!data.as_of;
       $(prefix+"Status").textContent=busy?`更新中 ${data.job.progress||0}% · ${data.job.logs?.at(-1)||"准备读取公开数据"}`:data.job?.status==="failed"?data.job.error:(data.errors||[]).join("；");
       if(busy)s.poll=setTimeout(()=>load(kind),2500);
-    }catch(e){if(id!==s.id)return;error(prefix,`${e.message}。已显示的研究保留原日期。`);$(prefix+"Refresh").disabled=false;}
+      return true;
+    }catch(e){if(id!==s.id)return false;error(prefix,`${e.message}。已显示的研究保留原日期。`);$(prefix+"Refresh").disabled=false;return false;}
+  }
+  async function selectParticipantSector(name) {
+    const select=$("mpSector");if(name&&!Array.from(select.options,o=>o.value).includes(name))select.add(new Option(name,name));
+    select.value=name;state.participants.page=1;$("mpDetail").hidden=true;
+    if(await load("participants"))$("mpStocks").scrollIntoView({behavior:"smooth",block:"start"});
   }
   async function refresh(kind) {const prefix=kind==="financing"?"mf":"mp";$(prefix+"Refresh").disabled=true;error(prefix);$(prefix+"Status").textContent="正在启动完整公开数据采集，已显示的研究保留…";try{await api(`/api/market-health/${kind}/refresh`,{method:"POST",body:"{}"});await load(kind);}catch(e){error(prefix,e.message);$(prefix+"Refresh").disabled=false;}}
   for(const kind of Object.keys(state)) {
@@ -190,12 +203,13 @@
   $("mfModel").addEventListener("submit",e=>{e.preventDefault();state.financing.page=1;$("mfDetail").hidden=true;load("financing");});
   for(const id of ["mfSearch","mfSector","mfRisk","mfSort"])$(id).addEventListener(id==="mfSearch"?"input":"change",()=>{if(id==="mfSort")tableSort.delete("mfStocks");state.financing.page=1;if(state.financing.data)renderFinanceStocks();});
   $("mhView-financing").addEventListener("click",e=>{const stock=e.target.closest("[data-mf-code]"),sector=e.target.closest("[data-mf-sector]");if(stock)financeDetail(stock.dataset.mfCode);if(sector){$("mfSector").value=sector.dataset.mfSector;state.financing.page=1;renderFinanceStocks();$("mfStocks").scrollIntoView({behavior:"smooth",block:"nearest"});}});
-  $("mpTypes").addEventListener("click",e=>{const b=e.target.closest("[data-mp-type]");if(!b)return;participant=b.dataset.mpType;$("mpSort").value="desc";$("mpDirection").value="all";$("mpStart").value="";$("mpEnd").value="";$("mpDetail").hidden=true;state.participants.page=1;typeButtons();load("participants");});
+  $("mpTypes").addEventListener("click",e=>{const b=e.target.closest("[data-mp-type]");if(!b)return;participant=b.dataset.mpType;$("mpSector").replaceChildren(new Option("全部行业 / 跟踪指数",""));$("mpSort").value="desc";$("mpDirection").value="all";$("mpStart").value="";$("mpEnd").value="";$("mpDetail").hidden=true;state.participants.page=1;typeButtons();load("participants");});
   $("mpQuery").addEventListener("submit",e=>{e.preventDefault();state.participants.page=1;$("mpDetail").hidden=true;load("participants");});
   $("mpLatest").addEventListener("click",()=>{$("mpStart").value="";$("mpEnd").value="";state.participants.page=1;load("participants");});
   for(const id of ["mpDirection","mpSort"])$(id).addEventListener("change",()=>{if(id==="mpSort")tableSort.delete(`mpStocks-${participant}`);state.participants.page=1;renderParticipantStocks();});
+  $("mpSector").addEventListener("change",()=>selectParticipantSector($("mpSector").value));
   $("mhView-participants").addEventListener("change",e=>{if(e.target.id==="mpAmountKind"){participant=e.target.value;load("participants");}});
-  $("mhView-participants").addEventListener("click",e=>{const row=e.target.closest("[data-mp-row]"),sector=e.target.closest("[data-mp-sector]"),days=e.target.closest("[data-mp-days]");if(row)participantDetail(Number(row.dataset.mpRow));if(sector){$("mpSearch").value=sector.dataset.mpSector;state.participants.page=1;load("participants");}if(days){const dates=(state.participants.data?.calendar||[]).filter(d=>d<=(state.participants.data.as_of||""));if(dates.length){$("mpEnd").value=dates.at(-1);$("mpStart").value=dates[Math.max(0,dates.length-Number(days.dataset.mpDays))];state.participants.page=1;load("participants");}}});
+  $("mhView-participants").addEventListener("click",e=>{const row=e.target.closest("[data-mp-row]"),sector=e.target.closest("[data-mp-sector]"),days=e.target.closest("[data-mp-days]");if(row)participantDetail(Number(row.dataset.mpRow));if(sector)selectParticipantSector(sector.dataset.mpSector);if(days){const dates=(state.participants.data?.calendar||[]).filter(d=>d<=(state.participants.data.as_of||""));if(dates.length){$("mpEnd").value=dates.at(-1);$("mpStart").value=dates[Math.max(0,dates.length-Number(days.dataset.mpDays))];state.participants.page=1;load("participants");}}});
   document.addEventListener("market-health-full-refresh",()=>{for(const kind of Object.keys(state))if(state[kind].started&&!$(kind==="financing"?"mfRefresh":"mpRefresh").disabled)refresh(kind);});
   window.addEventListener("pagehide",()=>{for(const s of Object.values(state))clearTimeout(s.poll);});typeButtons();
 })();
