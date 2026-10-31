@@ -148,6 +148,10 @@ with sync_playwright() as p:
     page.screenshot(path=str(OUT / "participants.png"), full_page=True)
     page.locator('[data-mp-days="5"]').click()
     expect(page.locator("#mpMeta")).to_contain_text("2026-10-26", timeout=30000)
+    with page.expect_response(lambda response:'/participants?' in response.url and not parse_qs(urlsplit(response.url).query).get('start')):
+        page.locator('#mpLatest').click()
+    expect(page.locator('#mpStart')).to_have_value('')
+    expect(page.locator('#mpEnd')).to_have_value('')
     for kind in ("institution", "etf", "national", "quant", "sm"):
         with page.expect_response(lambda response: "/participants?" in response.url and "participant=" + kind in response.url) as changed:
             page.locator(f'[data-mp-type="{kind}"]').click()
@@ -159,7 +163,7 @@ with sync_playwright() as p:
         if kind == "etf":
             expect(page.locator("#mpStocks")).to_contain_text("申赎估算")
             assert page.locator("#mpStocks tbody tr").count() == 50
-            etfs=json.load(opener.open(URL+"/api/market-health/participants?participant=etf",timeout=30))
+            etfs=current
             check_stock_sort("mpStocks",5,etfs["rows"],"nav","data-mp-row")
         if kind in ("quant", "national"):
             expect(page.locator("#mpDirection")).to_be_disabled()
@@ -195,6 +199,31 @@ with sync_playwright() as p:
     expect(name_header).to_have_attribute("aria-sort","ascending")
     page.locator("#mpSort").select_option("desc")
     expect(name_header).to_have_attribute("aria-sort","none")
+    # 切换顶部六类资金，日期、搜索、行业、方向与排序共用同一组条件。
+    page.locator('#mpStart').fill('2026-07-01')
+    page.locator('#mpEnd').fill(capital_snapshot['as_of'])
+    page.locator('#mpSearch').fill('银行')
+    sector=page.locator('#mpSectors button[data-mp-sector]').first.get_attribute('data-mp-sector')
+    page.locator('#mpSector').select_option(sector)
+    expect(page.locator('#mpCount')).to_contain_text('行业 / 跟踪指数：'+sector,timeout=30000)
+    page.locator('#mpDirection').select_option('sell')
+    page.locator('#mpSort').select_option('asc')
+    saved={key:page.locator('#'+key).input_value() for key in ('mpStart','mpEnd','mpSearch','mpSector','mpDirection','mpSort')}
+    for kind in ('main','institution','etf','national','quant','sm','main'):
+        with page.expect_response(lambda response:'/participants?' in response.url and parse_qs(urlsplit(response.url).query).get('participant')==[kind]) as switched:
+            page.locator(f'[data-mp-type="{kind}"]').click()
+        response=switched.value
+        params=parse_qs(urlsplit(response.url).query)
+        for key,field in (('start','mpStart'),('end','mpEnd'),('keyword','mpSearch'),('sector','mpSector')):
+            assert params[key]==[saved[field]],(kind,key,params)
+        result=response.json()
+        expect(page.locator('#mpMeta')).to_contain_text('2026-07-01',timeout=30000)
+        expect(page.locator('#mpRankTitle')).to_contain_text({'main':'大资金','institution':'大机构','etf':'ETF','national':'国家队','quant':'量化资金','sm':'散户'}[kind])
+        expected=len(result['rows']) if kind in ('national','quant') else sum(r['net'] is not None and r['net']<0 for r in result['rows'])
+        expect(page.locator('#mpCount')).to_contain_text(f'当前 {expected} 项',timeout=30000)
+        for key,value in saved.items():
+            expect(page.locator('#'+key)).to_have_value(value)
+        expect(page.locator('#mpError')).to_be_hidden()
     page.set_viewport_size({"width": 1100, "height": 900})
     page.screenshot(path=str(OUT / "participants_1100.png"), full_page=True)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
