@@ -35,6 +35,7 @@ from webui.services import market_health_service
 from webui.services import sector_depth_service
 from webui.services import market_capital_service
 from webui.services import market_macro_service
+from webui.services import market_limits_service
 from webui.services.watchlist_service import WatchlistStorageError
 from data_store import quant_radar_repo, star_orbit_repo
 
@@ -972,6 +973,35 @@ def market_health_macro(request: Request) -> Response:
 @_native_post("/api/market-health/macro/refresh")
 def market_health_macro_refresh(request: Request) -> Response:
     return _json_response({"job": market_macro_service.start_refresh(webui_core.JOB_SERVICE)}, status_code=202)
+
+
+@_native_get("/api/market-health/limits")
+def market_health_limits(request: Request) -> Response:
+    try:
+        return _json_response(market_limits_service.query(webui_core.JOB_SERVICE,
+            start=_query_value(request, "start", ""), end=_query_value(request, "end", "")))
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_get("/api/market-health/limits/detail")
+def market_health_limits_detail(request: Request) -> Response:
+    try:
+        return _json_response(market_limits_service.detail(
+            _query_value(request, "kind", ""), _query_value(request, "code", ""), webui_core.JOB_SERVICE,
+            start=_query_value(request, "start", ""), end=_query_value(request, "end", "")))
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_post("/api/market-health/limits/refresh")
+def market_health_limits_refresh(request: Request) -> Response:
+    try:
+        data = _request_json(request)
+        return _json_response({"job": market_limits_service.start_refresh(webui_core.JOB_SERVICE,
+            start=data.get("start", ""), end=data.get("end", ""))}, status_code=202)
+    except (ValueError, TypeError, AttributeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
 
 
 # ----------------------------- 模拟盘 paper trading -----------------------------

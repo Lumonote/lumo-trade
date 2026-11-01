@@ -132,3 +132,29 @@ def test_macro_rejects_invalid_frequency_window_and_nonfinite_scenario(runtime):
     with TestClient(runtime.app) as client:
         for params in ({"factor": "m2"}, {"window": "bad"}, {"earnings": "nan"}, {"duration": "100"}, {"frequency": "monthly", "lag": "5"}):
             assert client.get("/api/market-health/macro", query_params=params).status_code == 400
+
+
+def test_limits_query_detail_refresh_and_packaged_assets(runtime, monkeypatch):
+    from robyn.testing import TestClient
+    calls=[]
+    monkeypatch.setattr(runtime.market_limits_service,"query",lambda jobs,**kw: {"available":False,**kw})
+    monkeypatch.setattr(runtime.market_limits_service,"detail",lambda kind,code,jobs,**kw: {"kind":kind,"code":code,**kw})
+    monkeypatch.setattr(runtime.market_limits_service,"start_refresh",lambda jobs,**kw: calls.append(kw) or {"id":"limits-test","status":"queued"})
+    params={"start":"2026-10-01","end":"2026-10-30"}
+    with TestClient(runtime.app) as client:
+        assert client.get("/api/market-health/limits",query_params=params).json()["start"] == params["start"]
+        assert client.get("/api/market-health/limits/detail",query_params={**params,"kind":"sector","code":"BK0001"}).json()["code"] == "BK0001"
+        result=client.post("/api/market-health/limits/refresh",json_data=params)
+        assert result.status_code==202 and calls==[params]
+        page=client.get("/desktop/market_health").text
+        assert 'id="mhView-limits"' in page and 'id="mlStart"' in page
+        for name in ("lumo_market_limits.js","lumo_market_limits.css"):
+            assert name in page and client.get("/static/"+name).status_code==200
+
+
+def test_limits_routes_reject_invalid_date_and_detail_codes(runtime):
+    from robyn.testing import TestClient
+    with TestClient(runtime.app) as client:
+        for path in ("/api/market-health/limits","/api/market-health/limits/detail"):
+            assert client.get(path,query_params={"start":"bad","kind":"stock","code":"../../"}).status_code==400
+        assert client.post("/api/market-health/limits/refresh",json_data={"start":"bad"}).status_code==400

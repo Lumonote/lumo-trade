@@ -1,0 +1,34 @@
+<section id="mhView-limits" role="tabpanel" aria-labelledby="mhTab-limits" hidden>
+  <article class="mh-box mh-space">
+    <div class="mh-box-head"><div><h3>涨跌停 · 从板块看到每一次封板</h3><p id="mlMeta">选择日期区间，查看涨跌停分布、连续次数与形态标签。</p></div><div class="mh-actions"><button type="button" class="button" id="mlRefresh">更新区间数据</button><button type="button" class="button secondary" id="mlExport" disabled>导出完整研究</button><button type="button" class="button secondary" id="mlCsv" disabled>导出筛选记录 CSV</button></div></div>
+    <form id="mlForm" class="mh-controls">
+      <label for="mlStart">开始日期</label><input id="mlStart" type="date" required>
+      <label for="mlEnd">结束日期</label><input id="mlEnd" type="date" required>
+      <button class="button secondary" type="submit">查询区间</button>
+      <button class="mh-inline-link" type="button" data-ml-days="7">近一周</button><button class="mh-inline-link" type="button" data-ml-days="30">近一月</button><button class="mh-inline-link" type="button" data-ml-days="90">近三月</button>
+    </form>
+    <div class="mh-controls">
+      <label for="mlType">板块类型</label><select id="mlType"><option value="">全部板块</option><option>行业</option><option>概念</option></select>
+      <label for="mlKind">事件</label><select id="mlKind"><option value="">全部事件</option><option value="U">涨停</option><option value="D">跌停</option><option value="Z">炸板</option><option value="O">跌停开板</option></select>
+      <label for="mlPattern">形态标签</label><select id="mlPattern"><option value="">全部形态</option></select>
+      <label for="mlStreak">连续封板</label><select id="mlStreak"><option value="0">不限</option><option value="2">至少2次</option><option value="3">至少3次</option><option value="5">至少5次</option></select>
+      <label for="mlSearch">搜索</label><input id="mlSearch" type="search" placeholder="板块 / 股票名称或代码">
+      <label for="mlSort">排序</label><select id="mlSort"><option value="U">涨停次数</option><option value="D">跌停次数</option><option value="max_up">最高连板</option><option value="max_down">最高连跌停</option><option value="stocks">相关股票数</option></select>
+    </div>
+    <p id="mlError" class="mh-notice mh-error" role="alert" hidden></p><div id="mlJob" class="mh-job" role="status" hidden></div>
+    <p id="mlStatus" class="mh-note" role="status"></p>
+  </article>
+  <div id="mlSummary" class="mh-space"></div>
+  <div id="mlDetail" class="mh-space" tabindex="-1" hidden></div>
+  <article class="mh-box mh-space"><div class="mh-box-head"><div><h3>板块分布</h3><p>点击板块查看区间内全部相关股票、逐日事件、日期与板块自身形态。</p></div><span id="mlSectorCount" class="mh-note"></span></div><div id="mlSectors"></div></article>
+  <article class="mh-box mh-space"><div class="mh-box-head"><div><h3>股票档案</h3><p>点击股票查看全部事件与所有关联板块；最高连续数包含区间前衔接。</p></div><span id="mlStockCount" class="mh-note"></span></div><div id="mlStocks"></div></article>
+  <article class="mh-box mh-space"><h3>逐日涨跌停记录</h3><p class="mh-note">涨停与跌停均指收盘封板；炸板、跌停开板单列。同一股票同日可出现不同方向事件。</p><div id="mlEvents"></div></article>
+  <details class="mh-box mh-space"><summary>每日市场统计与覆盖情况</summary><div id="mlDaily"></div></details>
+  <details class="mh-box mh-method"><summary>数据来源、连续次数与形态标签口径</summary>
+    <p>使用未复权日线收盘价与当天实际涨跌停价逐分核验，包含沪深北A股及可核验的ST股票。最高价触及涨停而收盘未封为炸板；最低价触及跌停而收盘未封为跌停开板。无有效限价或缺数据的记录不会推算；缺失交易日显示待补，不能当作零家。</p>
+    <p>连板、连跌停按交易所日历的连续收盘封板计算，额外回看区间前60个交易日。普通交易日未封板、停牌中断连续；缺失日或回看左边界仍在连续时显示“至少”。各次事件的连续下跌天数另列，指连续收盘下跌的交易日数。区间人数按股票去重，次数按股票×日期×事件类型去重。</p>
+    <p>板块按事件当天的历史成分关联，同股多个概念分别计入各板块，不可把板块数字相加当作全市场。历史成分缺失会标明未映射，股票记录仍然保留。股票名称优先采用事件日榜单，缺失时使用当前上市名称；未取得名称的股票按代码保留。</p>
+    <p>板块自身与股票形态分别使用条件选股全部预设标签的默认参数，显示计算日期与命中依据。标签基于区间最后有效收盘日，个股使用锚定该日的前复权日线，板块使用指数日线；标签不是事件发生日的历史形态。没有命中与日K待补明确区分。</p>
+    <p><a href="https://tushare.pro/document/2?doc_id=183" target="_blank" rel="noopener">实际涨跌停价格</a> · <a href="https://tushare.pro/document/2?doc_id=298" target="_blank" rel="noopener">封板补充信息</a> · <a href="https://tushare.pro/document/2?doc_id=363" target="_blank" rel="noopener">历史板块成分</a>。补充榜单不覆盖ST；封板时间、封单、开板次数缺值不补零。首次历史回补及形态计算使用后台任务，可持续查看进度。</p>
+  </details>
+</section>
