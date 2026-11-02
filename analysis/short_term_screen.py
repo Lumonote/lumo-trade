@@ -176,6 +176,35 @@ def classify_news(item):
             "watch_points": watch, "classification_basis": "规则筛选，非人工确认或投资评级；原文与公告为准"}
 
 
+def sector_quote(row, members, radar_date, today):
+    """不同分类不强行映射：指数报价与覆盖成分汇总分别标明口径、日期和覆盖数。"""
+    quote = {"pct": row.get("pct"), "net": row.get("net"), "pct_label": "板块涨跌",
+             "net_label": "板块净额", "pct_at": row.get("date"), "net_at": row.get("date"),
+             "source": row.get("source"), "note": ""}
+    live = row.get("live") or {}
+    stamp = text_field(live.get("quote_at"))
+    # 同日、同代码的源报价才能替代展示值；收盘原值仍保留在板块行中。
+    if stamp[:10] == today and live.get("code") == row.get("code") and row.get("code"):
+        for field in ("pct", "net"):
+            value = number(live.get(field))
+            if value is not None:
+                quote[field], quote[field + "_at"] = value, stamp
+        quote["source"] = "东方财富板块报价"
+    current = [s for s in members if radar_date and s.get("date") == radar_date]
+    changes = [number(s.get("change_pct")) for s in current]
+    flows = [number(s.get("main_net_inflow")) for s in current]
+    changes, flows = [v for v in changes if v is not None], [v for v in flows if v is not None]
+    coverage = {"date": radar_date, "stocks": len(current), "pct_count": len(changes), "flow_count": len(flows)}
+    if quote["pct"] is None and changes:
+        quote.update(pct=sum(changes)/len(changes), pct_label="成分均涨", pct_at=radar_date)
+    if quote["net"] is None and flows:
+        quote.update(net=sum(flows), net_label="成分净额", net_at=radar_date)
+    if quote["pct_label"] == "成分均涨" or quote["net_label"] == "成分净额":
+        quote["note"] = (f"雷达行业分类；同日覆盖{len(current)}只股票，涨跌幅有效{len(changes)}只、"
+                         f"资金有效{len(flows)}只。成分均涨为等权平均，成分净额为已覆盖股票主力净流入合计，非板块指数或全行业资金。")
+    return {**quote, "coverage": coverage}
+
+
 def build_report(sources, today, generated_at):
     radar = sources.get("radar") or {}
     sector_data = sources.get("sectors") or {}
@@ -201,7 +230,8 @@ def build_report(sources, today, generated_at):
         add_sector(raw.get("name"), raw.get("code", ""), raw.get("type") or "行业",
                    pct=number(raw.get("pct")), net=number(raw.get("net")), flow5=number(raw.get("flow5")),
                    persistence=number(raw.get("persistence")), phase=clean(raw.get("phase")),
-                   history=raw.get("history") or [], live=raw.get("live"), source="板块深度 · 收盘资金")
+                   history=raw.get("history") or [], live=raw.get("live"),
+                   date=raw.get("date") or sector_data.get("as_of"), source="板块深度 · 收盘资金")
     for raw in limits.get("sectors") or []:
         row = add_sector(raw.get("name"), raw.get("code", ""), raw.get("type") or "行业")
         if row:
@@ -288,12 +318,13 @@ def build_report(sources, today, generated_at):
             row[field].append(item["id"])
     for row in sector_map.values():
         members = [stocks[c] for c in row["stock_codes"]]
+        row["quote"] = sector_quote(row, members, radar.get("fallback_date") or radar.get("snapshot_date"), today)
         row["signals"] = {
             "拉抬": sum(s.get("direction") == "拉抬" for s in members),
             "砸盘": sum(s.get("direction") == "砸盘" for s in members),
             "涨停": sum(any(e.get("kind") == "U" for e in s["limits"]) for s in members),
             "跌停": sum(any(e.get("kind") == "D" for e in s["limits"]) for s in members),
-            "资金流入": int(row.get("net") is not None and row["net"] > 0),
+            "资金流入": int(row["quote"]["net"] is not None and row["quote"]["net"] > 0),
             "消息提及": len(row["news_ids"]),
         }
         row["relevance"] = (len(members) * 2 + len(row["news_ids"]) * 3 + len(row["event_ids"]) * 2
@@ -302,6 +333,8 @@ def build_report(sources, today, generated_at):
                        f"收盘涨停{row['signals']['涨停']}只、跌停{row['signals']['跌停']}只（限价日{limits.get('as_of') or '未取得'}）"]
         if row.get("net") is not None:
             observation.append(f"板块资金{row.get('date') or '未知日'}净额{row['net']/1e8:.2f}亿元")
+        if row["quote"]["note"]:
+            observation.append(row["quote"]["note"])
         row["observation"] = "；".join(observation)
         row["verification"] = "核对异动后的成交量与资金能否持续，关注消息原文、实际订单或正式发布；板块与消息关联不等于因果或买入信号。"
     sectors = sorted(sector_map.values(), key=lambda r: (-r["relevance"], -(r.get("net") or 0), r["name"]))

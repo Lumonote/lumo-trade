@@ -55,7 +55,9 @@ with sync_playwright() as p:
                 "news":[{**snapshot["news"][0],"id":"browser-news-insertion","title":"浏览器分区隔离验收","stock_codes":[news_update["code"]]},*snapshot["news"]],
                 "stocks":[{**snapshot["stocks"][0],"name":"其他面板不应同步重绘"},*snapshot["stocks"][1:]],"sectors":snapshot["sectors"]}})
         elif kind=="sectors" and sector_update["inject"]:
-            changed_sectors=[{**snapshot["sectors"][1],"pct":float(snapshot["sectors"][1].get("pct") or 0)+.1},snapshot["sectors"][0],*snapshot["sectors"][2:]]
+            updated=snapshot["sectors"][1]
+            changed_sectors=[{**updated,"pct":float(updated.get("pct") or 0)+.1,
+                              "quote":{**updated["quote"],"pct":float(updated["quote"].get("pct") or 0)+.1}},snapshot["sectors"][0],*snapshot["sectors"][2:]]
             route.fulfill(json={"kind":kind,"version":"test-sectors","revision":2,"changed":True,"running":False,"payload":{"sectors":changed_sectors}})
         else:route.fulfill(json={"kind":kind,"version":"","changed":False,"running":False,"payload":None})
     page.route("**/api/short-term/feed*",feed_route)
@@ -71,7 +73,15 @@ with sync_playwright() as p:
     page.locator("#stScrollToggle").click()
     assert page.locator("#stStockCount").inner_text()==str(len(snapshot["stocks"]))
     assert page.locator("#stSectorCount").inner_text()==str(len(snapshot["sectors"]))
+    for row in snapshot["sectors"][:18]:
+        quote=row.get("quote")
+        assert quote,"板块须保留展示值与统计口径"
+        node=page.locator('#stSectorList .st-scroll-content > button').filter(has=page.locator('strong',has_text=row['name'])).first
+        assert quote["pct_label"] in node.inner_text() and quote["net_label"] in node.inner_text()
     assert page.locator("#stNodes button").count()>8
+    expected_boards=[row for row in snapshot["sectors"] if row["stock_codes"]][:12]
+    expect(page.locator("#stNodes .st-node-sector")).to_have_count(len(expected_boards))
+    expect(page.locator("#stNodes .st-node-stock")).to_have_count(min(24,len({code for row in expected_boards for code in row["stock_codes"]})))
     assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--st-bg').trim()") == "#040609"
     assert page.locator(".st-header,.st-brand,.st-session,#stSources,#stExport,.st-controlbar nav").count()==0
     assert page.locator(".st-workspace").bounding_box()["y"]<=55
@@ -127,9 +137,20 @@ with sync_playwright() as p:
     page.locator('#stNodes [data-st-node="'+sector_with_members["id"]+'"]').click()
     expect(page.locator("#stDrawer")).to_be_visible()
     expect(page.locator("#stDrawerBody")).to_contain_text("板块发生了什么")
+    expect(page.locator("#stDrawerBody")).to_contain_text(sector_with_members["quote"]["pct_label"])
+    if sector_with_members["quote"]["note"]:
+        expect(page.locator("#stDrawerBody")).to_contain_text(sector_with_members["quote"]["note"])
     page.locator("#stDrawerBody [data-st-kind=stock]").first.click()
     expect(page.locator("#stDrawerBody")).to_contain_text("异动说明与实际时点")
     page.screenshot(path=str(OUT/"stock-evidence.png"))
+    page.locator("#stDrawerClose").click()
+    page.locator("[data-st-list=sectors]").click()
+    with page.expect_download() as downloaded:page.locator("[data-st-export-list]").click()
+    sector_records=list(csv.DictReader(io.StringIO(Path(downloaded.value.path()).read_text(encoding="utf-8-sig"))))
+    assert len(sector_records)==len(snapshot["sectors"])
+    exported=next(r for r in sector_records if r["name"]==sector_with_members["name"] and r["type"]==sector_with_members["type"])
+    assert float(exported["display_pct"])==sector_with_members["quote"]["pct"]
+    assert exported["net_label"]==sector_with_members["quote"]["net_label"]
     page.locator("#stDrawerClose").click()
     page.locator("[data-st-list=stocks]").click()
     expect(page.locator("#stDrawerTitle")).to_have_text("全部个股异动")

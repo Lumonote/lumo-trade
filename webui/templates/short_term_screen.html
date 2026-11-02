@@ -6,7 +6,7 @@
   <link rel="stylesheet" href="/static/lumo_short_term_screen.css?v={{ asset_v('lumo_short_term_screen.css') }}">
 </head>
 <body data-desktop-mode="{{ '1' if desktop_mode else '0' }}">
-  <main id="stScreen" aria-label="短线作战大屏" aria-busy="true">
+  <main id="stScreen" aria-label="短线作战大屏" aria-busy="true" data-scene-v="{{ asset_v('lumo_short_term_scene.js') }}" data-flow-v="{{ asset_v('lumo_short_term_flow.js') }}">
     <div class="st-controlbar">
       <label class="st-search">全局检索<input id="stSearch" type="search" placeholder="板块、股票、消息、会议"></label>
       <label>快照日 <input id="stDate" type="date" aria-label="历史快照日期"></label><button id="stLatest" type="button">回到最新</button>

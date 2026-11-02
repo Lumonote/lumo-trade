@@ -1,4 +1,6 @@
-import "./lumo_short_term_scene.js";
+// 模块依赖继承入口版本，避免刷新后仍命中旧的场景脚本。
+await import(new URL("./lumo_short_term_flow.js?v="+document.getElementById("stScreen").dataset.flowV,import.meta.url));
+await import(new URL("./lumo_short_term_scene.js?v="+document.getElementById("stScreen").dataset.sceneV,import.meta.url));
 /* 短线大屏：各分区保留真实数据日期，所有点选均可追溯到完整记录。 */
 (() => {
   "use strict";
@@ -13,7 +15,7 @@ import "./lumo_short_term_scene.js";
   const kindLabels={U:"涨停",D:"跌停",Z:"炸板",O:"跌停开板"};
   const EMPTY='<p class="st-empty">当前筛选暂无有效记录。缺失来源不会补成零值或编造消息。</p>';
   let data=null,loadSequence=0,orderTimer=null,orderSequence=0,orderBusy=false,scrolling=true,graphKey="",focusSector="",drawerState=null,backStack=[];
-  const scrollStates=new Map(),feedStates=new Map(),fieldRevisions=new Map(),arrivalGlows=new Map(),arrivalNodeTimers=new Map();let disposed=false,incomingUpdate=false,orderHydrated=false;
+  const scrollStates=new Map(),feedStates=new Map(),fieldRevisions=new Map(),arrivalGlows=new Map(),arrivalNodeTimers=new Map();let disposed=false,incomingUpdate=false,orderHydrated=false,sceneLayoutKey="";
   const feedConfig={radar:[60000,1600],news:[45000,4200],popularity:[180000,7800],sectors:[600000,11500],limits:[1800000,17300]};
   const maps={};const pageSize=30;
   const scene=new window.LumoShortTermScene($("stScene"),$("stNodes"),(kind,id)=>{scene.setSelected(id);open(kind,id);});
@@ -30,6 +32,7 @@ import "./lumo_short_term_scene.js";
   function visible(kind){const keyword=$("stSearch").value.trim().toLowerCase();return rowsFor(kind).filter(r=>matches(r,keyword));}
   function rankChange(row){return row.hot_rank_change==null?"变动待补":row.hot_rank_change>0?`↑${n(row.hot_rank_change)}名`:row.hot_rank_change<0?`↓${n(-row.hot_rank_change)}名`:"持平";}
   function streakText(row){return `${row.streak_lower_bound?"≥":""}${n(row.streak)}${row.kind==="U"?"连板":"连跌停"}`;}
+  function sectorQuote(row){return row.quote||{pct:row.pct,net:row.net,pct_label:"板块涨跌",net_label:"板块净额",pct_at:row.date,net_at:row.date,note:""};}
   function applyIncoming(paint){incomingUpdate=true;try{paint();}finally{incomingUpdate=false;}}
   function pulseArrival(node){
     if(!node||disposed||document.hidden||root.dataset.motion!=="on")return false;
@@ -120,13 +123,14 @@ import "./lumo_short_term_scene.js";
   }}
   function spark(history){const values=history.map(r=>r.net).filter(v=>v!=null).slice(-18);if(values.length<2)return "";const lo=Math.min(...values),span=Math.max(...values)-lo||1;return `<svg class="st-mini-line" viewBox="0 0 200 14" preserveAspectRatio="none" aria-hidden="true"><path d="${values.map((v,i)=>`${i?"L":"M"}${i*200/(values.length-1)},${12-(v-lo)/span*10}`).join(" ")}" fill="none" stroke="#9bbfc0" stroke-width="1"/></svg>`;}
   function newsList(rows,kind="news"){return rows.map(r=>`<button class="st-news-row" type="button" data-st-kind="news" data-st-id="${esc(r.id)}"><time>${esc(timeText(r.published_at))}</time><span><strong>${esc(r.title)}</strong><small>${esc(r.source)} · ${esc(r.date||"发表日期未齐")} · ${esc(r.themes.join(" / ")||r.category)}</small></span></button>`).join("")||EMPTY;}
+  function sceneCapacity(){const width=$("stScene").clientWidth,height=$("stScene").clientHeight,slots=width>=960?{sectors:12,columns:8}:width>=680?{sectors:10,columns:6}:width>=460?{sectors:8,columns:4}:{sectors:4,columns:3};return {...slots,width,height};}
   function render(parts=null,owner=""){
     const owned={radar:["stocks"],news:["news"],popularity:["hot_stocks","popularity_rises"],sectors:["sectors"],limits:["summary","limit_up","limit_down"]}[owner];
     const has=key=>(!parts||parts.includes(key))&&(!owned||owned.includes(key));
     maps.sector=new Map(data.sectors.map(r=>[r.id,r]));maps.stock=new Map(data.stocks.map(r=>[r.code,r]));maps.news=new Map(data.news.map(r=>[r.id,r]));maps.event=new Map(data.calendar.map(r=>[r.id,r]));
     const sectors=visible("sectors"),stocks=visible("stocks"),news=visible("news");
     if(has("sectors"))setValue("stSectorCount",sectors.length);if(has("stocks"))setValue("stStockCount",stocks.length);if(has("news"))setValue("stNewsCount",news.length);
-    if(has("sectors"))updateList("stSectorList",sectors.slice(0,18).map(r=>`<button class="st-sector-row" data-st-kind="sector" data-st-id="${esc(r.id)}" type="button" aria-pressed="${r.id===focusSector}"><strong>${esc(r.name)}</strong><span class="st-numeric ${tone(r.pct)}">${pct(r.pct)}</span><small>${r.stock_codes.length}股 · 拉抬${r.signals["拉抬"]} / 砸盘${r.signals["砸盘"]} · ${esc(r.date||"日期待补")}</small><small class="st-numeric">${money(r.net)}</small>${spark(r.history||[])}</button>`).join("")||EMPTY);
+    if(has("sectors"))updateList("stSectorList",sectors.slice(0,18).map(r=>{const q=sectorQuote(r);return `<button class="st-sector-row" data-st-kind="sector" data-st-id="${esc(r.id)}" type="button" aria-pressed="${r.id===focusSector}" title="${esc(`${q.pct_label} ${q.pct_at||'待补'}；${q.net_label} ${q.net_at||'待补'}。${q.note}`)}"><strong>${esc(r.name)}</strong><span class="st-numeric ${tone(q.pct)}">${pct(q.pct)}</span><small>${r.stock_codes.length}股 · 拉抬${r.signals["拉抬"]} / 砸盘${r.signals["砸盘"]} · ${esc(q.pct_label)} · ${esc(q.pct_at||"日期待补")}</small><small class="st-numeric">${money(q.net)} · ${esc(q.net_label)}</small>${spark(r.history||[])}</button>`;}).join("")||EMPTY);
     if(has("stocks"))updateList("stStockList",stocks.slice(0,20).map(r=>`<button class="st-stock-row" type="button" data-st-kind="stock" data-st-id="${esc(r.code)}"><strong>${esc(r.name)} <small>${esc(r.code)}</small></strong><span class="st-numeric ${tone(r.change_pct)}">${pct(r.change_pct)}</span><small>${esc(r.direction||r.limits.map(e=>kindLabels[e.kind]).join(" / ")||"待核对方向")} · 活跃${n(r.activity)} · 异动${n(r.changes_total)}次</small><small class="st-numeric">${money(r.main_net_inflow)}</small></button>`).join("")||EMPTY);
     const s=data.summary;if(has("summary"))updateList("stEmotion",`<div class="st-emotion-grid"><div><span>涨停 / 跌停</span><strong>${data.limit_as_of?`${s.limit_up}/${s.limit_down}`:"—/—"}</strong></div><div><span>炸板</span><strong>${data.limit_as_of?s.broken:"—"}</strong></div><div><span>最高连板</span><strong>${n(s.max_streak)}</strong></div></div>`);
     $("stLimitDate").textContent=data.limit_as_of||"尚无核验限价";
@@ -142,10 +146,12 @@ import "./lumo_short_term_scene.js";
     if(has("news"))updateList("stNews",newsList(news.slice(0,30)));
     const matrix=sectors.slice(0,7),max=Math.max(1,...matrix.flatMap(r=>Object.values(r.signals)));
     if(has("sectors"))updateList("stMatrix",`<div class="st-matrix"><span>板块</span>${data.signals.map(x=>`<span>${esc(x)}</span>`).join("")}${matrix.map(r=>`${button("sector",r.id,r.name).replace('<button ','<button class="st-matrix-name" ')}${data.signals.map((key,index)=>{const value=r.signals[key];return `<button type="button" class="${value?"st-cell-hit":""}" style="--cell-color:${value>max*.6?"#93c9d2":value>max*.25?"#436576":"#263d4e"}" title="${esc(r.name)} · ${esc(key)} ${value}（只统计已覆盖记录）" data-st-kind="sector" data-st-id="${esc(r.id)}">${value||"·"}</button>`;}).join("")}`).join("")}</div>`);
-    if(!parts||owner==="sectors"){
-    const graphSectors=sectors.filter(r=>r.stock_codes.length).slice(0,8);
-    const graphCodes=[...new Set(graphSectors.flatMap(r=>r.stock_codes.slice(0,4)))].slice(0,24),graphCodeSet=new Set(graphCodes);
+    if(!parts||owner==="sectors"||owner==="scene"){
+    const capacity=sceneCapacity();sceneLayoutKey=JSON.stringify(capacity);const graphSectors=sectors.filter(r=>r.stock_codes.length).slice(0,capacity.sectors);
+    const graphCodes=[],graphCodeSet=new Set(),stockLimit=capacity.columns*3,maxMembers=Math.max(0,...graphSectors.map(row=>row.stock_codes.length));
+    for(let round=0;round<maxMembers&&graphCodes.length<stockLimit;round++)for(const sector of graphSectors){const code=sector.stock_codes[round];if(code&&!graphCodeSet.has(code)){graphCodes.push(code);graphCodeSet.add(code);}if(graphCodes.length>=stockLimit)break;}
     const filteredGraph={...data,graph:{...data.graph,sector_ids:graphSectors.map(r=>r.id),stock_codes:graphCodes,
+      columns:capacity.columns,viewport:[capacity.width,capacity.height],
       edges:graphSectors.flatMap(r=>r.stock_codes.filter(c=>graphCodeSet.has(c)).map(c=>({source:r.id,target:"stock:"+c,kind:"membership"})))}};
     const key=JSON.stringify(filteredGraph.graph);if(key!==graphKey){graphKey=key;scene.setData(filteredGraph);if(focusSector)scene.setSelected(focusSector);}
     $("stGraphMeta").textContent=`展示 ${filteredGraph.graph.sector_ids.length} 板块 / ${graphCodes.length} 标的\n完整记录在两侧“全部”中`;
@@ -160,7 +166,7 @@ import "./lumo_short_term_scene.js";
     const state=drawerState,keyword=state.keyword||"",rows=rowsFor(kind).filter(r=>matches(r,keyword));
     const pages=Math.max(1,Math.ceil(rows.length/pageSize));state.page=Math.min(Math.max(1,state.page||1),pages);const subset=rows.slice((state.page-1)*pageSize,state.page*pageSize);
     let header=[],rowHtml;
-    if(kind==="sectors"){header=["板块","涨跌 / 净额","涨停 / 跌停","拉抬 / 砸盘","关联股 / 消息 / 日程","实际数据日"];rowHtml=r=>`<td>${button("sector",r.id,r.name)}<small>${esc(r.type)} ${esc(r.code)}</small></td><td>${pct(r.pct)}<small>${money(r.net)}</small></td><td>${r.signals["涨停"]} / ${r.signals["跌停"]}</td><td>${r.signals["拉抬"]} / ${r.signals["砸盘"]}</td><td>${r.stock_codes.length} / ${r.news_ids.length} / ${r.event_ids.length}</td><td>${esc(r.date||"待补")}</td>`;}
+    if(kind==="sectors"){header=["板块","涨跌 / 净额与口径","涨停 / 跌停","拉抬 / 砸盘","关联股 / 消息 / 日程","实际数据日"];rowHtml=r=>{const q=sectorQuote(r);return `<td>${button("sector",r.id,r.name)}<small>${esc(r.type)} ${esc(r.code)}</small></td><td>${pct(q.pct)} · ${esc(q.pct_label)}<small>${money(q.net)} · ${esc(q.net_label)}</small></td><td>${r.signals["涨停"]} / ${r.signals["跌停"]}</td><td>${r.signals["拉抬"]} / ${r.signals["砸盘"]}</td><td>${r.stock_codes.length} / ${r.news_ids.length} / ${r.event_ids.length}</td><td>${esc(q.pct_at||"待补")}<small>资金 ${esc(q.net_at||"待补")}</small></td>`;};}
     else if(kind==="stocks"){header=["股票","涨跌 / 现价","方向 / 活跃","异动次数","主力净额","实际数据日"];rowHtml=r=>`<td>${button("stock",r.code,r.name)}<small>${esc(r.code)}</small></td><td>${pct(r.change_pct)}<small>${n(r.price,2)}</small></td><td>${esc(r.direction||"待补")} / ${n(r.activity)}</td><td>${n(r.changes_total)}</td><td>${money(r.main_net_inflow)}</td><td>${esc(r.date||"待补")}</td>`;}
     else if(kind==="calendar"){header=["日程 / 日期","核验状态","来源 / 时间口径"];rowHtml=r=>`<td style="white-space:normal;min-width:230px">${button("event",r.id,r.title)}<small>${esc(r.date)} 至 ${esc(r.end_date)} · ${esc(r.state)}</small></td><td>${r.verified?"官方已核验":"待官方核验"}<small>核验 ${esc(r.verified_at||"未取得")}</small></td><td>${esc(r.source)}<small>${esc(r.timezone)}</small></td>`;}
     else if(["limits","limit_up","limit_down"].includes(kind)){header=["股票 / 日期","事件 / 连续数","价格 / 涨跌","开板 / 封单","首次 / 最后封板"];rowHtml=r=>`<td>${button("stock",r.code,r.name)}<small>${esc(r.code)} · ${esc(r.date)}</small></td><td>${esc(kindLabels[r.kind])}<small>${esc(streakText(r))}</small></td><td>${n(r.close,2)} / ${pct(r.pct)}</td><td>${n(r.open_times)} / ${money(r.fd_amount)}</td><td>${esc(r.first_time||"—")} / ${esc(r.last_time||"—")}</td>`;}
@@ -175,7 +181,7 @@ import "./lumo_short_term_scene.js";
   function renderDetail(kind,id){
     const r=maps[kind]?.get(id);if(!r)return '<p class="st-empty">该记录未在当前快照中，可等待下一次自动更新。</p>';
     if(kind==="sector"){
-      focus(r);return `${metrics([["收盘涨跌",pct(r.pct)],["板块净额",money(r.net)],["关联股票",r.stock_codes.length],["拉抬 / 砸盘",`${r.signals["拉抬"]} / ${r.signals["砸盘"]}`],["涨停 / 跌停",`${r.signals["涨停"]} / ${r.signals["跌停"]}`],["快评活跃度",n(r.activity,1)]])}<h3>板块发生了什么</h3><p>${esc(r.observation)}</p><p>资金日期 ${esc(r.date||"未取得")}；盘口日期 ${esc(r.radar_date||data.radar_as_of||"未取得")}。${esc(r.phase||r.collective||"")}</p>${r.live?`<p class="st-detail-note">另有最新资金观测 ${esc(r.live.quote_at)}：${money(r.live.net)}，与上面的收盘资金分别展示。</p>`:""}<h3>后续验证</h3><p>${esc(r.verification)}</p><h3>全部关联股票 · ${r.stock_codes.length}</h3>${chips("stock",r.stock_codes)}<h3>相关消息 · ${r.news_ids.length}</h3>${newsCards(r.news_ids)}<h3>未来事件 · ${r.event_ids.length}</h3>${eventCards(r.event_ids)}<h3>统计口径</h3><p>${esc(data.method)}</p>`;
+      const q=sectorQuote(r);focus(r);return `${metrics([[q.pct_label,pct(q.pct)],[q.net_label,money(q.net)],["关联股票",r.stock_codes.length],["拉抬 / 砸盘",`${r.signals["拉抬"]} / ${r.signals["砸盘"]}`],["涨停 / 跌停",`${r.signals["涨停"]} / ${r.signals["跌停"]}`],["快评活跃度",n(r.activity,1)]])}<h3>板块发生了什么</h3><p>${esc(r.observation)}</p><p>涨跌时点 ${esc(q.pct_at||"未取得")}；资金时点 ${esc(q.net_at||"未取得")}；盘口日期 ${esc(r.radar_date||data.radar_as_of||"未取得")}。${esc(r.phase||r.collective||"")}</p><p class="st-detail-note">${esc(q.note||q.source||"")}</p>${r.live?`<p class="st-detail-note">原收盘资金 ${esc(r.date||"未取得")}：${money(r.net)}；最新源报价 ${esc(r.live.quote_at)}：${money(r.live.net)}。</p>`:""}<h3>后续验证</h3><p>${esc(r.verification)}</p><h3>全部关联股票 · ${r.stock_codes.length}</h3>${chips("stock",r.stock_codes)}<h3>相关消息 · ${r.news_ids.length}</h3>${newsCards(r.news_ids)}<h3>未来事件 · ${r.event_ids.length}</h3>${eventCards(r.event_ids)}<h3>统计口径</h3><p>${esc(data.method)}</p>`;
     }
     if(kind==="stock"){
       const ranking=r.hot_rank?`<p class="st-detail-note">股吧人气原始排名 #${n(r.hot_rank)} · 抓取 ${esc(r.hot_fetched_at)}。抓取时间不是排名生成时间，盘口报价另以实际行情日为准。<br><a href="https://guba.eastmoney.com/rank/" target="_blank" rel="noopener noreferrer" data-st-external>查看人气榜来源 ↗</a></p>`:"";
@@ -209,7 +215,9 @@ import "./lumo_short_term_scene.js";
   }
   function download(content,name,type){const url=URL.createObjectURL(new Blob([content],{type})),a=document.createElement("a");a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   function exportList(){const kind=drawerState.kind.slice(5),rows=rowsFor(kind).filter(r=>matches(r,drawerState.keyword));const keys=kind==="sectors"?["name","code","type","date","pct","net","observation"]:kind==="stocks"?["name","code","date","price","change_pct","direction","activity","changes_total","main_net_inflow"]:kind==="calendar"?["title","date","end_date","time","timezone","verified","verified_at","source","url","summary","watch"]:["limits","limit_up","limit_down"].includes(kind)?["name","code","date","kind","streak","streak_lower_bound","fall_days","close","pct","up_limit","down_limit","first_time","last_time","open_times","fd_amount"]:kind==="hot_stocks"?["hot_rank","hot_rank_before","hot_rank_change","hot_rank_period","name","code","hot_source","hot_fetched_at"]:kind==="popularity_rises"?["name","code","hot_rank_before","hot_rank","hot_rank_change","hot_rank_period","hot_fetched_at","hot_source"]:["big_buys","big_sells"].includes(kind)?["occurred_at","time","date","code","name","label","amount","price","volume","change_pct","raw_info","source","date_basis","amount_basis"]:["title","published_at","date","time_basis","source","url","summary"];
-    const cell=value=>{let s=String(value??"");if(/^[=+\-@]/.test(s)&&!/^[-+]?\d+(\.\d+)?$/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';};download("\uFEFF"+[keys,...rows.map(r=>keys.map(k=>r[k]))].map(r=>r.map(cell).join(",")).join("\r\n"),`短线大屏_${kind}_${data.today}.csv`,"text/csv;charset=utf-8");}
+    if(kind==="sectors")keys.push("display_pct","pct_label","pct_at","display_net","net_label","net_at","coverage","quote_note");
+    const exportRows=kind==="sectors"?rows.map(r=>{const q=sectorQuote(r);return {...r,display_pct:q.pct,display_net:q.net,pct_label:q.pct_label,pct_at:q.pct_at,net_label:q.net_label,net_at:q.net_at,coverage:JSON.stringify(q.coverage||{}),quote_note:q.note};}):rows;
+    const cell=value=>{let s=String(value??"");if(/^[=+\-@]/.test(s)&&!/^[-+]?\d+(\.\d+)?$/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';};download("\uFEFF"+[keys,...exportRows.map(r=>keys.map(k=>r[k]))].map(r=>r.map(cell).join(",")).join("\r\n"),`短线大屏_${kind}_${data.today}.csv`,"text/csv;charset=utf-8");}
   function liveStatus(){const historical=data?.historical;$("stLiveState").textContent=historical?"历史快照 · 自动滚动":"自动监控 · 分区独立更新";$("stLiveState").title="盘口15秒 · 个股异动1分钟 · 消息45秒 · 人气3分钟 · 板块资金10分钟 · 收盘核验30分钟；休市降低采集频率";}
   function stopFeeds(){for(const state of feedStates.values())clearTimeout(state.timer);feedStates.clear();fieldRevisions.clear();for(const clock of root.querySelectorAll(".st-feed-clock"))clock.remove();}
   function markFeed(kind,seconds,value={}){const hosts={radar:["stStockList"],news:["stNews"],popularity:["stHotList","stRapidList"],sectors:["stSectorList","stMatrix"],limits:["stUpList","stDownList","stEmotion"],orders:["stBuyList","stSellList"]};for(const id of hosts[kind]||[]){const header=$(id).closest(".st-panel")?.querySelector("header");if(!header)continue;let clock=header.querySelector(".st-feed-clock");if(!clock){clock=document.createElement("small");clock.className="st-feed-clock";header.querySelector("h2").after(clock);}clock.textContent=seconds>=60?`${seconds/60}分`:`${seconds}秒`;clock.dataset.state=value.error?"error":value.running?"loading":"ready";clock.title=`每${seconds}秒独立检查${value.error?" · "+value.error:value.running?" · 后台采集中":""}${value.checked_at?" · 最近成功检查 "+value.checked_at:""}；行情日期以分区记录为准`;}}
@@ -259,6 +267,7 @@ import "./lumo_short_term_scene.js";
   $("stScrollToggle").addEventListener("click",()=>{scrolling=!scrolling;$("stScrollToggle").setAttribute("aria-pressed",String(scrolling));$("stScrollToggle").textContent=scrolling?"暂停滚动":"继续滚动";syncAllScroll();});
   root.addEventListener("wheel",event=>{const host=event.target.closest(".st-scroll"),state=host&&scrollStates.get(host);if(state){state.manual=performance.now()+8000;syncScroll(host,state);clearTimeout(state.manualTimer);state.manualTimer=setTimeout(()=>syncScroll(host,state),8100);}},{passive:true});
   document.addEventListener("visibilitychange",()=>{syncAllScroll();if(!document.hidden){if(!data)load();else loadOrders();}});
+  let sceneResizeTimer;const sceneLayoutObserver=new ResizeObserver(()=>{clearTimeout(sceneResizeTimer);if(data&&!disposed&&JSON.stringify(sceneCapacity())!==sceneLayoutKey)sceneResizeTimer=setTimeout(()=>{if(data&&!disposed)render(["graph"],"scene");},140);});sceneLayoutObserver.observe($("stScene"));
   setupScroll();load();
-  window.addEventListener("pagehide",()=>{disposed=true;stopFeeds();clearArrivals();clearTimeout(orderTimer);clearTimeout(searchTimer);for(const state of scrollStates.values()){state.animation?.cancel();state.observer.disconnect();clearTimeout(state.manualTimer);}++loadSequence;++orderSequence;scene.destroy();});
+  window.addEventListener("pagehide",()=>{disposed=true;sceneLayoutObserver.disconnect();stopFeeds();clearArrivals();clearTimeout(sceneResizeTimer);clearTimeout(orderTimer);clearTimeout(searchTimer);for(const state of scrollStates.values()){state.animation?.cancel();state.observer.disconnect();clearTimeout(state.manualTimer);}++loadSequence;++orderSequence;scene.destroy();});
 })();

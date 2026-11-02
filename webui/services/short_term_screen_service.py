@@ -194,6 +194,9 @@ def _fresh_sectors():
             # 盘中资金独立记录，不覆盖收盘资金的实际日期。
             by_code = {r["code"]: r for r in live["rows"]}
             value["rows"] = [{**r, "live": by_code.get(r["code"])} for r in value.get("rows", [])]
+            known = {r["code"] for r in value["rows"]}
+            value["rows"].extend({"code": r["code"], "name": r["name"], "type": r["type"], "live": r}
+                                 for r in live["rows"] if r["code"] not in known)
         return value
     finally:
         close_conn()

@@ -3,7 +3,7 @@ import datetime as dt
 
 import pytest
 
-from analysis.short_term_screen import build_report, normalize_calendar, news_rows, announced_events, safe_url, themes
+from analysis.short_term_screen import build_report, normalize_calendar, news_rows, announced_events, safe_url, themes, sector_quote
 from webui.services import short_term_screen_service as service
 from webui.services.short_term_calendar import CONFERENCES
 
@@ -27,6 +27,48 @@ def inputs():
 
 def report():
     return build_report(inputs(),"2026-11-01","2026-11-01T12:00:00+08:00")
+
+
+def test_unmatched_sector_uses_same_day_covered_members_with_explicit_basis():
+    data=inputs()
+    data["radar"]["stocks"] += [{"code":"600003","name":"航空乙","industry":"航空装备","change_pct":3,"main_net_inflow":200},
+                                {"code":"600004","name":"旧日航空","industry":"航空装备","trade_date":"2026-10-29","change_pct":90,"main_net_inflow":9000}]
+    value=build_report(data,"2026-11-01","2026-11-01T12:00:00+08:00")
+    sector=next(r for r in value["sectors"] if r["name"]=="航空装备")
+    assert sector["pct"] is None and sector["net"] is None
+    quote=sector["quote"]
+    assert quote["pct"]==-1 and quote["net"]==200
+    assert quote["pct_label"]=="成分均涨" and quote["net_label"]=="成分净额"
+    assert quote["coverage"]=={"date":"2026-10-30","stocks":2,"pct_count":2,"flow_count":1}
+    assert "非板块指数或全行业资金" in quote["note"]
+    exact=next(r for r in value["sectors"] if r["name"]=="半导体")
+    assert exact["quote"]["pct"]==3 and exact["quote"]["net"]==1e9
+
+
+def test_sector_live_quote_requires_matching_code_and_today_and_keeps_close():
+    row={"code":"BK0001","pct":3,"net":100,"date":"2026-10-30",
+         "live":{"code":"BK0001","quote_at":"2026-11-01T10:30:00+08:00","pct":0,"net":-20}}
+    quote=sector_quote(row,[],None,"2026-11-01")
+    assert quote["pct"]==0 and quote["net"]==-20 and quote["net_at"].startswith("2026-11-01")
+    assert row["pct"]==3 and row["net"]==100
+    for live in ({**row["live"],"code":"BK0002"},{**row["live"],"quote_at":"2026-10-30T15:00:00"}):
+        assert sector_quote({**row,"live":live},[],None,"2026-11-01")["net"]==100
+    missing=sector_quote({"pct":None,"net":None},[{"date":"2026-10-30","change_pct":None,"main_net_inflow":None}],"2026-10-30","2026-11-01")
+    assert missing["pct"] is None and missing["net"] is None
+    undated=sector_quote({"pct":None,"net":None},[{"date":None,"change_pct":5,"main_net_inflow":50}],None,"2026-11-01")
+    assert undated["pct"] is None and undated["net"] is None
+
+
+def test_fresh_sectors_keeps_new_live_boards_and_closing_values(monkeypatch):
+    monkeypatch.setattr(service.sector_depth_service,"query",lambda:{"as_of":"2026-10-30","rows":[{"code":"BK0001","name":"半导体","type":"行业","pct":3,"net":100}]})
+    monkeypatch.setattr(service.tushare_client,"recent_trade_dates",lambda count:[])
+    live=[{"code":"BK0001","name":"半导体","type":"行业","pct":2,"net":50,"quote_at":"2026-11-01T10:30:00+08:00"},
+          {"code":"BK0002","name":"新板块","type":"概念","pct":1,"net":30,"quote_at":"2026-11-01T10:30:00+08:00"}]
+    monkeypatch.setattr(service.sector_depth_service,"fetch_live",lambda:{"rows":live})
+    value=service._fresh_sectors()
+    assert value["as_of"]=="2026-10-30" and len(value["rows"])==2
+    assert value["rows"][0]["net"]==100 and value["rows"][0]["live"]["net"]==50
+    assert value["rows"][1]["code"]=="BK0002" and "net" not in value["rows"][1]
 
 
 def test_popularity_rises_preserve_rank_changes_and_prioritize_current_rank():
