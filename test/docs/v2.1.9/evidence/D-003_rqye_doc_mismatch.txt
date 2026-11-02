@@ -1,0 +1,26 @@
+D-003 文档/实现不一致核查（代码正确，文档错误）
+================================================
+
+位置：analysis/market_health_fusion.py:54
+docstring 原文：
+    """沪深两所当日齐全才合计；融券余量跨标的单位混合，不累加。"""
+
+实现（同文件 66-68 行）：rqye 位于求和字段列表，被沪深两所相加。
+现有测试 tests/test_market_health_fusion.py:36 断言 rqye == 5（2+3），固化累加行为。
+
+口径核查（TuShare 官方 margin 接口文档，即本代码使用的交易所汇总接口）：
+  https://tushare.pro/wctapi/documents/58.md
+  输出参数：
+    rzye   融资余额(元)
+    rzmre  融资买入额(元)
+    rzche  融资偿还额(元)
+    rqye   融券余额(元)        <-- 单位是“元”，不是“余量/股”
+    rqyl   融券余量(股,份,手)   <-- “余量”对应 rqyl，不是 rqye
+    rzrqye 融资融券余额(元)
+
+结论：
+1. rqye 是融券“余额”，单位为元，与 rzye 等金额字段单位一致；沪深两所相加单位统一、数学成立，代码正确。
+2. docstring 把 rqye（融券余额/元）误称为“融券余量”（余量实际是 rqyl/股），并错误声称“单位混合、不累加”，属文档措辞错误。
+3. rqye 累加结果仅在 details.series 展示，build_fusion 计分只取 rzye/rzmre/rzche/net_buy（见 168-178 行），rqye 不参与任何压力计分，故对计算结果零影响。
+
+影响等级：P4（文档级，最低）。建议修正 docstring，无需改代码。

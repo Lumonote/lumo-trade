@@ -1,0 +1,5 @@
+=== D-001 复现：market_snapshot 对非 dict 元素崩溃 ===
+['x'] -> AttributeError : 'str' object has no attribute 'get'
+[123] -> AttributeError : 'int' object has no attribute 'get'
+[None] -> AttributeError : 'NoneType' object has no attribute 'get'
+[['nested']] -> AttributeError : 'list' object has no attribute 'get'

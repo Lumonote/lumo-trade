@@ -36,6 +36,7 @@ from webui.services import sector_depth_service
 from webui.services import market_capital_service
 from webui.services import market_macro_service
 from webui.services import market_limits_service
+from webui.services import short_term_screen_service
 from webui.services.watchlist_service import WatchlistStorageError
 from data_store import quant_radar_repo, star_orbit_repo
 
@@ -402,6 +403,8 @@ def prediction_console(request: Request) -> Response:
 
 def _desktop_response(page: str = "features") -> Response:
     page = webui_core.resolve_desktop_page(page)
+    if page == "short_term":
+        return _render_template("short_term_screen.html", desktop_mode=webui_core.desktop_mode_enabled())
     if page not in webui_core.DESKTOP_PAGES:
         return _text_response("Not Found", status_code=404)
     return _render_template(
@@ -876,6 +879,41 @@ def opportunity_canvas(request: Request) -> Response:
 
 
 # ----------------------------- 风险·机遇 作战大屏 command center -----------------------------
+
+@_native_get("/api/short-term/overview")
+def short_term_overview(request: Request) -> Response:
+    try:
+        return _json_response(short_term_screen_service.query(webui_core.JOB_SERVICE,
+            date=str(_query_value(request, "date", "") or "").strip()))
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_post("/api/short-term/refresh")
+def short_term_refresh(request: Request) -> Response:
+    return _json_response({"job": short_term_screen_service.start_refresh(
+        webui_core.JOB_SERVICE, webui_core.MARKET_INTELLIGENCE_SERVICE)}, status_code=202)
+
+
+@_native_get("/api/short-term/section")
+def short_term_section(request: Request) -> Response:
+    try:
+        return _json_response(short_term_screen_service.section(
+            str(_query_value(request, "kind", "")), webui_core.JOB_SERVICE,
+            date=str(_query_value(request, "date", "") or ""), keyword=_query_value(request, "q", "")))
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_get("/api/short-term/detail")
+def short_term_detail(request: Request) -> Response:
+    try:
+        return _json_response(short_term_screen_service.detail(
+            str(_query_value(request, "kind", "")), str(_query_value(request, "id", "")), webui_core.JOB_SERVICE,
+            date=str(_query_value(request, "date", "") or "")))
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
 
 @_native_get("/api/command-center/overview")
 def command_center_overview(request: Request) -> Response:

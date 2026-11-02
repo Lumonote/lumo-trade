@@ -58,6 +58,7 @@
             <p>{{ '本地报告与模块运行状态' if active_page == 'reports' else page_subtitle }}</p>
           </div>
 	          <div class="toolbar">
+	            <button id="shortTermScreenBtn" class="button secondary shell-button" type="button" title="全屏打开短线作战大屏，可返回当前页面">短线大屏</button>
 	            <button id="sidebarToggleBtn" class="button secondary shell-button" type="button" title="收起/展开菜单">菜单</button>
 	            <button id="workspaceFullscreenBtn" class="button secondary shell-button" type="button" title="全屏显示右侧功能">全屏</button>
 	            {% if active_page != 'features' %}
@@ -1761,6 +1762,7 @@
       }
     </script>
     <script src="/static/lumo_panic.js?v={{ asset_v('lumo_panic.js') }}"></script>
+    <script src="/static/lumo_short_term_launcher.js?v={{ asset_v('lumo_short_term_launcher.js') }}"></script>
     {% if active_page == 'market_health' %}
     <script src="/static/lumo_market_health.js?v={{ asset_v('lumo_market_health.js') }}"></script>
     <script src="/static/lumo_sector_depth.js?v={{ asset_v('lumo_sector_depth.js') }}"></script>
