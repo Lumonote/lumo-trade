@@ -10,8 +10,8 @@
     <div class="st-controlbar">
       <label class="st-search">全局检索<input id="stSearch" type="search" placeholder="板块、股票、消息、会议"></label>
       <label>快照日 <input id="stDate" type="date" aria-label="历史快照日期"></label><button id="stLatest" type="button">回到最新</button>
-      <label class="st-auto"><input id="stAuto" type="checkbox" checked>自动更新</label><button id="stMotion" type="button" aria-pressed="true">动效开</button>
-      <div class="st-screen-actions"><button id="stRefresh" type="button">刷新数据</button><button id="stFullscreen" type="button">全屏 / 退出全屏</button><button id="stReturn" class="st-return" type="button">返回 ↗</button></div>
+      <span id="stLiveState" class="st-live-state" role="status">自动监控 · 正在连接</span><button id="stScrollToggle" type="button" aria-pressed="true">暂停滚动</button><button id="stMotion" type="button" aria-pressed="true">动效开</button>
+      <div class="st-screen-actions"><button id="stFullscreen" type="button">全屏 / 退出全屏</button><button id="stReturn" class="st-return" type="button">返回 ↗</button></div>
     </div>
     <div id="stError" class="st-error" role="alert" hidden></div><div id="stJob" class="st-job" role="status" hidden></div>
     <div class="st-workspace">
@@ -23,7 +23,7 @@
       <section class="st-center">
         <section class="st-scene-panel"><header class="st-scene-title"><div><span>SECTOR × STOCK × CATALYST</span><h2>短线关联态势</h2></div><div id="stGraphMeta">已核验的归属关系</div></header><canvas id="stScene" aria-label="板块与股票三维关联态势图"></canvas><div id="stNodes" aria-label="可点选板块与股票"></div><div class="st-scene-legend"><span><i></i>行业 / 成分归属</span><span><i></i>关注板块</span><small>线束是归属关系，不代表实际资金路径</small></div><div id="stFocus" class="st-focus"><span>点选节点，穿透异动、资金与消息。</span></div></section>
         <div class="st-center-bottom">
-          <section class="st-panel st-core-panel"><header><h2><b>04</b> 当日核心消息</h2><button type="button" data-st-list="core_news">全部 <span id="stCoreCount">—</span></button></header><div id="stCoreNews" class="st-scroll"></div></section>
+          <section class="st-panel st-buy-panel"><header><h2><b>04</b> 大单买入监控</h2><button type="button" data-st-list="big_buys">已采集 <span id="stBuyCount">—</span></button></header><div id="stBuyAsOf" class="st-feed-note">正在连接盘口异动</div><div id="stBuyList" class="st-scroll"></div></section>
           <section class="st-panel st-limit-panel"><header><h2>当日涨停股票</h2><button type="button" data-st-list="limit_up">全部 <span id="stUpCount">—</span></button></header><div class="st-feed-note" id="stUpAsOf"></div><div id="stUpList" class="st-scroll"></div></section>
           <section class="st-panel st-limit-panel"><header><h2>当日跌停股票</h2><button type="button" data-st-list="limit_down">全部 <span id="stDownCount">—</span></button></header><div class="st-feed-note" id="stDownAsOf"></div><div id="stDownList" class="st-scroll"></div></section>
           <section class="st-panel st-heat-panel"><header><h2>股票热度排行</h2><button type="button" data-st-list="hot_stocks">全部 <span id="stHotCount">—</span></button></header><div class="st-feed-note" id="stHotAsOf"></div><div id="stHotList" class="st-scroll"></div></section>
@@ -31,9 +31,9 @@
         </div>
       </section>
       <aside class="st-right">
-        <section class="st-panel st-calendar-panel"><header><h2><b>05</b> 未来催化日历</h2><button type="button" data-st-list="calendar">完整日程 →</button></header><div class="st-calendar-controls"><button type="button" data-st-horizon="7" aria-pressed="false">7日</button><button type="button" data-st-horizon="14" aria-pressed="false">14日</button><button type="button" data-st-horizon="45" aria-pressed="true">45日</button><small>含已确认与待核验预告</small></div><div id="stCalendar" class="st-scroll"></div></section>
+        <section class="st-panel st-sell-panel"><header><h2><b>05</b> 大笔卖出监控</h2><button type="button" data-st-list="big_sells">已采集 <span id="stSellCount">—</span></button></header><div id="stSellAsOf" class="st-feed-note">正在连接盘口异动</div><div id="stSellList" class="st-scroll"></div></section>
         <section class="st-panel st-matrix-panel"><header><h2><b>06</b> 板块 × 信号矩阵</h2><small>点击格子查看依据</small></header><div id="stMatrix"></div></section>
-        <section class="st-panel st-news-panel"><header><h2><b>07</b> 短线快讯流</h2><button type="button" data-st-list="short_news">全部 <span id="stNewsCount">—</span></button></header><div class="st-feed-note">实时线索 · 按时间排列 · 已排除核心消息</div><div id="stNews" class="st-scroll"></div></section>
+        <section class="st-panel st-news-panel"><header><h2><b>07</b> 市场快讯流</h2><button type="button" data-st-list="news">全部 <span id="stNewsCount">—</span></button></header><div class="st-feed-note">自动更新 · 鼠标移入暂停滚动 · 点击查看全文</div><div id="stNews" class="st-scroll"></div></section>
       </aside>
     </div>
     <footer class="st-footer"><div><i id="stStatusDot"></i><span id="stSourceSummary">读取本地快照…</span></div><span>消息关联与研究刻度仅用于观察，不构成确定因果或交易指令</span><button type="button" id="stMethod">口径与缺失说明</button></footer>

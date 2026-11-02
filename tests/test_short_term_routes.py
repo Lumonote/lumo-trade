@@ -27,9 +27,9 @@ def test_global_entry_and_standalone_screen_assets(runtime):
         response=client.get("/desktop/short_term")
         assert response.status_code==200 and 'id="stScreen"' in response.text and 'id="stReturn"' in response.text
         assert 'class="sidebar"' not in response.text
-        for removed in ('id="stSources"', 'id="stExport"', 'class="st-brand"', 'class="st-session"', 'data-st-mode='):
+        for removed in ('id="stSources"', 'id="stExport"', 'class="st-brand"', 'class="st-session"', 'data-st-mode=', 'id="stRefresh"', 'id="stAuto"', 'id="stCoreNews"', 'id="stCalendar"'):
             assert removed not in response.text
-        for panel in ('id="stUpList"','id="stDownList"','id="stHotList"','id="stRapidList"'):
+        for panel in ('id="stUpList"','id="stDownList"','id="stHotList"','id="stRapidList"','id="stBuyList"','id="stSellList"','id="stScrollToggle"'):
             assert panel in response.text
         for name in ("lumo_short_term_launcher.js","lumo_short_term_screen.js","lumo_short_term_scene.js","lumo_short_term_scene_fallback.js","lumo_short_term_screen.css","vendor/three-r180/three.module.min.js","vendor/three-r180/three.core.min.js"):
             assert client.get("/static/"+name).status_code==200
@@ -55,3 +55,25 @@ def test_invalid_short_term_query_is_400(runtime):
         assert client.get("/api/short-term/overview",query_params={"date":"invalid"}).status_code==400
         assert client.get("/api/short-term/section",query_params={"kind":"invalid"}).status_code==400
         assert client.get("/api/short-term/detail",query_params={"kind":"invalid","id":"anything"}).status_code==400
+        assert client.get("/api/short-term/orders",query_params={"date":"invalid"}).status_code==400
+        assert client.get("/api/short-term/feed",query_params={"kind":"invalid"}).status_code==400
+
+
+def test_short_term_orders_route_uses_independent_auto_monitor(runtime,monkeypatch):
+    from robyn.testing import TestClient
+    calls=[]
+    def snapshot(**kwargs):calls.append(kwargs);return {"big_buys":[],"big_sells":[],"refreshing":True}
+    monkeypatch.setattr(runtime.short_term_screen_service.short_term_orders,"snapshot",snapshot)
+    with TestClient(runtime.app) as client:
+        assert client.get("/api/short-term/orders").json()["refreshing"]
+    assert calls==[{"date":"","auto":True}]
+
+
+def test_short_term_feed_route_passes_independent_version(runtime,monkeypatch):
+    from robyn.testing import TestClient
+    calls=[]
+    def feed(kind,intelligence,**kwargs):calls.append((kind,kwargs));return {"kind":kind,"changed":False}
+    monkeypatch.setattr(runtime.short_term_screen_service,"feed",feed)
+    with TestClient(runtime.app) as client:
+        assert client.get("/api/short-term/feed",query_params={"kind":"news","after":"abc"}).json()["changed"] is False
+    assert calls==[("news",{"after":"abc","date":""})]

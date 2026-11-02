@@ -895,6 +895,25 @@ def short_term_refresh(request: Request) -> Response:
         webui_core.JOB_SERVICE, webui_core.MARKET_INTELLIGENCE_SERVICE)}, status_code=202)
 
 
+@_native_get("/api/short-term/orders")
+def short_term_orders(request: Request) -> Response:
+    try:
+        return _json_response(short_term_screen_service.short_term_orders.snapshot(
+            date=str(_query_value(request,"date","") or "").strip(),auto=True))
+    except (ValueError,TypeError) as exc:
+        return _json_response({"error":str(exc)},status_code=400)
+
+
+@_native_get("/api/short-term/feed")
+def short_term_feed(request: Request) -> Response:
+    try:
+        return _json_response(short_term_screen_service.feed(
+            str(_query_value(request,"kind","") or ""),webui_core.MARKET_INTELLIGENCE_SERVICE,
+            after=str(_query_value(request,"after","") or ""),date=str(_query_value(request,"date","") or "")))
+    except (ValueError,TypeError) as exc:
+        return _json_response({"error":str(exc)},status_code=400)
+
+
 @_native_get("/api/short-term/section")
 def short_term_section(request: Request) -> Response:
     try:

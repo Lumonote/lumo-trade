@@ -260,6 +260,18 @@ def build_report(sources, today, generated_at):
         if not raw.get("rank_only"):
             row["hot_price"] = number(raw.get("latest_price"))
             row["hot_change_pct"] = number(raw.get("change_pct"))
+    orders=sources.get("orders") or {}
+    big_buys=orders.get("big_buys") or []
+    big_sells=orders.get("big_sells") or []
+    for event in big_buys+big_sells:
+        code=str(event.get("code") or "")
+        if not re.fullmatch(r"\d{6}",code):
+            continue
+        row=stocks.setdefault(code,{"code":code,"name":clean(event.get("name") or code,80),"date":event.get("date"),
+            "price":None,"change_pct":None,"direction":"","activity":None,"changes_total":None,
+            "sector_ids":[],"news_ids":[],"event_ids":[],"limits":[],"timeline":[],
+            "membership_basis":"盘口异动源未提供行业归属"})
+        row.setdefault("order_events",[]).append(event)
     for row in stocks.values():
         for ident in row["sector_ids"]:
             sector_map[ident]["stock_codes"].append(row["code"])
@@ -317,6 +329,8 @@ def build_report(sources, today, generated_at):
     return {"today": today, "generated_at": generated_at, "sectors": sectors, "stocks": stock_rows,
             "news": news, "core_news": core_news, "short_news": short_news, "calendar": calendar, "limits": limit_events, "summary": summary,
             "limit_up": limit_up, "limit_down": limit_down, "hot_stocks": hot_stocks, "popularity_rises": popularity_rises,
+            "big_buys":big_buys,"big_sells":big_sells,"order_events":sorted(big_buys+big_sells,key=lambda r:r.get("occurred_at", ""),reverse=True),
+            "order_meta":orders.get("order_meta",{}),
             "hot_fetched_at": popularity.get("fetched_at"),
             "radar_as_of": radar.get("fallback_date") or radar.get("snapshot_date"), "limit_as_of": limits.get("as_of"),
             "sector_as_of": sector_data.get("as_of"), "signals": list(SIGNALS),
