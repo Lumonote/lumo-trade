@@ -155,8 +155,9 @@ def snapshot(date="", auto=False):
                         close_conn()
                         with _lock:_running=False
                 threading.Thread(target=worker,name="short-term-orders",daemon=True).start()
-    return {"big_buys":(value.get("buy") or {}).get("rows",[]),"big_sells":(value.get("sell") or {}).get("rows",[]),
-        "order_meta":{side:{k:v for k,v in (value.get(side) or {}).items() if k!="rows"} for side in KINDS},
+    visible=lambda side:[r for r in (value.get(side) or {}).get("rows",[]) if date or r.get("date")==current.date().isoformat()]
+    return {"big_buys":visible("buy"),"big_sells":visible("sell"),
+        "order_meta":{side:({k:v for k,v in (value.get(side) or {}).items() if k!="rows"} if date or (value.get(side) or {}).get("date")==current.date().isoformat() else {"date":None,"error":"今日盘口记录正在自动连接"}) for side in KINDS},
         "error":value.get("error", ""),"refreshing":_running if not date else False,
         "poll_seconds":15,"source_page_size":PAGE_SIZE,"retained_per_side":KEEP,
         "note":"大笔买卖为盘口异动提示；只累计实际采集记录，不等同于完整逐笔委托或成交清单。"}

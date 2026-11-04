@@ -67,7 +67,7 @@ def test_failed_source_keeps_visible_snapshot_and_retries_independently(isolated
 
 
 def test_feed_intervals_differ_and_history_never_launches_workers(isolated,monkeypatch):
-    assert service.FEED_INTERVALS=={"radar":60,"news":45,"popularity":180,"sectors":600,"limits":1800}
+    assert service.FEED_INTERVALS=={"radar":60,"news":45,"popularity":180,"sectors":120,"limits":90}
     monkeypatch.setattr(service,"query",lambda **kwargs:{"news":[{"id":"old"}]})
     assert service.feed("news",None,date="2026-10-30")["historical"]
     assert not service._feeds

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -225,7 +226,7 @@ def _fetch_market_snapshot(limit: int = 400) -> List[Dict[str, Any]]:
         "pn": "1", "pz": str(limit), "po": "1", "np": "1", "fltt": "2", "invt": "2",
         "fid": "f10",  # 量比降序:量化高频博弈的第一信号
         "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-        "fields": "f12,f14,f2,f3,f7,f8,f10,f22,f62,f100",
+        "fields": "f12,f14,f2,f3,f7,f8,f10,f22,f62,f100,f124",
         "_": str(int(time.time() * 1000)),
     }
     url = "https://push2.eastmoney.com/api/qt/clist/get?" + urllib.parse.urlencode(params)
@@ -252,7 +253,9 @@ def _fetch_market_snapshot(limit: int = 400) -> List[Dict[str, Any]]:
                 "turnover": _num(row.get("f8")),
                 "volume_ratio": _num(row.get("f10")),
                 "speed": _num(row.get("f22")),
-                "main_net_inflow": _num(row.get("f62"), 0),
+                "main_net_inflow": _num(row.get("f62")),
+                "quote_at": _dt.datetime.fromtimestamp(float(row["f124"]),_dt.timezone(_dt.timedelta(hours=8))).isoformat() if _num(row.get("f124")) else None,
+                "flow_date": _dt.datetime.fromtimestamp(float(row["f124"]),_dt.timezone(_dt.timedelta(hours=8))).date().isoformat() if _num(row.get("f124")) else None,
                 "industry": str(row.get("f100") or "").strip(),
             })
         if items:
@@ -285,6 +288,8 @@ def _flows_df_to_snapshot(df: Any) -> List[Dict[str, Any]]:
             "volume_ratio": None,
             "speed": None,
             "main_net_inflow": main_net * unit_mult if main_net is not None else None,
+            "flow_date": _iso(str(row.get("trade_date") or "").replace("-","")),
+            "price_date": _iso(str(row.get("trade_date") or "").replace("-","")),
             "industry": "",
         })
     rows.sort(key=lambda r: -abs(r.get("main_net_inflow") or 0.0))
@@ -353,6 +358,7 @@ def _fetch_tencent_quotes(codes: List[str], batch: int = 80,
             if len(fields) <= 49 or not fields[2].strip():
                 continue
             out[fields[2].strip()] = {
+                "quote_at": _dt.datetime.strptime(fields[30],"%Y%m%d%H%M%S").isoformat()+"+08:00" if re.fullmatch(r"\d{14}",fields[30]) else None,
                 "price": _num(fields[3]),
                 "change_pct": _num(fields[32]),
                 "turnover": _num(fields[38]),
@@ -1210,6 +1216,9 @@ def _light_stock_item(code: str, agg: Dict[str, Any], snap: Dict[str, Any],
         "turnover": snap.get("turnover"),
         "amplitude": snap.get("amplitude"),
         "main_net_inflow": snap.get("main_net_inflow"),
+        "quote_at": snap.get("quote_at"),
+        "price_date": snap.get("price_date"),
+        "flow_date": snap.get("flow_date"),
         "changes_total": agg.get("total") or 0,
         "changes_bull": agg.get("bull") or 0,
         "changes_bear": agg.get("bear") or 0,

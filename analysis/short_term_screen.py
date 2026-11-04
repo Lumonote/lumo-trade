@@ -176,11 +176,13 @@ def classify_news(item):
             "watch_points": watch, "classification_basis": "规则筛选，非人工确认或投资评级；原文与公告为准"}
 
 
-def sector_quote(row, members, radar_date, today):
+def sector_quote(row, members, radar_date, today, current_only=False):
     """不同分类不强行映射：指数报价与覆盖成分汇总分别标明口径、日期和覆盖数。"""
     quote = {"pct": row.get("pct"), "net": row.get("net"), "pct_label": "板块涨跌",
              "net_label": "板块净额", "pct_at": row.get("date"), "net_at": row.get("date"),
              "source": row.get("source"), "note": ""}
+    if current_only and row.get("date")!=today:
+        quote.update(pct=None,net=None,pct_at=None,net_at=None)
     live = row.get("live") or {}
     stamp = text_field(live.get("quote_at"))
     # 同日、同代码的源报价才能替代展示值；收盘原值仍保留在板块行中。
@@ -200,17 +202,38 @@ def sector_quote(row, members, radar_date, today):
     if quote["net"] is None and flows:
         quote.update(net=sum(flows), net_label="成分净额", net_at=radar_date)
     if quote["pct_label"] == "成分均涨" or quote["net_label"] == "成分净额":
+        quote["source"]="雷达同日覆盖成分汇总"
         quote["note"] = (f"雷达行业分类；同日覆盖{len(current)}只股票，涨跌幅有效{len(changes)}只、"
                          f"资金有效{len(flows)}只。成分均涨为等权平均，成分净额为已覆盖股票主力净流入合计，非板块指数或全行业资金。")
     return {**quote, "coverage": coverage}
 
 
-def build_report(sources, today, generated_at):
+def rank_sectors(rows, mode="heat"):
+    """按同日成分平均活跃度或净流入排序，缺值置后，不用成分数量替代热度。"""
+    def key(row):
+        quote = row.get("quote") or {}
+        value = number(quote.get("net")) if mode == "flow" else number(row.get("trading_heat"))
+        stamp = quote.get("net_at") if mode == "flow" else row.get("heat_date")
+        try:
+            day = dt.date.fromisoformat(str(stamp or "")[:10]).toordinal()
+        except ValueError:
+            day = 0
+        secondary = number(row.get("trading_heat")) if mode == "flow" else number(quote.get("net"))
+        return (value is None, -day, -(value or 0), secondary is None, -(secondary or 0), row["name"], row["id"])
+    return sorted(rows, key=key)
+
+
+def build_report(sources, today, generated_at, current_only=False):
     radar = sources.get("radar") or {}
     sector_data = sources.get("sectors") or {}
     limits = sources.get("limits") or {}
+    if current_only:
+        if (radar.get("fallback_date") or radar.get("snapshot_date"))!=today:radar={}
+        else:radar={**radar,"stocks":[r for r in radar.get("stocks",[]) if not r.get("trade_date") or r["trade_date"]==today]}
+        if limits.get("as_of")!=today:limits={}
     limit_events = [dict(r) for r in limits.get("events", []) if r.get("date") == limits.get("as_of")]
     news = news_rows(sources, today)
+    if current_only:news=[r for r in news if r["is_today"]]
     calendar = normalize_calendar((sources.get("calendar") or []) + announced_events(news, today), today)
     sector_map, name_to_id, stocks = {}, {}, {}
 
@@ -231,7 +254,7 @@ def build_report(sources, today, generated_at):
                    pct=number(raw.get("pct")), net=number(raw.get("net")), flow5=number(raw.get("flow5")),
                    persistence=number(raw.get("persistence")), phase=clean(raw.get("phase")),
                    history=raw.get("history") or [], live=raw.get("live"),
-                   date=raw.get("date") or sector_data.get("as_of"), source="板块深度 · 收盘资金")
+                   date=raw.get("date") or sector_data.get("as_of"), source=raw.get("source") or "板块深度 · 收盘资金")
     for raw in limits.get("sectors") or []:
         row = add_sector(raw.get("name"), raw.get("code", ""), raw.get("type") or "行业")
         if row:
@@ -249,6 +272,9 @@ def build_report(sources, today, generated_at):
                "date": raw.get("trade_date") or radar.get("fallback_date") or radar.get("snapshot_date"),
                "sector_ids": [sector["id"]] if sector else [], "news_ids": [], "event_ids": [], "limits": [],
                "membership_basis": "量化雷达记录的行业归属", "timeline": (radar.get("changes_agg", {}).get(code) or {}).get("events", [])}
+        if current_only:
+            if str(raw.get("quote_at") or raw.get("price_date") or "")[:10]!=today:row.update(price=None,change_pct=None)
+            if raw.get("flow_date")!=today:row["main_net_inflow"]=None
         stocks[code] = row
     limit_sector_map = {r.get("code"): r for r in limits.get("sectors", [])}
     for event in limit_events:
@@ -269,6 +295,7 @@ def build_report(sources, today, generated_at):
             if sector and sector["id"] not in row["sector_ids"]:
                 row["sector_ids"].append(sector["id"])
     popularity = sources.get("popularity") or {}
+    if current_only and str(popularity.get("fetched_at") or "")[:10]!=today:popularity={}
     for raw in popularity.get("rows", []):
         code = clean(raw.get("code"), 40)
         rank = number(raw.get("rank"))
@@ -293,6 +320,9 @@ def build_report(sources, today, generated_at):
     orders=sources.get("orders") or {}
     big_buys=orders.get("big_buys") or []
     big_sells=orders.get("big_sells") or []
+    if current_only:
+        big_buys=[r for r in big_buys if r.get("date")==today]
+        big_sells=[r for r in big_sells if r.get("date")==today]
     for event in big_buys+big_sells:
         code=str(event.get("code") or "")
         if not re.fullmatch(r"\d{6}",code):
@@ -318,7 +348,14 @@ def build_report(sources, today, generated_at):
             row[field].append(item["id"])
     for row in sector_map.values():
         members = [stocks[c] for c in row["stock_codes"]]
-        row["quote"] = sector_quote(row, members, radar.get("fallback_date") or radar.get("snapshot_date"), today)
+        row["quote"] = sector_quote(row, members, radar.get("fallback_date") or radar.get("snapshot_date"), today, current_only)
+        radar_date = radar.get("fallback_date") or radar.get("snapshot_date")
+        heat = [number(s.get("activity")) for s in members if radar_date and s.get("date") == radar_date]
+        heat = [v for v in heat if v is not None]
+        row["trading_heat"] = sum(heat)/len(heat) if heat else row.get("activity")
+        row["heat_date"] = radar_date if row["trading_heat"] is not None else None
+        row["heat_coverage"] = len(heat)
+        row["heat_basis"] = "同日已覆盖成分股的量化雷达活跃度等权平均，非成交额或股吧人气"
         row["signals"] = {
             "拉抬": sum(s.get("direction") == "拉抬" for s in members),
             "砸盘": sum(s.get("direction") == "砸盘" for s in members),
@@ -330,14 +367,21 @@ def build_report(sources, today, generated_at):
         row["relevance"] = (len(members) * 2 + len(row["news_ids"]) * 3 + len(row["event_ids"]) * 2
                               + (row.get("activity") or 0) / 10)
         observation = [f"覆盖{len(members)}只相关股票，拉抬{row['signals']['拉抬']}只、砸盘{row['signals']['砸盘']}只",
-                       f"收盘涨停{row['signals']['涨停']}只、跌停{row['signals']['跌停']}只（限价日{limits.get('as_of') or '未取得'}）"]
-        if row.get("net") is not None:
-            observation.append(f"板块资金{row.get('date') or '未知日'}净额{row['net']/1e8:.2f}亿元")
+                       f"{'盘中封板' if limits.get('provisional') else '收盘涨停'}{row['signals']['涨停']}只、跌停{row['signals']['跌停']}只（限价日{limits.get('as_of') or '未取得'}）"]
+        if row["quote"]["net"] is not None:
+            observation.append(f"{row['quote']['net_label']}{row['quote'].get('net_at') or '未知日'}净额{row['quote']['net']/1e8:.2f}亿元")
         if row["quote"]["note"]:
             observation.append(row["quote"]["note"])
         row["observation"] = "；".join(observation)
         row["verification"] = "核对异动后的成交量与资金能否持续，关注消息原文、实际订单或正式发布；板块与消息关联不等于因果或买入信号。"
-    sectors = sorted(sector_map.values(), key=lambda r: (-r["relevance"], -(r.get("net") or 0), r["name"]))
+    eligible=sector_map.values()
+    if current_only:eligible=[r for r in eligible if r.get("heat_date")==today or r["quote"]["pct_at"] and str(r["quote"]["pct_at"])[:10]==today or r["quote"]["net_at"] and str(r["quote"]["net_at"])[:10]==today]
+    sectors = rank_sectors(eligible)
+    if current_only:
+        for row in sectors:
+            quote=row["quote"]
+            row.update(pct=quote["pct"],net=quote["net"],date=today,source=quote["source"],history=[])
+            for field in ("flow5","persistence","phase"):row.pop(field,None)
     stock_rows = sorted(stocks.values(), key=lambda r: (-(r.get("activity") or 0), -len(r["limits"]), r["code"]))
     hot_stocks = sorted([r for r in stock_rows if r.get("hot_rank") and r.get("on_hot_list")], key=lambda r: r["hot_rank"])
     # 当前排名越小越靠前；榜单只使用源提供的较昨日变化，不从股价或缺席榜单推算名次。
@@ -358,7 +402,8 @@ def build_report(sources, today, generated_at):
     summary = {"stocks": len(stock_rows), "sectors": len(sectors), "news": len(news), "core_news": len(core_news), "short_news": len(short_news),
                "future_events": len(calendar), "limit_up": sum(r.get("kind") == "U" for r in limit_events),
                "limit_down": sum(r.get("kind") == "D" for r in limit_events), "broken": sum(r.get("kind") == "Z" for r in limit_events),
-               "max_streak": max((r.get("streak") or 1 for r in limit_events if r.get("kind") == "U"), default=None)}
+               "max_streak": max((r["streak"] for r in limit_events if r.get("kind") == "U" and r.get("streak") is not None), default=None)}
+    if limits.get("provisional") and not limits.get("broken_available",True):summary["broken"]=None
     return {"today": today, "generated_at": generated_at, "sectors": sectors, "stocks": stock_rows,
             "news": news, "core_news": core_news, "short_news": short_news, "calendar": calendar, "limits": limit_events, "summary": summary,
             "limit_up": limit_up, "limit_down": limit_down, "hot_stocks": hot_stocks, "popularity_rises": popularity_rises,
@@ -366,7 +411,9 @@ def build_report(sources, today, generated_at):
             "order_meta":orders.get("order_meta",{}),
             "hot_fetched_at": popularity.get("fetched_at"),
             "radar_as_of": radar.get("fallback_date") or radar.get("snapshot_date"), "limit_as_of": limits.get("as_of"),
-            "sector_as_of": sector_data.get("as_of"), "signals": list(SIGNALS),
+            "sector_as_of": today if current_only and sectors else sector_data.get("as_of"), "signals": list(SIGNALS),
+            "current_only":current_only,"limit_provisional":bool(limits.get("provisional")),"limit_fetched_at":limits.get("fetched_at"),
+            "sector_status":sector_data.get("live_status",{}),
             "graph": {"sector_ids": [r["id"] for r in graph_sectors], "stock_codes": graph_stocks, "edges": edges,
                       "note": "实线为已取得的行业/历史成分归属；消息题材匹配仅是观察线索，不代表资金实际流动路径"},
             "sources": sources.get("source_status", []), "notes": sources.get("notes", []),

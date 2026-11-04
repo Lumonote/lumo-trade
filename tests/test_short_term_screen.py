@@ -3,7 +3,7 @@ import datetime as dt
 
 import pytest
 
-from analysis.short_term_screen import build_report, normalize_calendar, news_rows, announced_events, safe_url, themes, sector_quote
+from analysis.short_term_screen import build_report, normalize_calendar, news_rows, announced_events, safe_url, themes, sector_quote, rank_sectors
 from webui.services import short_term_screen_service as service
 from webui.services.short_term_calendar import CONFERENCES
 
@@ -27,6 +27,29 @@ def inputs():
 
 def report():
     return build_report(inputs(),"2026-11-01","2026-11-01T12:00:00+08:00")
+
+
+def test_sector_heat_ranking_uses_average_activity_not_member_or_news_counts():
+    data=inputs()
+    data["radar"]["stocks"] += [{"code":f"{600010+i}","name":f"芯片{i}","industry":"半导体","activity":0} for i in range(20)]
+    value=build_report(data,"2026-11-01","2026-11-01T12:00:00+08:00")
+    assert value["sectors"][0]["name"]=="航空装备"
+    cold=next(row for row in value["sectors"] if row["name"]=="半导体")
+    assert cold["trading_heat"]==80/21 and cold["heat_coverage"]==21
+    assert value["graph"]["sector_ids"][0]==value["sectors"][0]["id"]
+    assert value["sectors"][0]["heat_date"]=="2026-10-30"
+    # 新同日活跃度上来后，不必等待成分数量变化就能升到榜首。
+    for row in data["radar"]["stocks"]:
+        if row["industry"]=="半导体":row["activity"]=90
+    updated=build_report(data,"2026-11-01","2026-11-01T12:01:00+08:00")
+    assert updated["sectors"][0]["name"]=="半导体"
+
+
+def test_sector_flow_ranking_uses_display_quote_and_orders_missing_and_stale_last():
+    def row(name,net,date="2026-11-01"):
+        return {"id":name,"name":name,"net":1e12,"trading_heat":10,"heat_date":date,"quote":{"net":net,"net_at":date}}
+    rows=[row("缺失",None),row("净流出",-20),row("旧日大额",1e10,"2026-10-30"),row("零净额",0),row("最新流入",50)]
+    assert [r["name"] for r in rank_sectors(rows,"flow")]==["最新流入","零净额","净流出","旧日大额","缺失"]
 
 
 def test_unmatched_sector_uses_same_day_covered_members_with_explicit_basis():
@@ -60,6 +83,7 @@ def test_sector_live_quote_requires_matching_code_and_today_and_keeps_close():
 
 
 def test_fresh_sectors_keeps_new_live_boards_and_closing_values(monkeypatch):
+    monkeypatch.setattr(service,"_read",lambda key:None)
     monkeypatch.setattr(service.sector_depth_service,"query",lambda:{"as_of":"2026-10-30","rows":[{"code":"BK0001","name":"半导体","type":"行业","pct":3,"net":100}]})
     monkeypatch.setattr(service.tushare_client,"recent_trade_dates",lambda count:[])
     live=[{"code":"BK0001","name":"半导体","type":"行业","pct":2,"net":50,"quote_at":"2026-11-01T10:30:00+08:00"},
@@ -224,11 +248,12 @@ def test_calendar_splits_full_windows_and_deduplicates_provider_rows(monkeypatch
 
 
 def test_sector_refresh_updates_old_baseline_without_relabeling_old_window_scores(monkeypatch):
+    monkeypatch.setattr(service,"_read",lambda key:None)
     monkeypatch.setattr(service.sector_depth_service,"query",lambda:{"as_of":"2026-10-23","rows":[{"code":"BK0001","flow5":123}]})
     monkeypatch.setattr(service.tushare_client,"recent_trade_dates",lambda n:["20261030"])
     monkeypatch.setattr(service.sector_depth_service,"_daily",lambda date:[{"code":"BK0001","date":date,"name":"行业甲","type":"行业","net":5,"pct":2}])
     monkeypatch.setattr(service.sector_depth_service,"fetch_live",lambda:{"rows":[]})
-    monkeypatch.setattr(service,"now",lambda:dt.datetime.fromisoformat("2026-11-01T12:00:00+08:00"))
+    monkeypatch.setattr(service,"now",lambda:dt.datetime.fromisoformat("2026-10-30T18:00:00+08:00"))
     result=service._fresh_sectors()
     assert result["as_of"]=="2026-10-30" and result["rows"][0]["date"]=="2026-10-30"
     assert "flow5" not in result["rows"][0]
@@ -245,6 +270,9 @@ def cache(monkeypatch):
 
 
 def test_read_only_query_supports_all_sections_and_detail_without_network(cache,monkeypatch):
+    source=inputs();source["radar"]["fallback_date"]="2026-11-01";source["sectors"]["as_of"]="2026-11-01";source["limits"]["as_of"]="2026-11-01"
+    for row in source["limits"]["events"]:row["date"]="2026-11-01"
+    cache["inputs"]=source
     monkeypatch.setattr(service,"_fresh_radar",lambda:pytest.fail("query must not fetch"))
     value=service.query()
     assert len(value["stocks"])==2

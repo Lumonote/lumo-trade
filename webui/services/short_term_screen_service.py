@@ -16,7 +16,7 @@ from data_store.connection import close_conn, get_conn
 from webui.services import market_limits_service, sector_depth_service, quant_radar_service
 from webui.services.market_health_service import now
 from webui.services.short_term_calendar import CONFERENCES, calendar_rows
-from webui.services import short_term_orders
+from webui.services import short_term_orders, short_term_limits
 
 NAMESPACE = "short_term_screen"
 _lock = threading.Lock()
@@ -24,13 +24,13 @@ _publish_lock = threading.Lock()
 _feed_lock = threading.Lock()
 _feeds = {}
 # 收盘核验、资金研究、人气和实时异动不共享刷新节拍。
-FEED_INTERVALS = {"radar":60,"news":45,"popularity":180,"sectors":600,"limits":1800}
+FEED_INTERVALS = {"radar":60,"news":45,"popularity":180,"sectors":120,"limits":90}
 FEED_FIELDS = {
-    "radar": ("stocks","sectors","summary","graph"),
+    "radar": ("stocks","sectors","summary","graph","radar_as_of"),
     "news": ("news","core_news","short_news","calendar","stocks","sectors","summary"),
     "popularity": ("hot_stocks","popularity_rises","hot_fetched_at","stocks"),
-    "sectors": ("sectors","summary","graph"),
-    "limits": ("limits","limit_up","limit_down","limit_as_of","summary","stocks","sectors"),
+    "sectors": ("sectors","summary","graph","sector_as_of","sector_status"),
+    "limits": ("limits","limit_up","limit_down","limit_as_of","limit_provisional","limit_fetched_at","summary","stocks","sectors"),
 }
 
 
@@ -88,7 +88,7 @@ def query(jobs=None, date=""):
                 "order_events":stored.get("order_events",[]),"order_meta":stored.get("order_meta",{}),
                 "historical": True, "job": None, "available": True}
     inputs = _local_sources()
-    result = build_report(inputs, now().date().isoformat(), now().isoformat())
+    result = build_report(inputs, now().date().isoformat(), now().isoformat(), current_only=True)
     job_id = _read("latest_job")
     result.update(job=jobs.get(job_id) if jobs and job_id else None,
                   updated_at=_read("updated_at"), available=bool(result["stocks"] or result["sectors"] or result["calendar"]), historical=False)
@@ -128,6 +128,8 @@ def detail(kind, ident, jobs=None, date=""):
 def _fresh_limits():
     """短线只回补最近六个收盘日；仍在连续的左端保留下界，不伪造无限历史。"""
     try:
+        try:return short_term_limits.collect()
+        except Exception:pass
         pro = tushare_client.get_pro()
         if pro is None:
             raise ValueError("涨跌停更新需要现有TuShare配置")
@@ -137,7 +139,7 @@ def _fresh_limits():
         if not dates:
             raise ValueError("未取得最近已收盘交易日历")
         existing = market_limits_service.query()
-        if existing.get("as_of") == dates[-1] and existing.get("events"):
+        if existing.get("as_of") == dates[-1] and existing.get("as_of")==current.date().isoformat() and existing.get("events"):
             return existing
         frame = pro.stock_basic(exchange="", list_status="L", fields="ts_code,name")
         basics = {r["ts_code"]: r for r in ([] if frame is None else frame.to_dict("records"))}
@@ -153,6 +155,7 @@ def _fresh_limits():
             raise ValueError("最近收盘限价数据尚未取得")
         end = max(r["date"] for r in days)
         existing = market_limits_service.query()
+        if end!=current.date().isoformat():raise ValueError("今日涨跌停池暂未取得，旧日记录仅保留在历史查询")
         if existing.get("as_of") == end and existing.get("events"):
             return existing
         return build_limits(days, dates, end, end)
@@ -164,12 +167,16 @@ def _fresh_radar():
     try:
         value = quant_radar_service.overview(force=True)
         day = value.get("snapshot_date") or value.get("fallback_date")
+        if day!=now().date().isoformat():raise ValueError("今日异动雷达尚未取得，旧快照仅保留在历史查询")
         if day:
             hit = kv_repo.get("quant_radar", "day:" + day.replace("-", ""))
             if hit:
                 value = {**value, "changes_agg": hit[0].get("changes_agg") or {}}
         if not value.get("stocks"):
             raise ValueError("异动源暂无有效股票，保留已有快照")
+        if not value.get("live"):
+            quotes=quant_radar_service._with_deadline(20,quant_radar_service._fetch_tencent_quotes,[r["code"] for r in value["stocks"]]) or {}
+            value={**value,"stocks":[{**r,**quotes.get(r["code"],{})} for r in value["stocks"]]}
         return value
     finally:
         close_conn()
@@ -177,7 +184,32 @@ def _fresh_radar():
 
 def _fresh_sectors():
     try:
-        value = sector_depth_service.query()
+        value = ((_read("inputs") or {}).get("sectors") or sector_depth_service.query()).copy()
+        live = sector_depth_service.fetch_live()
+        if live.get("rows"):
+            by_code={r["code"]:r for r in live["rows"]}
+            if not (live.get("coverage",{}).get("行业") or {}).get("complete",True):
+                try:
+                    disclosed=sector_depth_service._daily(now().date().isoformat())
+                    if disclosed:
+                        current={r["code"]:r for r in value.get("rows",[])}
+                        current.update({r["code"]:{**r,"source":"TuShare / 东方财富今日已披露资金"} for r in disclosed})
+                        value["rows"]=list(current.values())
+                except Exception:pass
+            value["rows"]=[{**r,"live":by_code.get(r["code"],r.get("live"))} for r in value.get("rows",[])]
+            known={r["code"] for r in value["rows"]}
+            value["rows"].extend({"code":r["code"],"name":r["name"],"type":r["type"],"live":r} for r in live["rows"] if r["code"] not in known)
+            value["live_status"]={"coverage":live.get("coverage",{}),"errors":live.get("errors",[]),"fetched_at":now().isoformat(),"note":live.get("note","")}
+            return value
+        # 数据源若已披露当日资金，可在盘中使用其真实交易日；不人为等到17:30才请求。
+        today=now().date().isoformat()
+        try:
+            disclosed=sector_depth_service._daily(today)
+            if disclosed:
+                coverage={kind:{"received":sum(r.get("type")==kind for r in disclosed),"total":sum(r.get("type")==kind for r in disclosed),"complete":True} for kind in ("行业","概念")}
+                return {"as_of":today,"rows":[{**r,"source":"TuShare / 东方财富今日已披露资金","phase":"源交易日为今日，源未提供盘中报价时刻"} for r in disclosed],
+                        "live_status":{"coverage":coverage,"fetched_at":now().isoformat(),"note":"使用源已披露的今日资金；未将采集时间当成源报价时间"}}
+        except Exception:pass
         # 补齐最近收盘的全板块资金，避免仅有旧研究基线时一直展示旧日期。
         dates = tushare_client.recent_trade_dates(3)
         current = now()
@@ -189,14 +221,7 @@ def _fresh_sectors():
                 rows = sector_depth_service._daily(date)
                 if rows:
                     value = {"as_of": date, "rows": [{**r, "phase": "单日资金观测，完整持续性见板块深度"} for r in rows]}
-        live = sector_depth_service.fetch_live()
-        if live.get("rows"):
-            # 盘中资金独立记录，不覆盖收盘资金的实际日期。
-            by_code = {r["code"]: r for r in live["rows"]}
-            value["rows"] = [{**r, "live": by_code.get(r["code"])} for r in value.get("rows", [])]
-            known = {r["code"] for r in value["rows"]}
-            value["rows"].extend({"code": r["code"], "name": r["name"], "type": r["type"], "live": r}
-                                 for r in live["rows"] if r["code"] not in known)
+        if value.get("as_of")!=now().date().isoformat():raise ValueError("今日板块资金源暂不可用，旧日数据不进入今日榜")
         return value
     finally:
         close_conn()
@@ -251,6 +276,7 @@ def feed(kind, intelligence, after="", date="", readers=None):
         return {"kind":kind,"historical":True,"running":False,"version":date,
                 "payload":{key:report.get(key) for key in FEED_FIELDS[kind]}}
     interval=FEED_INTERVALS[kind]
+    if _feeds.get(kind,{}).get("error"):interval=min(interval,15)
     current=now()
     if current.weekday()>4 or not dt.time(9,15)<=current.time().replace(tzinfo=None)<=dt.time(15,10):
         interval=max(interval,300)
@@ -287,7 +313,7 @@ def feed(kind, intelligence, after="", date="", readers=None):
                         inputs=_local_sources();old_status={r["key"]:r for r in inputs.get("source_status",[])}
                         for key,status in statuses.items():old_status[key]={**old_status.get(key,{}),**status}
                         inputs.update(values,source_status=list(old_status.values()))
-                        report=build_report(inputs,now().date().isoformat(),stamp)
+                        report=build_report(inputs,now().date().isoformat(),stamp,current_only=True)
                         kv_repo.set_(NAMESPACE,"inputs",inputs)
                         kv_repo.set_(NAMESPACE,"updated_at",stamp)
                         kv_repo.set_(NAMESPACE,"report:"+now().date().isoformat(),report)
@@ -342,7 +368,7 @@ def collect(intelligence, jobs=None, job_id=None, readers=None):
                 jobs.append_log(job_id, f"{key} · {status['state']} · {i}/{len(readers)}个来源")
     # 零发布时间的短讯保留在消息流，不拿抓取时间替换新闻发表时间。
     stamp = now().isoformat()
-    report = build_report(result, now().date().isoformat(), stamp)
+    report = build_report(result, now().date().isoformat(), stamp,current_only=True)
     kv_repo.set_(NAMESPACE, "inputs", result)
     kv_repo.set_(NAMESPACE, "updated_at", stamp)
     kv_repo.set_(NAMESPACE, "report:" + now().date().isoformat(), report)

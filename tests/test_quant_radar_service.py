@@ -8,8 +8,22 @@
 """
 
 import pytest
+import datetime as dt
+from types import SimpleNamespace
 
 from webui.services import quant_radar_service as qr
+
+
+def freeze_trade_day(monkeypatch,day):
+    """历史场景显式固定交易日，避免运行日期变化使固定样本落出窗口。"""
+    from data_store import quant_radar_repo
+    class FixedDate(dt.date):
+        @classmethod
+        def today(cls):return cls.fromisoformat(day)
+    frozen=SimpleNamespace(date=FixedDate,datetime=dt.datetime,timedelta=dt.timedelta,timezone=dt.timezone)
+    monkeypatch.setattr(quant_radar_repo,"_dt",frozen)
+    monkeypatch.setattr(qr,"_dt",frozen)
+    monkeypatch.setattr(qr,"_current_trade_date_key",lambda:day.replace("-",""))
 
 
 @pytest.fixture
@@ -302,7 +316,7 @@ def test_flows_df_to_snapshot_converts_units_and_shapes():
 
     df = pd.DataFrame([
         {"ts_code": "600000.SH", "name": "浦发银行", "close": 10.0, "pct_change": 3.0,
-         "net_amount": -5000.0, "buy_sm_amount": 2000.0, "amount_unit": "万元"},
+         "net_amount": -5000.0, "buy_sm_amount": 2000.0, "amount_unit": "万元", "trade_date":"20260710"},
         {"ts_code": "000001.SZ", "name": "平安银行", "close": 12.0, "pct_change": -1.0,
          "net_amount": 8000.0, "buy_sm_amount": -100.0, "amount_unit": "万元"},
     ])
@@ -312,6 +326,7 @@ def test_flows_df_to_snapshot_converts_units_and_shapes():
     assert by_code["600000"]["change_pct"] == 3.0
     assert by_code["600000"]["price"] == 10.0
     assert by_code["600000"]["volume_ratio"] is None  # 本地兜底无量比,规则自动跳过
+    assert by_code["600000"]["flow_date"]==by_code["600000"]["price_date"]=="2026-07-10"
     assert rows[0]["code"] == "000001"  # 按主力净额绝对值降序
 
 
@@ -349,7 +364,8 @@ def _day_item(code, name, activity, industry="半导体", **kw):
     return base
 
 
-def test_repo_day_roundtrip_search_and_history(tmp_db):
+def test_repo_day_roundtrip_search_and_history(tmp_db,monkeypatch):
+    freeze_trade_day(monkeypatch,"2026-07-14")
     from data_store import quant_radar_repo as repo
 
     repo.upsert_day("2026-07-10", [_day_item("600000", "浦发银行", 80),
@@ -487,7 +503,8 @@ def test_overview_closed_market_fallback_expands_from_day_table(tmp_db):
     assert len(payload["stocks"]) == 3
 
 
-def test_stock_analysis_includes_daily_history(tmp_db):
+def test_stock_analysis_includes_daily_history(tmp_db,monkeypatch):
+    freeze_trade_day(monkeypatch,"2026-07-13")
     from data_store import quant_radar_repo as repo
 
     repo.upsert_day("2026-07-10", [_day_item("600000", "浦发银行", 80)])
@@ -880,7 +897,8 @@ def test_accumulation_payload_empty_market_notes(tmp_db):
     assert payload["note"]
 
 
-def test_stock_analysis_includes_accumulation_block(tmp_db):
+def test_stock_analysis_includes_accumulation_block(tmp_db,monkeypatch):
+    freeze_trade_day(monkeypatch,"2026-07-13")
     from data_store import moneyflow_repo
 
     moneyflow_repo.upsert_df(_accum_market_df({"600000.SH": (3000.0, 10.0, 10.5)}), top_n=0)
@@ -1078,9 +1096,10 @@ def _seed_moneyflow_day(date_iso, code, pct):
     }]), top_n=0)
 
 
-def test_get_stock_history_three_states(tmp_db):
+def test_get_stock_history_three_states(tmp_db,monkeypatch):
     """按日表只落有异动的股票,历史要按交易日历补全并区分三态:
     有异动(正常行)/页面运行过但无异动(no_activity,补真实涨跌)/当天未运行(unrecorded)。"""
+    freeze_trade_day(monkeypatch,"2026-08-18")
     from data_store import calendar_repo
     from data_store.quant_radar_repo import get_stock_history
 

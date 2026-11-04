@@ -77,35 +77,46 @@ def _daily(date):
 
 
 def fetch_live():
-    """东财f124为源报价时刻；无日期/不完整翻页时不展示成实时榜。"""
-    result = []
-    try:
-        for kind,code in (("行业",2),("概念",3)):
-            collected, total = [], None
+    """f124校验源时刻；行业/概念分别发布已验证行，同时标明不完整覆盖。"""
+    result, coverage, errors = [], {}, []
+    for kind,code in (("行业",2),("概念",3)):
+        collected, total, page_size = [], None, 1000
+        try:
             for page in range(1,31):
-                params={"pn":page,"pz":100,"po":1,"np":1,"fltt":2,"invt":2,"fid":"f62",
+                params={"pn":page,"pz":page_size,"po":1,"np":1,"fltt":2,"invt":2,"fid":"f62","ut":"bd1d9ddb04089700cf9c27f6f7426281",
                         "fs":f"m:90+t:{code}","fields":"f12,f14,f2,f3,f62,f184,f124"}
-                data=(request_json("https://push2.eastmoney.com/api/qt/clist/get?"+urlencode(params),timeout=4,retries=1,trust_env=False) or {}).get("data") or {}
+                url="https://push2.eastmoney.com/api/qt/clist/get?"+urlencode(params)
+                headers={"User-Agent":"Mozilla/5.0","Referer":"https://data.eastmoney.com/"}
+                try:value=request_json(url,headers=headers,timeout=5,retries=2,trust_env=False)
+                except Exception:
+                    try:value=request_json(url.replace("push2.eastmoney.com","push2delay.eastmoney.com"),headers=headers,timeout=5,retries=1,trust_env=False)
+                    except Exception:value=request_json(url,headers=headers,timeout=5,retries=1,trust_env=True)
+                data=(value or {}).get("data") or {}
                 batch=data.get("diff") or []
                 if isinstance(batch,dict):batch=list(batch.values())
                 total=int(data.get("total") or 0)
                 collected.extend(batch)
                 if len(collected)>=total:break
                 if not batch:raise ValueError("实时板块中间页缺失")
-            unique={r.get("f12"):r for r in collected}
-            if not total or len(unique)!=total:raise ValueError("实时板块覆盖不完整")
-            for raw in unique.values():
-                stamp=number(raw.get("f124"))
-                if not stamp:continue
-                tick=dt.datetime.fromtimestamp(stamp,tz=now().tzinfo)
-                if tick.date()!=now().date() or (now()-tick).total_seconds() < -60:continue
-                age=(now()-tick).total_seconds()
-                result.append({"code":raw["f12"],"name":raw.get("f14"),"type":kind,"net":number(raw.get("f62")),
-                               "rate":number(raw.get("f184")),"pct":number(raw.get("f3")),"quote_at":tick.isoformat(),
-                               "timing":"今日盘后报价" if now().time()>=dt.time(15,30) else "盘中报价" if age<=300 else "今日滞后报价"})
-        return {"rows":result,"source":"东方财富板块实时资金估算","note":"盘中资金会变化；连续性与历史排名仍采用独立收盘序列"}
-    except Exception:
-        return {"rows":[],"source":"东方财富实时资金接口","note":"本轮实时接口未返回完整且可校验时点的数据，以下采用实际已披露收盘日；刷新时间不替代数据日"}
+                if page==1:page_size=len(batch)
+        except Exception as exc:
+            errors.append(f"{kind}报价本轮未完整取得（{type(exc).__name__}）")
+        unique={r.get("f12"):r for r in collected if r.get("f12")}
+        valid=[]
+        for raw in unique.values():
+            stamp=number(raw.get("f124"))
+            if not stamp:continue
+            tick=dt.datetime.fromtimestamp(stamp,tz=now().tzinfo)
+            if tick.date()!=now().date() or (now()-tick).total_seconds() < -60:continue
+            age=(now()-tick).total_seconds()
+            valid.append({"code":raw["f12"],"name":raw.get("f14"),"type":kind,"net":number(raw.get("f62")),
+                           "rate":number(raw.get("f184")),"pct":number(raw.get("f3")),"quote_at":tick.isoformat(),
+                           "timing":"今日盘后报价" if now().time()>=dt.time(15,30) else "盘中报价" if age<=300 else "今日滞后报价"})
+        coverage[kind]={"received":len(valid),"total":total,"complete":bool(total and len(valid)==total)}
+        result.extend(valid)
+        if total and len(valid)!=total:errors.append(f"{kind}有效报价覆盖{len(valid)}/{total}，不声明完整排名")
+    return {"rows":result,"coverage":coverage,"errors":errors,"source":"东方财富板块实时资金估算",
+            "note":"；".join(errors) if errors else "行业、概念独立校验并发布，保留源报价时点"}
 
 
 def collect(progress=lambda message:None):

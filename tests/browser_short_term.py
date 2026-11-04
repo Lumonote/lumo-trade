@@ -31,7 +31,7 @@ with sync_playwright() as p:
     try:browser=p.chromium.launch(headless=True,args=["--enable-unsafe-swiftshader"])
     except Error:browser=p.chromium.launch(headless=True,channel="chrome",args=["--enable-unsafe-swiftshader"])
     page=browser.new_page(viewport={"width":1920,"height":1080},accept_downloads=True)
-    page.add_init_script("window.__stScheduled=[];window.__stCallbacks={};const originalTimeout=window.setTimeout;window.setTimeout=(fn,delay,...args)=>{window.__stScheduled.push(delay);const id=originalTimeout(fn,delay,...args);if([61600,49200,187800,611500,1817300].includes(delay))window.__stCallbacks[delay]=()=>{clearTimeout(id);return fn(...args);};return id;};")
+    page.add_init_script("window.__stScheduled=[];window.__stCallbacks={};const originalTimeout=window.setTimeout;window.setTimeout=(fn,delay,...args)=>{window.__stScheduled.push(delay);const id=originalTimeout(fn,delay,...args);if([1600,4200,7800,11500,17300].includes(delay))window.__stCallbacks[delay]=()=>{clearTimeout(id);return fn(...args);};return id;};")
     page.set_default_timeout(25000)
     errors=[]
     page.on("pageerror",lambda e:errors.append(str(e)))
@@ -57,6 +57,7 @@ with sync_playwright() as p:
         elif kind=="sectors" and sector_update["inject"]:
             updated=snapshot["sectors"][1]
             changed_sectors=[{**updated,"pct":float(updated.get("pct") or 0)+.1,
+                              "trading_heat":max(float(r.get("trading_heat") or 0) for r in snapshot["sectors"])+10,
                               "quote":{**updated["quote"],"pct":float(updated["quote"].get("pct") or 0)+.1}},snapshot["sectors"][0],*snapshot["sectors"][2:]]
             route.fulfill(json={"kind":kind,"version":"test-sectors","revision":2,"changed":True,"running":False,"payload":{"sectors":changed_sectors}})
         else:route.fulfill(json={"kind":kind,"version":"","changed":False,"running":False,"payload":None})
@@ -68,12 +69,13 @@ with sync_playwright() as p:
         page.screenshot(path=str(OUT/"initial-error.png"))
         raise
     print("screen loaded",flush=True)
-    assert not calls["feeds"],"已有缓存时不应同时采集所有来源"
-    assert all(delay in page.evaluate("window.__stScheduled") for delay in (61600,49200,187800,611500,1817300))
+    assert all(delay in page.evaluate("window.__stScheduled") for delay in (1600,4200,7800,11500,17300)),"首屏须立即错峰连接各来源"
+    page.locator("#stSectorSort").select_option("heat")
+    heat_sectors=[r for r in snapshot["sectors"] if r.get("trading_heat") is not None]
     page.locator("#stScrollToggle").click()
     assert page.locator("#stStockCount").inner_text()==str(len(snapshot["stocks"]))
-    assert page.locator("#stSectorCount").inner_text()==str(len(snapshot["sectors"]))
-    for row in snapshot["sectors"][:18]:
+    assert page.locator("#stSectorCount").inner_text()==str(len(heat_sectors))
+    for row in heat_sectors[:18]:
         quote=row.get("quote")
         assert quote,"板块须保留展示值与统计口径"
         node=page.locator('#stSectorList .st-scroll-content > button').filter(has=page.locator('strong',has_text=row['name'])).first
@@ -105,7 +107,7 @@ with sync_playwright() as p:
             page.locator("#stDrawerClose").click()
         page.locator("[data-st-list="+kind+"]").click()
         expect(page.locator(".st-pager")).to_contain_text(str(len(rows))+"条")
-        if kind in ("limit_up","limit_down"):
+        if kind in ("limit_up","limit_down") and snapshot["limit_as_of"]:
             expect(page.locator("#stDrawerTitle")).to_contain_text(snapshot["limit_as_of"])
         if rows:
             with page.expect_download() as downloaded:page.locator("[data-st-export-list]").click()
@@ -147,9 +149,9 @@ with sync_playwright() as p:
     page.locator("[data-st-list=sectors]").click()
     with page.expect_download() as downloaded:page.locator("[data-st-export-list]").click()
     sector_records=list(csv.DictReader(io.StringIO(Path(downloaded.value.path()).read_text(encoding="utf-8-sig"))))
-    assert len(sector_records)==len(snapshot["sectors"])
+    assert len(sector_records)==len(heat_sectors)
     exported=next(r for r in sector_records if r["name"]==sector_with_members["name"] and r["type"]==sector_with_members["type"])
-    assert float(exported["display_pct"])==sector_with_members["quote"]["pct"]
+    assert exported["display_pct"]=="" if sector_with_members["quote"]["pct"] is None else float(exported["display_pct"])==sector_with_members["quote"]["pct"]
     assert exported["net_label"]==sector_with_members["quote"]["net_label"]
     page.locator("#stDrawerClose").click()
     page.locator("[data-st-list=stocks]").click()
@@ -208,7 +210,7 @@ with sync_playwright() as p:
     nodes=page.locator("#stNodes [data-st-node]").element_handles()
     news_update["code"]=page.locator("#stNodes .st-node-stock").first.get_attribute("data-st-node")
     news_update["inject"]=True
-    page.evaluate("()=>window.__stCallbacks[49200]()")
+    page.evaluate("()=>window.__stCallbacks[4200]()")
     expect(page.locator("#stNews .st-scroll-content")).to_contain_text("浏览器分区隔离验收")
     assert page.locator("#stStockList .st-scroll-content").inner_html()==stock_markup
     assert all(node.evaluate("el=>el.isConnected") for node in nodes),"新数据动效不得重建关系图节点"
@@ -226,7 +228,7 @@ with sync_playwright() as p:
     page.wait_for_function("document.querySelectorAll('.st-data-arrival').length===0",timeout=12000)
     last_pulse=page.locator("#stScene").evaluate("el=>el.__stLastPulse.at")
     sector_update["inject"]=True
-    page.evaluate("()=>window.__stCallbacks[611500]()")
+    page.evaluate("()=>window.__stCallbacks[11500]()")
     assert page.locator("#stNodes .st-node-sector").first.get_attribute("data-st-node")==snapshot["sectors"][1]["id"]
     assert page.locator("#stScene").evaluate("el=>el.__stLastPulse.at")>last_pulse,"关系图重排后仍应触发新路径的陨石动效"
     page.mouse.move(2,2)
