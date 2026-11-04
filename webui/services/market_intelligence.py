@@ -8,7 +8,8 @@ import re
 import threading
 import time
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from html import unescape
 from typing import Any
 
@@ -16,6 +17,9 @@ from webui.services.http_client import request_json, request_json_post, request_
 
 
 DEFAULT_TTL_SECONDS = 180
+# 首屏情报的抓取总预算(秒)：各源并发抓取，超过这个时间只用于已返回部分，
+# 剩下的交给后台刷新，避免弱网下把首屏拖到前端 90s 超时。
+COLD_FETCH_BUDGET_SECONDS = 8
 # 主力净流入回退榜(Tushare moneyflow_dc)缓存时效：资金流向按日更新，半小时足够新鲜。
 _MAIN_INFLOW_TTL = 1800
 # 大盘云图"全市场覆盖"门槛：实时源(东财/新浪)返回行数低于此值视为部分覆盖,
@@ -140,6 +144,9 @@ class MarketIntelligenceService:
         self._industry_map_date: str = ''
         self._industry_building: bool = False
         self._industry_lock = threading.Lock()
+        # 过期快照的后台刷新线程：只允许一个在跑，避免每次 load 都新起线程。
+        self._refresh_thread: threading.Thread | None = None
+        self._refresh_lock = threading.Lock()
         self._market_cloud_cache: dict[str, Any] = {'ts': 0, 'key': '', 'payload': None}
         self._maybe_refresh_industry_map()  # 进程启动即后台预热，首个 load 多半已就绪
 
@@ -1166,6 +1173,12 @@ class MarketIntelligenceService:
         cached = self._cache.get('payload')
         if not force_refresh and cached and now - self._cache.get('ts', 0) < self.ttl_seconds:
             return cached
+        if not force_refresh and cached:
+            # 快照过期但内容可用：先返回旧数据，后台刷新。
+            # 此前这里同步串行抓十余个外网源，实测冷启动 50s+，弱网或系统代理异常时更久，
+            # 会顶穿前端 90s 超时，首屏直接落到「加载失败」。
+            self._refresh_in_background()
+            return cached
 
         self._maybe_refresh_industry_map()  # 隔日则后台重建行业映射（非阻塞）
 
@@ -1187,85 +1200,80 @@ class MarketIntelligenceService:
             'errors': {},
         }
 
-        try:
-            payload['jinshi'] = self.fetch_jinshi_flash(limit=12)
-        except Exception as exc:
-            payload['errors']['jinshi'] = str(exc)
-
-        try:
-            payload['ths_news'] = self.fetch_ths_flash(limit=15)
-        except Exception as exc:
-            payload['errors']['ths_news'] = str(exc)
-
-        try:
-            payload['sina_news'] = self.fetch_sina_flash(limit=12)
-        except Exception as exc:
-            payload['errors']['sina_news'] = str(exc)
-
-        try:
-            payload['eastmoney_news'] = self.fetch_eastmoney_news(limit=15)
-        except Exception as exc:
-            payload['errors']['eastmoney_news'] = str(exc)
-
-        # 行业板块：clist 优先（含主力净流入），本机/被掐时回退腾讯板块榜，保证「热点板块」不空。
-        try:
-            industry_boards = self.fetch_eastmoney_clist('m:90+t:2', fid='f3', limit=8)
-        except Exception:
-            industry_boards = []
-        if not industry_boards:
-            try:
-                industry_boards = self.fetch_tencent_boards('hy', limit=8)
-            except Exception as exc:
-                payload['errors']['eastmoney_industry'] = str(exc)
-        payload['eastmoney']['industry_boards'] = industry_boards
-
-        # 概念板块：同上，clist → 腾讯回退。
-        try:
-            concept_boards = self.fetch_eastmoney_clist('m:90+t:3', fid='f3', limit=10)
-        except Exception:
-            concept_boards = []
-        if not concept_boards:
-            try:
-                concept_boards = self.fetch_tencent_boards('gn', limit=8)
-            except Exception as exc:
-                payload['errors']['eastmoney_concept'] = str(exc)
-        payload['eastmoney']['concept_boards'] = concept_boards
-
-        try:
-            payload['eastmoney']['money_boards'] = self.fetch_eastmoney_clist(
-                'm:90+t:2', fid='f62', limit=8
-            )
-        except Exception as exc:
-            payload['errors']['eastmoney_money_boards'] = str(exc)
-
-        try:
-            # 优先 clist（含主力净流入排序）。
-            hot = self.fetch_eastmoney_clist(
-                'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23', fid='f62', limit=12
-            )
-        except Exception:
-            hot = []
-        if not hot:
-            # clist 在本机/网络被掐时回退人气榜+腾讯行情，保证热点面板不空。
-            try:
-                hot = self.fetch_hot_rank(limit=12)
-            except Exception as exc:
-                payload['errors']['eastmoney_hot_stocks'] = str(exc)
-        payload['eastmoney']['hot_stocks'] = hot
-
-        try:
+        # 各源彼此独立，全部并发抓取：串行累加出的总耗时是首屏卡顿的主因。
+        jobs = {
+            'jinshi': (lambda: self.fetch_jinshi_flash(limit=12), None, 'jinshi'),
+            'ths_news': (lambda: self.fetch_ths_flash(limit=15), None, 'ths_news'),
+            'sina_news': (lambda: self.fetch_sina_flash(limit=12), None, 'sina_news'),
+            'eastmoney_news': (lambda: self.fetch_eastmoney_news(limit=15), None, 'eastmoney_news'),
+            # 行业板块：clist 优先（含主力净流入），本机/被掐时回退腾讯板块榜，保证「热点板块」不空。
+            'industry_boards': (
+                lambda: self.fetch_eastmoney_clist('m:90+t:2', fid='f3', limit=8),
+                lambda: self.fetch_tencent_boards('hy', limit=8),
+                'eastmoney_industry',
+            ),
+            # 概念板块：同上，clist → 腾讯回退。
+            'concept_boards': (
+                lambda: self.fetch_eastmoney_clist('m:90+t:3', fid='f3', limit=10),
+                lambda: self.fetch_tencent_boards('gn', limit=8),
+                'eastmoney_concept',
+            ),
+            'money_boards': (
+                lambda: self.fetch_eastmoney_clist('m:90+t:2', fid='f62', limit=8),
+                None, 'eastmoney_money_boards',
+            ),
+            # 热点榜：clist（含主力净流入排序），被掐时回退人气榜+腾讯行情，保证热点面板不空。
+            'hot_stocks': (
+                lambda: self.fetch_eastmoney_clist(
+                    'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23', fid='f62', limit=12
+                ),
+                lambda: self.fetch_hot_rank(limit=12),
+                'eastmoney_hot_stocks',
+            ),
             # 涨幅榜（含涨停股），按当日涨跌幅 f3 降序 — 用于"涨停/领涨热点"面板
-            payload['eastmoney']['top_gainers'] = self.fetch_eastmoney_clist(
-                'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23', fid='f3', limit=12
-            )
-        except Exception as exc:
-            payload['errors']['eastmoney_top_gainers'] = str(exc)
-
-        try:
+            'top_gainers': (
+                lambda: self.fetch_eastmoney_clist(
+                    'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23', fid='f3', limit=12
+                ),
+                None, 'eastmoney_top_gainers',
+            ),
             # 实时异动（盘口异动，仅看涨）— 「实时异动」面板专用，区别于涨幅榜
-            payload['eastmoney']['changes'] = self.fetch_eastmoney_changes(limit=15)
-        except Exception as exc:
-            payload['errors']['eastmoney_changes'] = str(exc)
+            'changes': (lambda: self.fetch_eastmoney_changes(limit=15), None, 'eastmoney_changes'),
+        }
+        values: dict[str, list[dict[str, Any]]] = {}
+        timed_out = False
+        pool = ThreadPoolExecutor(max_workers=min(8, len(jobs)))
+        pending = {
+            pool.submit(self._fetch_with_fallback, fetch, fallback): (name, error_key)
+            for name, (fetch, fallback, error_key) in jobs.items()
+        }
+        try:
+            for future in as_completed(pending, timeout=COLD_FETCH_BUDGET_SECONDS):
+                name, error_key = pending[future]
+                try:
+                    value, error = future.result()
+                except Exception as exc:  # 单源异常不拖垮整屏
+                    value, error = [], str(exc)
+                values[name] = value
+                if error:
+                    payload['errors'][error_key] = error
+        except FuturesTimeout:
+            # 个别源超时(单源 5s×重试)时不再等：已完成的先用，剩余交给下一次刷新。
+            # 没有这道上限，弱网/代理异常时首屏会被拖到 60s+，撞前端 90s 超时直接「加载失败」。
+            timed_out = True
+            payload['errors']['timeout'] = '部分数据源超时，已先用已返回结果渲染'
+        finally:
+            for future in pending:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+
+        payload['jinshi'] = values.get('jinshi') or []
+        payload['ths_news'] = values.get('ths_news') or []
+        payload['sina_news'] = values.get('sina_news') or []
+        payload['eastmoney_news'] = values.get('eastmoney_news') or []
+        for key in ('industry_boards', 'concept_boards', 'money_boards',
+                    'hot_stocks', 'top_gainers', 'changes'):
+            payload['eastmoney'][key] = values.get(key) or []
 
         # 给热点/异动/涨幅个股就地补「板块信息」（行业映射就绪后生效，未就绪则留空）。
         self._attach_industry(payload['eastmoney']['hot_stocks'])
@@ -1273,5 +1281,38 @@ class MarketIntelligenceService:
         self._attach_industry(payload['eastmoney']['top_gainers'])
 
         self._cache['payload'] = payload
-        self._cache['ts'] = now
+        # 超时那次只拿到部分结果：20 秒后就当作过期，让下一次请求改走「先返回旧数据 + 后台刷新」。
+        self._cache['ts'] = now if not timed_out else now - max(0, self.ttl_seconds - 20)
         return payload
+
+    def _fetch_with_fallback(self, fetch, fallback=None) -> tuple[list[dict[str, Any]], str]:
+        """抓取单个源：主源异常/空结果时走回退源，返回 (结果, 错误描述)。"""
+        try:
+            value, error = fetch(), ''
+        except Exception as exc:
+            value, error = [], str(exc)
+        if value:
+            return value, ''
+        if fallback is None:
+            return [], error
+        try:
+            return fallback() or [], ''
+        except Exception as exc:
+            return [], str(exc) or error
+
+    def _refresh_in_background(self) -> None:
+        """过期快照的后台刷新：同一时刻只跑一个，失败保留旧数据等下一次。"""
+        with self._refresh_lock:
+            if self._refresh_thread is not None and self._refresh_thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._refresh_worker, name='market-intelligence-refresh', daemon=True
+            )
+            self._refresh_thread = thread
+            thread.start()
+
+    def _refresh_worker(self) -> None:
+        try:
+            self.load(force_refresh=True)
+        except Exception:
+            pass  # 刷新失败保留旧快照，下个周期再试
