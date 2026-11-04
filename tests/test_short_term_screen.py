@@ -83,6 +83,7 @@ def test_sector_live_quote_requires_matching_code_and_today_and_keeps_close():
 
 
 def test_fresh_sectors_keeps_new_live_boards_and_closing_values(monkeypatch):
+    monkeypatch.setattr(service.short_term_memberships,"collect",lambda sectors,previous:previous or {})
     monkeypatch.setattr(service,"_read",lambda key:None)
     monkeypatch.setattr(service.sector_depth_service,"query",lambda:{"as_of":"2026-10-30","rows":[{"code":"BK0001","name":"半导体","type":"行业","pct":3,"net":100}]})
     monkeypatch.setattr(service.tushare_client,"recent_trade_dates",lambda count:[])

@@ -223,6 +223,68 @@ def rank_sectors(rows, mode="heat"):
     return sorted(rows, key=key)
 
 
+def apply_memberships(sector_map, stocks, snapshots, today, current_only):
+    """同代码、同日期的完整成分覆盖名称推测；无行情的成分仅供关系图使用。"""
+    for sector in sector_map.values():
+        hit = snapshots.get(sector["code"]) or {}
+        date = hit.get("date")
+        valid = bool(hit.get("complete") and date and date <= today and (not current_only or date == today))
+        members = {str(r.get("code") or ""):r for r in hit.get("members", [])
+                   if re.fullmatch(r"\d{6}", str(r.get("code") or ""))} if valid else {}
+        valid = valid and bool(members)
+        sector["membership"] = {"complete":valid, "date":date, "total":len(members) if valid else None,
+                                "source":hit.get("source") or "雷达/封板记录的部分归属",
+                                "error":hit.get("error") or ("" if valid else "完整成分待补")}
+        if not valid:
+            continue
+        ident = sector["id"]
+        for stock in stocks.values():
+            if ident in stock["sector_ids"] and stock["code"] not in members:
+                stock["sector_ids"].remove(ident)
+        for code, raw in members.items():
+            stock = stocks.setdefault(code, {"code":code, "name":clean(raw.get("name") or code, 80),
+                "date":None, "price":None, "change_pct":None, "direction":"", "activity":None,
+                "changes_total":None, "sector_ids":[], "news_ids":[], "event_ids":[], "limits":[],
+                "timeline":[], "membership_only":True, "membership_basis":hit.get("source")})
+            if ident not in stock["sector_ids"]:
+                stock["sector_ids"].append(ident)
+            stock.setdefault("membership_evidence", {})[ident] = f"{hit.get('source')} · {date} · {sector['code']}"
+
+
+def sector_signals(row, members, radar_date, limits, news, today):
+    membership = row["membership"]
+    total = membership["total"]
+    radar_members = [s for s in members if radar_date and s.get("date") == radar_date and not s.get("membership_only")
+                     and (s.get("activity") is not None or s.get("changes_total") is not None or s.get("direction"))]
+    details = {}
+    for key in ("拉抬", "砸盘"):
+        codes = [s["code"] for s in radar_members if s.get("direction") == key]
+        complete = bool(membership["complete"] and membership["date"] == radar_date and len(radar_members) == total)
+        details[key] = {"value":len(codes) if radar_members else None, "unit":"股", "date":radar_date,
+                        "covered":len(radar_members), "total":total, "complete":complete, "stock_codes":codes,
+                        "basis":"当日累计异动方向标签的去重股票数；多/空异动至少2:1并结合涨跌方向，非事件次数。覆盖不足为样本值。"}
+    for key, kind in (("涨停", "U"), ("跌停", "D")):
+        date = limits.get("as_of")
+        codes = [s["code"] for s in members if any(e.get("kind") == kind and e.get("date") == date for e in s["limits"])]
+        complete = bool(date and membership["complete"] and membership["date"] == date and not limits.get("errors"))
+        details[key] = {"value":len(codes) if date and members else None, "unit":"股", "date":date,
+                        "covered":total if complete else len(members), "total":total, "complete":complete,
+                        "stock_codes":codes, "basis":("盘中动态封板池" if limits.get("provisional") else "所选日已核验封板记录")+"；同股去重，不累计炸板次数。"}
+    quote = row["quote"]
+    details["资金流入"] = {"value":quote["net"], "unit":"元", "date":quote.get("net_at"),
+        "complete":quote["net"] is not None and quote.get("net_label") != "成分净额", "stock_codes":[],
+        "covered":(quote.get("coverage") or {}).get("flow_count"), "total":total,
+        "basis":f"{quote.get('net_label')}；{quote.get('source')}。{quote.get('note') or ''}"}
+    member_codes = {s["code"] for s in members}
+    direct = [n["id"] for n in news if n.get("date") == today and
+              (row["name"] in n["title"]+" "+n.get("summary", "") or member_codes.intersection(n["stock_codes"]))]
+    details["消息提及"] = {"value":len(direct) if news else None, "unit":"条", "date":today,
+        "complete":False, "news_ids":direct, "stock_codes":[], "covered":sum(n.get("date") == today for n in news), "total":None,
+        "basis":"当日已采集消息按标题去重；仅直接提及板块名称或明确成分股的消息，不计泛题材关键词扩散。"}
+    row["signal_details"] = details
+    row["signals"] = {key:value["value"] for key, value in details.items()}
+
+
 def build_report(sources, today, generated_at, current_only=False):
     radar = sources.get("radar") or {}
     sector_data = sources.get("sectors") or {}
@@ -241,7 +303,7 @@ def build_report(sources, today, generated_at, current_only=False):
         name = clean(name, 100)
         if not name:
             return None
-        ident = name_to_id.get((name, kind)) or ("sector:" + code if code else uid("sector", kind + name))
+        ident = "sector:" + code if code else name_to_id.get((name, kind)) or uid("sector", kind + name)
         name_to_id[(name, kind)] = ident
         row = sector_map.setdefault(ident, {"id": ident, "name": name, "code": code, "type": kind,
             "pct": None, "net": None, "activity": None, "stock_codes": [], "news_ids": [], "event_ids": [],
@@ -332,6 +394,7 @@ def build_report(sources, today, generated_at, current_only=False):
             "sector_ids":[],"news_ids":[],"event_ids":[],"limits":[],"timeline":[],
             "membership_basis":"盘口异动源未提供行业归属"})
         row.setdefault("order_events",[]).append(event)
+    apply_memberships(sector_map, stocks, sector_data.get("memberships") or {}, today, current_only)
     for row in stocks.values():
         for ident in row["sector_ids"]:
             sector_map[ident]["stock_codes"].append(row["code"])
@@ -356,18 +419,13 @@ def build_report(sources, today, generated_at, current_only=False):
         row["heat_date"] = radar_date if row["trading_heat"] is not None else None
         row["heat_coverage"] = len(heat)
         row["heat_basis"] = "同日已覆盖成分股的量化雷达活跃度等权平均，非成交额或股吧人气"
-        row["signals"] = {
-            "拉抬": sum(s.get("direction") == "拉抬" for s in members),
-            "砸盘": sum(s.get("direction") == "砸盘" for s in members),
-            "涨停": sum(any(e.get("kind") == "U" for e in s["limits"]) for s in members),
-            "跌停": sum(any(e.get("kind") == "D" for e in s["limits"]) for s in members),
-            "资金流入": int(row["quote"]["net"] is not None and row["quote"]["net"] > 0),
-            "消息提及": len(row["news_ids"]),
-        }
+        sector_signals(row, members, radar_date, limits, news, today)
+        row["stock_codes"].sort(key=lambda c: (-(stocks[c].get("activity") or 0), -len(stocks[c]["limits"]), c))
         row["relevance"] = (len(members) * 2 + len(row["news_ids"]) * 3 + len(row["event_ids"]) * 2
                               + (row.get("activity") or 0) / 10)
-        observation = [f"覆盖{len(members)}只相关股票，拉抬{row['signals']['拉抬']}只、砸盘{row['signals']['砸盘']}只",
-                       f"{'盘中封板' if limits.get('provisional') else '收盘涨停'}{row['signals']['涨停']}只、跌停{row['signals']['跌停']}只（限价日{limits.get('as_of') or '未取得'}）"]
+        counts = {k:("未取得" if v is None else str(v)+"只") for k,v in row["signals"].items()}
+        observation = [f"已关联{len(members)}只股票，完整成分{'已取得' if row['membership']['complete'] else '待补'}；拉抬{counts['拉抬']}、砸盘{counts['砸盘']}",
+                       f"{'盘中封板' if limits.get('provisional') else '收盘涨停'}{counts['涨停']}、跌停{counts['跌停']}（限价日{limits.get('as_of') or '未取得'}）"]
         if row["quote"]["net"] is not None:
             observation.append(f"{row['quote']['net_label']}{row['quote'].get('net_at') or '未知日'}净额{row['quote']['net']/1e8:.2f}亿元")
         if row["quote"]["note"]:

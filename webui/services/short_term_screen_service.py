@@ -16,7 +16,7 @@ from data_store.connection import close_conn, get_conn
 from webui.services import market_limits_service, sector_depth_service, quant_radar_service
 from webui.services.market_health_service import now
 from webui.services.short_term_calendar import CONFERENCES, calendar_rows
-from webui.services import short_term_orders, short_term_limits
+from webui.services import short_term_orders, short_term_limits, short_term_memberships
 
 NAMESPACE = "short_term_screen"
 _lock = threading.Lock()
@@ -29,7 +29,7 @@ FEED_FIELDS = {
     "radar": ("stocks","sectors","summary","graph","radar_as_of"),
     "news": ("news","core_news","short_news","calendar","stocks","sectors","summary"),
     "popularity": ("hot_stocks","popularity_rises","hot_fetched_at","stocks"),
-    "sectors": ("sectors","summary","graph","sector_as_of","sector_status"),
+    "sectors": ("sectors","stocks","summary","graph","sector_as_of","sector_status"),
     "limits": ("limits","limit_up","limit_down","limit_as_of","limit_provisional","limit_fetched_at","summary","stocks","sectors"),
 }
 
@@ -183,6 +183,13 @@ def _fresh_radar():
 
 
 def _fresh_sectors():
+    value = _sector_quotes()
+    previous = ((_read("inputs") or {}).get("sectors") or {}).get("memberships") or {}
+    value["memberships"] = short_term_memberships.collect(value, {**previous, **(value.get("memberships") or {})})
+    return value
+
+
+def _sector_quotes():
     try:
         value = ((_read("inputs") or {}).get("sectors") or sector_depth_service.query()).copy()
         live = sector_depth_service.fetch_live()
