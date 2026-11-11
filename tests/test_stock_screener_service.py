@@ -510,3 +510,164 @@ def test_previous_feature_schema_is_not_reused():
     sc._remember_feature("600000", fresh)
     assert sc.cached_features("600000")["first_above_ma20"] is True
 
+
+
+# ----------------------------- 牛股挖掘维度 -----------------------------
+
+def _bull_payload(**extra):
+    payload = {"date": "2026-07-16", "days": 61, "repaired_days": [], "coverage": 1.0, "incomplete": False,
+               "stocks": {
+        "600000": {"tags": ["ambush_balanced"], "hits": ["底部埋伏·均衡·位置12%·承接分位93%"], "eligible": True,
+                   "ambush_score": 0.9312, "pos60": 0.1234, "dip60": -1.2, "frc60": 0.31, "vol60": 3.4,
+                   "vol_rank": 0.66, "energy": 0.62, "dd60": -21.0, "ret5": -2.0, "ret20": -9.0, "ret60": -18.0,
+                   "lu20": 0},
+        "300005": {"tags": ["ambush_aggressive"], "hits": ["底部埋伏·进攻·位置5%·承接分位99%"], "eligible": True,
+                   "ambush_score": 0.9871, "pos60": 0.05, "dip60": 0.8, "frc60": 0.12, "vol60": 6.8,
+                   "vol_rank": 0.97, "energy": 0.48, "dd60": -38.0, "ret5": -6.0, "ret20": -22.0, "ret60": -35.0,
+                   "lu20": 0},
+        "688981": {"tags": [], "hits": [], "eligible": True, "ambush_score": 0.41, "pos60": 0.3, "dip60": -6.5,
+                   "frc60": 0.7, "vol60": 2.0, "vol_rank": 0.2, "energy": 0.9, "dd60": -12.0, "ret5": -1.0,
+                   "ret20": -3.0, "ret60": 2.0, "lu20": 0},
+    }}
+    payload.update(extra)
+    return payload
+
+
+def test_bull_strategies_filter_as_union_and_explain_the_match():
+    out = _screen({"bull": {"strategies": ["ambush_balanced", "ambush_aggressive"]}, "sort": "ambush_score"},
+                  bull_fn=_bull_payload, kline_fetcher=None)
+    assert [s["code"] for s in out["stocks"]] == ["300005", "600000"]          # 按承接分位降序
+    assert out["applied"] == ["bull"] and out["dates"]["bull"] == "2026-07-16"
+    top = out["stocks"][0]
+    assert top["bull_tags"] == ["ambush_aggressive"] and top["hits"] == ["底部埋伏·进攻·位置5%·承接分位99%"]
+    assert top["ambush_score"] == 98.7 and top["pos60"] == 5.0                  # 分位/位置换成 0~100
+    assert top["dip60"] == 0.8 and top["elasticity"] == 6.8 and top["dd60"] == -38.0
+    assert top["ret20"] == -22.0 and top["limit_up_20"] == 0 and top["vol_energy"] == 0.48   # 无日K时用面板口径补列
+    assert out["funnel"] == [{"dimension": "bull", "before": 4, "after": 2, "missing": 1}]
+    assert any("2026-07-16 收盘" in note and "不代表后续上涨" in note for note in out["notes"])
+    assert not any("盘中快照" in note or "尚未到齐" in note for note in out["notes"])
+
+
+def test_bull_sort_keys_cover_the_ambush_columns():
+    cond = {"bull": {"strategies": ["ambush_balanced", "ambush_aggressive"]}}
+    for key, first in (("pos60", "600000"), ("dip60", "300005"), ("elasticity", "300005")):
+        out = _screen(dict(cond, sort=key), bull_fn=_bull_payload, kline_fetcher=None)
+        assert out["stocks"][0]["code"] == first, key
+
+
+def test_bull_mode_all_requires_every_selected_strategy():
+    cond = {"bull": {"strategies": ["ambush_balanced"], "mode": "all"}}
+    assert [s["code"] for s in _screen(cond, bull_fn=_bull_payload)["stocks"]] == ["600000"]
+    cond["bull"]["strategies"].append("ambush_aggressive")       # 风险档互斥,不可能同时命中两档
+    assert _screen(cond, bull_fn=_bull_payload)["stocks"] == []
+
+
+def test_bull_combines_with_other_dimensions():
+    out = _screen({"bull": {"strategies": ["ambush_balanced", "ambush_aggressive"]},
+                   "radar": {"direction": "排除砸盘"}}, bull_fn=_bull_payload)
+    assert [s["code"] for s in out["stocks"]] == ["600000"]
+    assert out["applied"] == ["bull", "radar"]
+
+
+def test_bull_picks_outside_the_quote_snapshot_are_kept_from_the_flow_panel():
+    snapshot = [r for r in _market_rows() if r["code"] not in ("300005", "688981")]   # 快照没覆盖到这两只
+    cond = {"bull": {"strategies": ["ambush_balanced", "ambush_aggressive"]}, "sort": "ambush_score"}
+    out = _screen(cond, bull_fn=_bull_payload, market_rows_fn=lambda: snapshot, kline_fetcher=None)
+    assert [s["code"] for s in out["stocks"]] == ["300005", "600000"]     # 入选的补回;未入选的 688981 不补
+    assert out["base_count"] == 3
+    top = out["stocks"][0]
+    assert (top["name"], top["price"], top["change_pct"], top["turnover"]) == ("探路者", 12.0, 6.0, None)
+    assert any("1 只入选股票不在行情快照内" in note and "2026-07-16 收盘口径" in note for note in out["notes"])
+
+    full = _screen(cond, bull_fn=_bull_payload, kline_fetcher=None)       # 快照完整时不补、不提示
+    assert full["base_count"] == 4 and not any("不在行情快照内" in note for note in full["notes"])
+
+    main_only = dict(cond, market={"boards": ["main"]})                   # 行情条件对补进来的股票同样生效
+    out = _screen(main_only, bull_fn=_bull_payload, market_rows_fn=lambda: snapshot)
+    assert [s["code"] for s in out["stocks"]] == ["600000"]
+
+
+def test_bull_notes_surface_repaired_days_and_an_incomplete_latest_day():
+    out = _screen({"bull": {"strategies": ["ambush_balanced"]}},
+                  bull_fn=lambda: _bull_payload(repaired_days=["2026-07-10"], coverage=0.9391, incomplete=True))
+    notes = " | ".join(out["notes"])
+    assert "2026-07-10 的数据是未更新完的盘中快照" in notes and "当日资金未计入" in notes
+    assert "2026-07-16 的资金流数据尚未到齐(行数为前一日的 94%)" in notes
+
+
+def test_bull_without_history_matches_nothing_and_says_why():
+    out = _screen({"bull": {"strategies": ["ambush_steady"]}},
+                  bull_fn=lambda: {"date": "", "stocks": {}, "reason": "本地资金流历史仅 12 个交易日"})
+    assert out["ok"] and out["stocks"] == []
+    assert out["funnel"][0]["missing"] == out["funnel"][0]["before"] == 4
+    assert "本地资金流历史仅 12 个交易日" in out["notes"]
+
+
+def test_unknown_bull_strategies_do_not_activate_the_dimension():
+    out = _screen({"bull": {"strategies": ["main_wave", "to_the_moon"]}}, bull_fn=_bull_payload)   # 旧策略键同样失效
+    assert "bull" not in out["applied"] and out["total_matched"] == 4
+    assert out["stocks"][0]["bull_tags"] == [] and out["stocks"][0]["ambush_score"] is None
+
+
+@pytest.mark.parametrize("bull", [{"strategies": "ambush_steady"},
+                                  {"strategies": ["ambush_steady"], "mode": "x"}, []])
+def test_malformed_bull_condition_is_rejected(bull):
+    out = _screen({"bull": bull}, bull_fn=_bull_payload)
+    assert out["ok"] is False and out["stocks"] == []
+    assert "牛股挖掘" in out["error"] or "bull" in out["error"]
+
+
+def test_meta_lists_bull_strategies_without_triggering_a_load(monkeypatch):
+    monkeypatch.setattr(sc, "_BULL_RESULT", {})
+    monkeypatch.setattr(sc, "_default_bull", lambda: pytest.fail("meta 不应同步装载牛股面板"))
+    bull = sc.meta()["bull"]
+    assert [s["key"] for s in bull["strategies"]] == ["ambush_steady", "ambush_balanced", "ambush_aggressive"]
+    assert [s["risk"] for s in bull["strategies"]] == ["low", "mid", "high"]
+    assert "counts" not in bull
+
+
+def test_default_bull_reads_local_moneyflow_and_reloads_only_changed_days(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from data_store import connection as conn_mod, moneyflow_repo
+
+    monkeypatch.setenv("KRONOS_SQLITE_PATH", str(tmp_path / "k.sqlite"))
+    conn_mod.reset_for_testing()
+    monkeypatch.setattr(sc, "_BULL_SLICES", {})
+    monkeypatch.setattr(sc, "_BULL_RESULT", {})
+    try:
+        days = pd.bdate_range("2026-01-05", periods=62).strftime("%Y-%m-%d").tolist()
+
+        def day_rows(date, ladder_pct):
+            return pd.DataFrame([
+                {"trade_date": date, "ts_code": "600001.SH", "name": "涨停样本", "pct_change": ladder_pct,
+                 "close": 10.0, "net_amount": 800.0, "net_amount_rate": 4.0},
+                {"trade_date": date, "ts_code": "600002.SH", "name": "平稳样本", "pct_change": 0.5,
+                 "close": 10.0, "net_amount": 500.0, "net_amount_rate": 2.5},
+            ])
+
+        for date in days[:61]:
+            moneyflow_repo.upsert_df(day_rows(date, 10.0 if date in days[59:61] else 0.0), top_n=0)
+        moneyflow_repo.upsert_df(day_rows(days[60], 3.0).head(1).assign(ts_code="600009.SH"), top_n=100)
+        assert moneyflow_repo.recent_dates(3) == days[58:61]
+        lean = moneyflow_repo.get_day_lean(days[60])
+        assert [r["ts_code"] for r in lean] == ["600001.SH", "600002.SH"] and lean[0]["close"] == 10.0
+
+        first = sc._default_bull()
+        assert first["date"] == days[60] and set(first["stocks"]) == {"600001", "600002"}
+        assert first["stocks"]["600001"]["lu20"] == 2 and first["stocks"]["600002"]["lu20"] == 0
+        assert first["stocks"]["600002"]["tags"] == [] and first["counts"]["ambush_steady"] == 0   # 两只股票排不了名
+        assert first["repaired_days"] == [] and first["incomplete"] is False
+        assert sc._default_bull() is first                     # 5 分钟内直接复用
+
+        loaded = []
+        real = moneyflow_repo.get_day_lean
+        monkeypatch.setattr(moneyflow_repo, "get_day_lean",
+                            lambda date, snapshot_top_n=0: loaded.append(date) or real(date, snapshot_top_n))
+        moneyflow_repo.upsert_df(day_rows(days[61], 10.0), top_n=0)   # 新交易日入库
+        sc._BULL_RESULT.clear()
+        second = sc._default_bull()
+        assert loaded == [days[61]] and days[0] not in sc._BULL_SLICES
+        assert second["date"] == days[61] and second["stocks"]["600001"]["lu20"] == 3
+    finally:
+        conn_mod.reset_for_testing()

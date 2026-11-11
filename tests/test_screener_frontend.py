@@ -13,7 +13,7 @@ const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:a
 const template = fs.readFileSync('webui/templates/desktop.html', 'utf8');
 const start = template.indexOf("{% if active_page == 'screener' %}");
 const markup = template.slice(start, template.indexOf('{% endif %}', start));
-const elements = {}, chips = [], boards = [], labels = [], requests = [], timers = [];
+const elements = {}, chips = [], bulls = [], boards = [], labels = [], requests = [], timers = [];
 function attrs(text) {
   return Object.fromEntries([...text.matchAll(/([\w-]+)="([^"]*)"/g)].map(m => [m[1], m[2]]));
 }
@@ -63,6 +63,9 @@ for (const match of markup.matchAll(/<select\b([^>]*)>([\s\S]*?)<\/select>/g)) {
 for (const match of markup.matchAll(/<button\b([^>]*data-preset="[^"]+"[^>]*)>([^<]*)<\/button>/g)) {
   const p = attrs(match[1]), chip = new Element('', p); chip.textContent = match[2]; chips.push(chip);
 }
+for (const match of markup.matchAll(/<button\b([^>]*data-bull="[^"]+"[^>]*)>([^<]*)<\/button>/g)) {
+  const p = attrs(match[1]), chip = new Element('', p); chip.textContent = match[2]; bulls.push(chip);
+}
 for (const match of markup.matchAll(/<input\b([^>]*class="scr-board"[^>]*)>/g)) boards.push(new Element('', attrs(match[1])));
 for (const match of markup.matchAll(/<label\b([^>]*data-scr-presets="[^"]+"[^>]*)>([\s\S]*?)<\/label>/g)) {
   const label = new Element('', attrs(match[1])); label.input = elements[attrs(match[2]).id]; labels.push(label);
@@ -72,6 +75,8 @@ const document = {body: {dataset: {page: 'screener'}}, getElementById: id => ele
   querySelectorAll(selector) {
     if (selector === '.scr-chip') return chips;
     if (selector === '.scr-chip.active') return chips.filter(c => c.classList.contains('active'));
+    if (selector === '.scr-bull-chip') return bulls;
+    if (selector === '.scr-bull-chip.active') return bulls.filter(c => c.classList.contains('active'));
     if (selector === '.scr-board') return boards;
     if (selector === '.scr-board:checked') return boards.filter(c => c.checked);
     if (selector === '[data-scr-presets]') return labels;
@@ -82,7 +87,10 @@ const document = {body: {dataset: {page: 'screener'}}, getElementById: id => ele
   }};
 let response = {ok: true, base_count: 4, total_matched: 0, stocks: [], notes: []};
 const window = {async fetchJson(url, options) {
-  if (url.endsWith('/meta')) return {dims: {}, presets: {defaults: {spike_mult: 1.8, amount_min: 0}}};
+  if (url.endsWith('/meta')) return {dims: {}, presets: {defaults: {spike_mult: 1.8, amount_min: 0}},
+    bull: {date: '2026-11-10', counts: {ambush_balanced: 26}, strategies: [
+      {key: 'ambush_balanced', summary: '低位未启动', risk: 'mid'},
+      {key: 'ambush_aggressive', summary: '波动最高的两成', risk: 'high'}]}};
   assert.equal(url, '/api/screener/run'); requests.push(JSON.parse(options.body)); return response;
 }};
 elements.scrRunBtn.addEventListener('click', () => {throw new Error('旧事件不应重复执行');});
@@ -90,6 +98,7 @@ const context = vm.createContext({document, window, localStorage: {getItem: () =
   setTimeout: fn => timers.push(fn)});
 vm.runInContext(fs.readFileSync('webui/static/lumo_screener.js', 'utf8'), context);
 const chip = key => chips.find(c => c.dataset.preset === key);
+const bull = key => bulls.find(c => c.dataset.bull === key);
 const run = () => elements.scrRunBtn.fire();
 (async () => {
   assert(params().every(p => p.disabled && p.value === ''), '未选标签的参数不能默认生效');
@@ -130,6 +139,50 @@ const run = () => elements.scrRunBtn.fire();
   await timers[0]();
   assert.equal(elements.scrSpikeMult.placeholder, '默认 1.8', '占位默认值应跟随服务端元数据');
   assert.equal(elements.scrAmountMin.placeholder, '不限');
+
+  // ---- 牛股挖掘(底部埋伏三档):点选即筛选 ----
+  assert.deepEqual(bulls.map(c => c.dataset.bull), ['ambush_steady', 'ambush_balanced', 'ambush_aggressive']);
+  assert.deepEqual(bulls.map(c => c.dataset.risk), ['low', 'mid', 'high']);
+  assert(bull('ambush_balanced').title.includes('低位未启动') && bull('ambush_balanced').title.includes('波动风险：中'));
+  assert.equal(bull('ambush_balanced').dataset.count, '26');
+  assert.equal(bull('ambush_aggressive').dataset.count, undefined, '没有命中数时不显示角标');
+  await elements.scrResetBtn.fire();
+  response = {ok: true, applied: ['bull'], base_count: 4, total_matched: 1, stocks: [
+    {code: '600000', name: '样本', ambush_score: 93.1, pos60: 12.3, dip60: -1.2, elasticity: 3.4,
+      hits: ['底部埋伏·均衡·位置12%·承接分位93%']}]};
+  let sent = requests.length;
+  await bull('ambush_balanced').fire();
+  assert.equal(requests.length, sent + 1, '点选牛股标签直接发起筛选');
+  assert.deepEqual(requests.at(-1).bull, {strategies: ['ambush_balanced']});
+  assert.equal(requests.at(-1).sort, 'ambush_score', '排序停在默认项时自动切到承接分位');
+  assert.equal(elements.scrSort.value, 'ambush_score', '切换对用户可见');
+  assert.equal(bull('ambush_balanced').getAttribute('aria-pressed'), 'true');
+  assert(elements.scrApplied.textContent.includes('牛股挖掘: 底部埋伏·均衡'));
+  for (const text of ['承接分位', '60日位置%', '跌日主力%', '日波动%', '>93<', '>12<', '-1.2', '3.40', '承接分位93%']) {
+    assert(elements.scrResultTable.innerHTML.includes(text), '启用牛股挖掘时展示' + text);
+  }
+  for (const gone of ['连板', '路径效率', '60日最大涨%']) {
+    assert(!elements.scrResultTable.innerHTML.includes(gone), '旧策略的列不应再出现: ' + gone);
+  }
+  sent = requests.length;   // 上一轮未返回时连点:只补跑一次,且带上最新的全部选择
+  await Promise.all([bull('ambush_aggressive').fire(), bull('ambush_steady').fire()]);
+  assert.equal(requests.length, sent + 2);
+  assert.deepEqual(requests.at(-1).bull, {strategies: ['ambush_steady', 'ambush_balanced', 'ambush_aggressive']});
+  elements.scrSort.value = 'ret20';   // 用户自己选过排序:取消牛股标签时不该被改回去
+  await bull('ambush_steady').fire(); await bull('ambush_aggressive').fire(); await bull('ambush_balanced').fire();
+  assert.equal(requests.at(-1).bull, undefined, '全部取消后不再带牛股条件');
+  assert.equal(requests.at(-1).sort, 'ret20');
+  elements.scrSort.value = 'main_net_wan';
+  await bull('ambush_steady').fire(); await bull('ambush_steady').fire();
+  assert.equal(elements.scrSort.value, 'main_net_wan', '自动切过去的排序,取消后切回默认');
+  response = {ok: true, applied: ['market'], stocks: [{code: '600000', name: '样本', hits: []}]};
+  await run();
+  assert(!elements.scrResultTable.innerHTML.includes('承接分位'), '未启用牛股挖掘时不加列');
+  await bull('ambush_aggressive').fire(); await elements.scrResetBtn.fire(); await run();
+  assert.deepEqual(requests.at(-1), requests[0], '重置会清掉牛股选择并恢复默认排序');
+  response = {ok: true, stocks: [], funnel: [{dimension: 'bull', before: 4, after: 0, missing: 4}]};
+  await bull('ambush_aggressive').fire();
+  assert(elements.scrResultTable.innerHTML.includes('牛股挖掘数据不足'));
 })().catch(error => {console.error(error); process.exitCode = 1;});
 '''
     result = subprocess.run([shutil.which("node"), "-e", script],

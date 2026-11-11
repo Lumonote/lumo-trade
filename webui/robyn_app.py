@@ -1564,12 +1564,13 @@ def quant_radar_accumulation(request: Request) -> Response:
 @_native_get("/api/screener/meta")
 def screener_meta(request: Request) -> Response:
     """条件选股:各维度数据新鲜度(日期+覆盖数),供页面顶部提示条件可用性。"""
+    stock_screener_service.warm_bull_async()  # 进页面即后台预热牛股挖掘面板
     return _json_response(stock_screener_service.meta())
 
 
 @_native_post("/api/screener/run")
 def screener_run(request: Request) -> Response:
-    """条件选股:body 为条件 JSON(market/flow/radar/accum/dragon/opportunity/tech/quant/preset)。
+    """条件选股:body 为条件 JSON(market/bull/flow/radar/accum/dragon/opportunity/tech/quant/preset)。
 
     提速要点:
     - 行情基座直接取全市场快照的 stocks(与云图页共用 180s 缓存),跳过
@@ -1595,9 +1596,13 @@ def screener_run(request: Request) -> Response:
 
 
 def _screener_market_rows() -> list:
-    """全市场快照(仅 stocks):与云图页共享 180s 缓存,跳过不必要的聚合计算。"""
+    """全市场快照(仅 stocks):与云图页共享 180s 缓存,跳过不必要的聚合计算。
+
+    limit 取上限 6000 = 不截断(A 股约 5500 只)。云图页默认的 5000 是按总市值截掉最小的
+    约 500 只,选股不能跟着截:底部埋伏的入选里有一成多落在这一段。
+    """
     try:
-        return webui_core.MARKET_INTELLIGENCE_SERVICE.fetch_market_cloud_stocks(limit=5000) or []
+        return webui_core.MARKET_INTELLIGENCE_SERVICE.fetch_market_cloud_stocks(limit=6000) or []
     except Exception:
         return []
 

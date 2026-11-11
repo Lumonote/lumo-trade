@@ -8,6 +8,9 @@
 - 吸筹: :func:`quant_radar_service.accumulation_payload`(kv 快照+TTL,窗口 20/40/60)。
 - 龙虎榜: 本地 ``dragon_tiger_list``(近N日上榜聚合) + ``dragon_tiger_inst`` 量化席位。
 - 机会分: 本地 ``opportunity_run/item`` 最新一次挖掘评分。
+- 牛股挖掘: 本地 ``moneyflow_dc`` 61 个交易日全市场面板 → :mod:`analysis.bull_stock_factors`
+  (底部埋伏 稳健/均衡/进攻 三档:低位未启动 + 主力逆势承接排序;按最近收盘日计算,
+  规则与参数的证据见 ``scripts/research_bottom_factors.py``,回测与实盘同一份代码)。
 - 技术形态: 路由注入 ``kline_fetcher``(STOCK_KLINE_SERVICE,60s TTL);候选 ≤ TECH_CAP
   才评估(全市场逐股拉日K不可行),超出按当前排序截前 TECH_CAP 只并在 notes 说明。
 
@@ -19,6 +22,7 @@ from __future__ import annotations
 import datetime as _dt
 import math
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -112,6 +116,8 @@ def _persist_features(rows: List[tuple], ttl: Optional[int] = None) -> int:
 
 SORT_KEYS = {"main_net_wan", "change_pct", "activity", "accum_score", "opp_score",
              "dragon_net_wan", "turnover", "quant_buy", "rsi",
+             # 牛股挖掘因子(资金流面板口径)
+             "ambush_score", "pos60", "dip60", "elasticity",
              # 形态列表新增排序键(见 FEATURE_KEYS)
              "ma20_dev", "ret5", "ret20", "ret60", "vol_energy", "vol_ratio",
              "vol_step", "vol_peak_ratio", "amount_ma5_yi", "limit_up_20", "dist_pct"}
@@ -157,7 +163,8 @@ def _num(v: Any, ndigits: int = 2) -> Optional[float]:
 def _conditions_error(cond: Dict[str, Any]) -> Optional[str]:
     if not isinstance(cond, dict):
         return "选股条件必须为对象"
-    for dim in ("market", "flow", "radar", "accum", "dragon", "opportunity", "tech", "quant", "preset"):
+    for dim in ("market", "flow", "radar", "accum", "dragon", "opportunity", "tech", "quant",
+                "preset", "bull"):
         if cond.get(dim) is not None and not isinstance(cond[dim], dict):
             return f"{dim} 条件必须为对象"
     for dim, lo, hi, label in (
@@ -175,6 +182,11 @@ def _conditions_error(cond: Dict[str, Any]) -> Optional[str]:
     preset = cond.get("preset") or {}
     if preset.get("mode", "all") not in ("all", "any"):
         return "形态标签组合方式必须为全部满足或满足任一"
+    bull = cond.get("bull") or {}
+    if bull.get("mode", "any") not in ("all", "any"):
+        return "牛股挖掘组合方式必须为全部满足或满足任一"
+    if bull.get("strategies") is not None and not isinstance(bull["strategies"], list):
+        return "牛股挖掘策略必须为列表"
     for key in PRESET_DEFAULTS:
         raw = preset.get(key)
         if raw in (None, ""):
@@ -308,6 +320,51 @@ def _default_opportunity() -> Dict[str, Any]:
         return {"date": str(run.get("run_date") or run.get("run_at") or ""), "by_code": by_code}
     except Exception:
         return {}
+
+
+# 牛股挖掘:逐日切片缓存(date → (行数, slice)) + 最近一次评估结果。历史日的行数只会在
+# 回补时变化,所以每次只重读「新出现 / 行数变了」的交易日;评估结果 5 分钟内直接复用。
+_BULL_LOCK = threading.Lock()
+_BULL_SLICES: Dict[str, tuple] = {}
+_BULL_RESULT: Dict[str, Any] = {}
+_BULL_TTL_SECONDS = 300.0
+
+
+def _default_bull() -> Dict[str, Any]:
+    """最近收盘日的牛股挖掘全市场评估(见 bull_stock_factors.evaluate)。失败 → 带 reason 的空结果。"""
+    from analysis import bull_stock_factors as bf
+
+    with _BULL_LOCK:
+        now = time.monotonic()
+        if _BULL_RESULT and now - _BULL_RESULT.get("ts", 0.0) <= _BULL_TTL_SECONDS:
+            return _BULL_RESULT["payload"]
+        try:
+            from data_store import moneyflow_repo
+
+            dates = moneyflow_repo.recent_dates(bf.LOOKBACK, snapshot_top_n=0)
+            counts = moneyflow_repo.date_counts(dates, snapshot_top_n=0)
+            for date in dates:
+                cached = _BULL_SLICES.get(date)
+                if cached is None or cached[0] != counts.get(date, 0):
+                    rows = moneyflow_repo.get_day_lean(date, snapshot_top_n=0)
+                    _BULL_SLICES[date] = (len(rows), bf.build_day_slice(rows))
+            for stale in [d for d in _BULL_SLICES if d not in dates]:
+                del _BULL_SLICES[stale]
+            payload = bf.evaluate(bf.assemble_panel([(d, _BULL_SLICES[d][1]) for d in dates]))
+        except Exception as exc:  # noqa: BLE001 — 牛股维度失败不应拖垮整次选股
+            return {"date": "", "days": 0, "stocks": {}, "reason": f"牛股挖掘数据读取失败: {exc}"}
+        _BULL_RESULT.update(ts=now, payload=payload)
+        return payload
+
+
+def _pct100(value: Any) -> Optional[float]:
+    """0~1 的分位/位置 → 0~100(一位小数);缺值 → None。"""
+    return round(float(value) * 100.0, 1) if isinstance(value, (int, float)) else None
+
+
+def warm_bull_async() -> None:
+    """后台预热牛股挖掘面板(冷启动要读 61 日全市场行),让第一次点选不必等。"""
+    threading.Thread(target=_default_bull, name="screener-bull-warm", daemon=True).start()
 
 
 # ----------------------------- 纯函数:维度地图构建 -----------------------------
@@ -853,6 +910,7 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
            quant_seats_fn: Optional[Callable[[int], Dict[str, bool]]] = None,
            opportunity_fn: Optional[Callable[[], Dict[str, Any]]] = None,
            kline_fetcher: Optional[Callable[[str, int], List[Dict[str, Any]]]] = None,
+           bull_fn: Optional[Callable[[], Dict[str, Any]]] = None,
            ) -> Dict[str, Any]:
     """按条件选股:激活维度 AND 过滤,返回命中列表 + 数据新鲜度 meta。
 
@@ -916,6 +974,28 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
     elif _active(cond.get("radar")):
         notes.append("量化雷达按日数据为空,盘口异动维度按不命中处理(可先打开量化雷达页)")
 
+    # 牛股挖掘按本地资金流面板对全市场评估,入选不该因为行情快照没覆盖到(当日停牌、快照不全)
+    # 而消失:快照外的入选股票用资金流最新日补进基座,标签上的命中数才和点选后的结果对得上
+    bull_cond = cond.get("bull") or {}
+    bull_keys: List[str] = []
+    bull_payload: Dict[str, Any] = {}
+    bull_map: Dict[str, Dict[str, Any]] = {}
+    bull_outside = 0
+    if bull_cond.get("strategies"):
+        from analysis.bull_stock_factors import STRATEGIES as _BULL_STRATEGIES
+
+        bull_keys = [k for k in bull_cond["strategies"] if k in _BULL_STRATEGIES]
+    if bull_keys:
+        bull_payload = (bull_fn or _default_bull)() or {}
+        bull_map = bull_payload.get("stocks") or {}
+        for code, row in bull_map.items():
+            f = flow_map.get(code)
+            if code in base or not f or not any(k in bull_keys for k in row.get("tags") or []):
+                continue
+            base[code] = {"code": code, "name": f.get("name") or "", "price": f.get("close"),
+                          "change_pct": f.get("change_pct"), "turnover": None, "industry": ""}
+            bull_outside += 1
+
     # ---------- 逐维过滤 ----------
     survivors: List[str] = list(base)
 
@@ -956,6 +1036,40 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
             kept.append(code)
         survivors = kept
         record_step("market", before, missing)
+
+    # 牛股挖掘:资金流面板口径的底部埋伏策略,全市场已算好,放在逐股日K之前先收窄候选
+    if bull_keys:
+        before = len(survivors)
+        applied.append("bull")
+        if bull_payload.get("date"):
+            dates["bull"] = str(bull_payload["date"])
+        if bull_payload.get("reason"):
+            notes.append(str(bull_payload["reason"]))
+        elif bull_map:
+            notes.append(f"牛股挖掘按 {bull_payload.get('date')} 收盘的本地资金流面板计算;"
+                         "已排除ST、上市不足55个交易日、当日无成交及5日均额低于3000万的股票。"
+                         "底部埋伏只筛选低位未启动的股票并按主力逆势承接排序,不代表后续上涨")
+            repaired = [str(d) for d in bull_payload.get("repaired_days") or []]
+            if repaired:
+                notes.append(f"本地资金流 {'、'.join(repaired)} 的数据是未更新完的盘中快照,"
+                             "已按次日前收盘修正涨跌幅,当日资金未计入")
+            if bull_payload.get("incomplete"):
+                notes.append(f"最新交易日 {bull_payload.get('date')} 的资金流数据尚未到齐"
+                             f"(行数为前一日的 {float(bull_payload.get('coverage') or 0) * 100:.0f}%),"
+                             "结果可能不完整,建议稍后重试")
+            if bull_outside:
+                notes.append(f"{bull_outside} 只入选股票不在行情快照内(当日停牌或快照未覆盖),"
+                             f"其现价与涨跌幅为 {dates.get('flow') or bull_payload.get('date')} 收盘口径")
+        need_all = bull_cond.get("mode") == "all"
+        missing = sum(1 for code in survivors if code not in bull_map)
+        kept = []
+        for code in survivors:
+            tags = (bull_map.get(code) or {}).get("tags") or []
+            matched = [k for k in bull_keys if k in tags]
+            if len(matched) == len(bull_keys) if need_all else matched:
+                kept.append(code)
+        survivors = kept
+        record_step("bull", before, missing)
 
     flow_cond = cond.get("flow") or {}
     if _active(flow_cond):
@@ -1264,7 +1378,12 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
         a = accum_map.get(code) or {}
         d = dragon_map.get(code) or {}
         o = (opp.get("by_code") or {}).get(code) or {}
+        b = bull_map.get(code) or {}
+        feat = tech_map.get(code) or {}
         hits: List[str] = []
+        if bull_keys:
+            hits.extend(text for key, text in zip(b.get("tags") or [], b.get("hits") or [])
+                        if key in bull_keys)
         if "flow" in applied:
             if f.get("main_net_wan") is not None:
                 hits.append(f"主力净流入{f['main_net_wan']:.0f}万")
@@ -1307,9 +1426,22 @@ def screen(conditions: Optional[Dict[str, Any]] = None,
             "quant_buy": (quant_map.get(code) or {}).get("buy"),
             "quant_sell": (quant_map.get(code) or {}).get("sell"),
             # 形态/量能字段(未启用日K维度时全为 None,前端显示 --)
-            **{k: (tech_map.get(code) or {}).get(k) for k in FEATURE_KEYS},
+            **{k: feat.get(k) for k in FEATURE_KEYS},
+            # 牛股挖掘因子(仅启用牛股挖掘时有值;资金流面板口径,截至 dates.bull)
+            "bull_tags": [k for k in (b.get("tags") or []) if k in bull_keys],
+            "ambush_score": _pct100(b.get("ambush_score")),   # 档内逆势承接分位 0~100
+            "pos60": _pct100(b.get("pos60")),                 # 60日区间位置 0~100
+            "dip60": b.get("dip60"),                          # 下跌日主力净占比 %
+            "elasticity": b.get("vol60"),                     # 60日日波动 %
+            "dd60": b.get("dd60"),
             "hits": hits,
         })
+        if b:  # 没有日K特征的行,用面板口径补齐区间涨幅/量能/涨停次数,避免整列空白
+            row_out = stocks[-1]
+            for key, source in (("ret5", "ret5"), ("ret20", "ret20"), ("ret60", "ret60"),
+                                ("vol_energy", "energy"), ("limit_up_20", "lu20")):
+                if row_out.get(key) is None:
+                    row_out[key] = b.get(source)
 
     sort_key = str(cond.get("sort") or "main_net_wan")
     if sort_key not in SORT_KEYS:
@@ -1396,6 +1528,16 @@ def watchlist_alerts(items: List[Dict[str, Any]],
 def meta() -> Dict[str, Any]:
     """各维度数据新鲜度(日期+覆盖行数),供选股页顶部展示与条件可用性提示。"""
     out: Dict[str, Any] = {"ok": True, "dims": {}, "presets": {"defaults": dict(PRESET_DEFAULTS)}}
+    try:
+        from analysis import bull_stock_factors as bf
+
+        out["bull"] = {"strategies": bf.catalog(), "lookback": bf.LOOKBACK}
+        cached = (_BULL_RESULT.get("payload") or {}) if _BULL_RESULT else {}
+        if cached:  # 只回传已算好的结果;冷启动由路由层后台预热,不阻塞本接口
+            out["bull"].update(date=cached.get("date") or "", days=cached.get("days") or 0,
+                               counts=cached.get("counts") or {}, reason=cached.get("reason") or "")
+    except Exception:  # noqa: BLE001
+        out["bull"] = {"strategies": []}
     try:
         from data_store import moneyflow_repo
 

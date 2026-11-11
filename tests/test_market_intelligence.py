@@ -310,6 +310,36 @@ def test_market_cloud_keeps_largest_result_when_all_sources_partial(monkeypatch)
     assert rows[0]["source"] == "sina_market_cloud"
 
 
+def test_market_cloud_cache_is_shared_across_limits(monkeypatch):
+    """云图页(市值前 5000)与条件选股(全市场)共用一份缓存:窄请求取宽缓存的前缀,取数按请求过的最宽 limit。"""
+
+    monkeypatch.setattr(market_intelligence_module, "MARKET_CLOUD_FULL_COVERAGE", 1)
+    service = MarketIntelligenceService()
+    universe = [{"code": f"{600000 + i}", "source": "tushare_market_cloud", "trade_date": "20260618"}
+                for i in range(5600)]
+    fetched = []
+
+    def fake_tushare(limit=5000, trade_date=None):
+        fetched.append(limit)
+        return universe[:limit]
+
+    service.fetch_tushare_market_cloud_stocks = fake_tushare
+    service.fetch_eastmoney_market_cloud_stocks = lambda *args, **kwargs: []
+    service.fetch_sina_market_cloud_stocks = lambda *args, **kwargs: []
+    service._fetch_tencent_cloud_quotes = lambda codes, **kwargs: {}
+
+    assert len(service.fetch_market_cloud_stocks(limit=5000)) == 5000     # 云图页先到:按 5000 取
+    assert len(service.fetch_market_cloud_stocks(limit=6000)) == 5600     # 选股要全市场:缓存不够宽,重取一次
+    assert fetched == [5000, 6000]
+    narrow = service.fetch_market_cloud_stocks(limit=5000)                # 云图页再来:直接取前缀,不重取
+    assert [row["code"] for row in narrow] == [row["code"] for row in universe[:5000]]
+    assert fetched == [5000, 6000]
+    assert len(service.fetch_market_cloud_stocks(limit=5000, force_refresh=True)) == 5000
+    assert fetched == [5000, 6000, 6000]                                  # 此后刷新始终按最宽取,两页不再互相挤掉
+    assert len(service.fetch_market_cloud_stocks(limit=6000)) == 5600
+    assert fetched == [5000, 6000, 6000]
+
+
 def test_market_cloud_trade_date_uses_tushare_history_only(monkeypatch):
     """指定交易日查询应精确读取该日 TuShare 日线，且不混入实时行情回退。"""
 

@@ -147,7 +147,8 @@ class MarketIntelligenceService:
         # 过期快照的后台刷新线程：只允许一个在跑，避免每次 load 都新起线程。
         self._refresh_thread: threading.Thread | None = None
         self._refresh_lock = threading.Lock()
-        self._market_cloud_cache: dict[str, Any] = {'ts': 0, 'key': '', 'payload': None}
+        self._market_cloud_cache: dict[str, Any] = {'ts': 0, 'key': '', 'limit': 0, 'payload': None}
+        self._market_cloud_widest: int = 0  # 本进程请求过的最宽 limit,见 fetch_market_cloud_stocks
         self._maybe_refresh_industry_map()  # 进程启动即后台预热，首个 load 多半已就绪
 
     def _request_json(self, url: str, headers: dict[str, str] | None = None, timeout: int = 5,
@@ -629,32 +630,37 @@ class MarketIntelligenceService:
         if requested_trade_date and len(requested_trade_date) != 8:
             return []
         limit = max(100, min(int(limit or 5000), 6000))
-        cache_key = f"{requested_trade_date or 'latest'}:{limit}"
-        cached = self._market_cloud_cache.get('payload')
+        # 缓存只按「交易日口径」分槽,槽里放本进程请求过的最宽 limit 那份,更窄的请求取前缀:
+        # 各数据源都是排好序再截断,前缀 == 按该 limit 单独取数。云图页(市值前 5000)与
+        # 条件选股(全市场)因此共用同一份缓存,不会因为 limit 不同互相挤掉、各自再冷拉一遍。
+        cache_key = requested_trade_date or 'latest'
+        self._market_cloud_widest = fetch_limit = max(limit, self._market_cloud_widest)
+        cache = self._market_cloud_cache
         if (
             not force_refresh
-            and cached is not None
-            and self._market_cloud_cache.get('key') == cache_key
-            and now - self._market_cloud_cache.get('ts', 0) < self.ttl_seconds
+            and cache.get('payload') is not None
+            and cache.get('key') == cache_key
+            and int(cache.get('limit') or 0) >= limit
+            and now - cache.get('ts', 0) < self.ttl_seconds
         ):
-            return cached
+            return cache['payload'][:limit]
 
         if requested_trade_date:
-            items = self.fetch_tushare_market_cloud_stocks(limit=limit, trade_date=requested_trade_date)
-            self._market_cloud_cache = {'ts': now, 'key': cache_key, 'payload': items}
-            return items
+            items = self.fetch_tushare_market_cloud_stocks(limit=fetch_limit, trade_date=requested_trade_date)
+            self._market_cloud_cache = {'ts': now, 'key': cache_key, 'limit': fetch_limit, 'payload': items}
+            return items[:limit]
 
         realtime_sources = (
-            lambda: self.fetch_eastmoney_market_cloud_stocks(limit=limit, now=now),
-            lambda: self.fetch_sina_market_cloud_stocks(limit=limit),
+            lambda: self.fetch_eastmoney_market_cloud_stocks(limit=fetch_limit, now=now),
+            lambda: self.fetch_sina_market_cloud_stocks(limit=fetch_limit),
         )
-        full_source = lambda: self.fetch_tushare_market_cloud_stocks(limit=limit)  # noqa: E731
+        full_source = lambda: self.fetch_tushare_market_cloud_stocks(limit=fetch_limit)  # noqa: E731
         if force_refresh:
             sources = (realtime_sources[0], full_source, realtime_sources[1])
         else:
             sources = (full_source, realtime_sources[0], realtime_sources[1])
 
-        enough = min(MARKET_CLOUD_FULL_COVERAGE, limit)
+        enough = min(MARKET_CLOUD_FULL_COVERAGE, fetch_limit)
         best: list[dict[str, Any]] = []
         for fetch in sources:
             try:
@@ -666,8 +672,8 @@ class MarketIntelligenceService:
             if len(best) >= enough:
                 break
         best = self._overlay_realtime_quotes(best)
-        self._market_cloud_cache = {'ts': now, 'key': cache_key, 'payload': best}
-        return best
+        self._market_cloud_cache = {'ts': now, 'key': cache_key, 'limit': fetch_limit, 'payload': best}
+        return best[:limit]
 
     @staticmethod
     def _cloud_quotes_overlay_due(rows: list[dict[str, Any]], today: datetime.date | None = None) -> bool:

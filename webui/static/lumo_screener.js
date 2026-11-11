@@ -2,6 +2,9 @@
  *
  * 1) 高级条件折叠:默认收起,状态记 localStorage;形态标签(chips)常驻页面顶部。
  * 2) 形态标签:18 个预设,默认多选取并集,可切换交集;只显示关联参数,留空走服务端默认。
+ *    牛股挖掘(2026-11-11):底部埋伏 稳健/均衡/进攻 三档,点选即筛选(多选取并集),色点为波动风险档;
+ *    点选时排序自动切到「逆势承接分位」。口径在服务端 analysis/bull_stock_factors.py,
+ *    标题与命中数由 /api/screener/meta 下发。
  * 3) 结果列表:扩展列(MA20偏离/5·20·60日涨幅/量能倍数/单日量倍/量能环比/峰倍比/换手/5日均额/
  *    20日涨停/距线/触线)+ 本地排序 + 代码名称搜索 + 分页 + 导出 CSV + 双击进个股分析。
  *
@@ -16,9 +19,12 @@
   if (!$('scrRunBtn') || typeof window.fetchJson !== 'function') return;
 
   var ADV_KEY = 'lumo.screener.advOpen';
-  var state = { payload: null, page: 1, pageSize: 50, sortKey: '', sortDir: -1, query: '', limit: 2000 };
+  var state = { payload: null, page: 1, pageSize: 50, sortKey: '', sortDir: -1, query: '', limit: 2000,
+    running: false, rerun: false };
   var PRESET_TEXT = {};
-  var DIM_TEXT = { market: '行情', flow: '主力资金', radar: '盘口异动', accum: '吸筹',
+  var BULL_TEXT = {};
+  var RISK_TEXT = { low: '低', mid: '中', high: '高' };
+  var DIM_TEXT = { market: '行情', bull: '牛股挖掘', flow: '主力资金', radar: '盘口异动', accum: '吸筹',
     dragon: '龙虎榜', opportunity: '机会评分', tech: '技术形态', quant: '量化模型', kline: '日K条件' };
 
   // ---------- 接管旧事件(避免双绑定) ----------
@@ -101,6 +107,52 @@
       updateAppliedHint();
     });
   }
+  // ---------- 牛股挖掘(点选即筛选) ----------
+  function initBull() {
+    Array.prototype.forEach.call(document.querySelectorAll('.scr-bull-chip'), function (chip) {
+      BULL_TEXT[chip.dataset.bull] = chip.textContent.trim();
+      chip.setAttribute('aria-pressed', 'false');
+      chip.addEventListener('click', function () {
+        chip.classList.toggle('active');
+        chip.setAttribute('aria-pressed', chip.classList.contains('active') ? 'true' : 'false');
+        syncBullSort();
+        updateAppliedHint();
+        return run();
+      });
+    });
+  }
+  // 牛股挖掘的结果按承接分位看才有意义:排序还停在默认项时跟着切过去,全部取消后切回;用户自己选过的不动
+  function syncBullSort() {
+    var sort = $('scrSort');
+    if (!sort) return;
+    var on = activeBull().length > 0;
+    if (on && sort.value === 'main_net_wan') sort.value = 'ambush_score';
+    else if (!on && sort.value === 'ambush_score') sort.value = 'main_net_wan';
+  }
+  function activeBull() {
+    return Array.prototype.slice.call(document.querySelectorAll('.scr-bull-chip.active'))
+      .map(function (c) { return c.dataset.bull; });
+  }
+  function clearBull() {
+    Array.prototype.forEach.call(document.querySelectorAll('.scr-bull-chip.active'), function (c) {
+      c.classList.remove('active');
+      c.setAttribute('aria-pressed', 'false');
+    });
+  }
+  function applyBullMeta(bull) {
+    var byKey = {};
+    ((bull && bull.strategies) || []).forEach(function (item) { byKey[item.key] = item; });
+    var counts = (bull && bull.counts) || null;
+    Array.prototype.forEach.call(document.querySelectorAll('.scr-bull-chip'), function (chip) {
+      var item = byKey[chip.dataset.bull];
+      if (!item) return;
+      var count = counts && isNum(counts[item.key]) ? counts[item.key] : null;
+      chip.title = item.summary + '（波动风险：' + (RISK_TEXT[item.risk] || '中') + '）' +
+        (count === null ? '' : ' · ' + bull.date + ' 命中 ' + count + ' 只');
+      if (count === null) delete chip.dataset.count; else chip.dataset.count = String(count);
+    });
+  }
+
   function activeLabels() {
     return Array.prototype.slice.call(document.querySelectorAll('.scr-chip.active'))
       .map(function (c) { return c.dataset.preset; });
@@ -117,11 +169,13 @@
     if (!box) return;
     var labels = keys.map(function (k) { return PRESET_TEXT[k] || k; });
     var bits = [];
+    var bull = activeBull().map(function (k) { return BULL_TEXT[k] || k; });
+    if (bull.length) bits.push('牛股挖掘: ' + bull.join(' / '));
     if (labels.length) bits.push('形态: ' + labels.join(selVal('scrPresetMode') === 'all' ? ' + ' : ' / ') +
       (selVal('scrPresetMode') === 'all' ? '（全部满足）' : '（满足任一）'));
     var cond = buildPayload();
     Object.keys(DIM_TEXT).forEach(function (dim) {
-      if (cond[dim]) bits.push(DIM_TEXT[dim] + ' ' + Object.keys(cond[dim]).length + ' 项');
+      if (cond[dim] && dim !== 'bull') bits.push(DIM_TEXT[dim] + ' ' + Object.keys(cond[dim]).length + ' 项');
     });
     box.textContent = bits.length ? bits.join(' · ') : '未启用筛选条件';
   }
@@ -141,6 +195,9 @@
       .map(function (el) { return el.value; });
     if (boards.length) mkt.boards = boards;
     if (Object.keys(mkt).length) cond.market = mkt;
+
+    var bull = activeBull();
+    if (bull.length) cond.bull = { strategies: bull };
 
     var flow = {};
     putNum(flow, 'main_net_min', 'scrMainNetMin');
@@ -239,6 +296,21 @@
     { key: 'hits', label: '命中条件', cls: 'screener-hits' },
     { key: '__ops', label: '操作', cls: 'capital-actions-col' }
   ];
+  // 仅启用牛股挖掘时追加(资金流面板口径,截至最近收盘日),插在 60日% 之后
+  var BULL_COLUMNS = [
+    { key: 'ambush_score', label: '承接分位', fmt: fmtInt, num: true, sort: true, csv: '逆势承接分位(档内,0-100)' },
+    { key: 'pos60', label: '60日位置%', fmt: fmtInt, num: true, sort: true, csv: '60日区间位置%' },
+    { key: 'dip60', label: '跌日主力%', fmt: function (v) { return fmtNum(v, 1); }, num: true, sort: true, csv: '下跌日主力净占比%(60日)' },
+    { key: 'elasticity', label: '日波动%', fmt: function (v) { return fmtNum(v, 2); }, num: true, sort: true, csv: '日波动%(60日)' }
+  ];
+  function bullApplied() {
+    return !!state.payload && (state.payload.applied || []).indexOf('bull') >= 0;
+  }
+  function columns() {
+    if (!bullApplied()) return COLUMNS;
+    var at = COLUMNS.findIndex(function (col) { return col.key === 'ret60'; }) + 1;
+    return COLUMNS.slice(0, at).concat(BULL_COLUMNS, COLUMNS.slice(at));
+  }
 
   function cellHtml(col, row) {
     if (col.key === '__ops') {
@@ -289,7 +361,7 @@
   }
 
   function headHtml() {
-    return '<thead><tr><th class="scr-col-idx">#</th>' + COLUMNS.map(function (col) {
+    return '<thead><tr><th class="scr-col-idx">#</th>' + columns().map(function (col) {
       var cls = col.cls || '';
       var attrs = '';
       if (col.sort) {
@@ -371,10 +443,11 @@
       return;
     }
 
+    var cols = columns();
     var body = slice.map(function (row, i) {
       return '<tr data-scr-row="' + esc(row.code) + '" data-scr-name="' + esc(row.name || '') + '">' +
         '<td class="scr-col-idx">' + (start + i + 1) + '</td>' +
-        COLUMNS.map(function (col) {
+        cols.map(function (col) {
           return '<td class="' + (col.cls || '') + (col.num ? ' scr-num' : '') + '">' + cellHtml(col, row) + '</td>';
         }).join('') + '</tr>';
     }).join('');
@@ -412,7 +485,10 @@
   }
 
   async function run() {
+    // 牛股挖掘点选会连续触发:上一轮还没回来就只记一笔,结束后按最新条件补跑一次
+    if (state.running) { state.rerun = true; return; }
     if (!validateInputs()) return;
+    state.running = true;
     var btn = $('scrRunBtn');
     if (btn) { btn.disabled = true; btn.textContent = '选股中…'; }
     state.payload = null;
@@ -449,6 +525,8 @@
       renderError('选股失败: ' + msg);
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = '开始选股'; }
+      state.running = false;
+      if (state.rerun) { state.rerun = false; await run(); }
     }
   }
 
@@ -486,6 +564,7 @@
       c.classList.remove('active');
       c.setAttribute('aria-pressed', 'false');
     });
+    clearBull();
     state.query = '';
     state.sortKey = '';
     updateAppliedHint();
@@ -497,12 +576,15 @@
     if (!rows.length) { toast('没有可导出的数据'); return; }
     var header = ['代码', '名称', '现价', '今日%', 'MA20偏离%', '5日%', '20日%', '60日%',
       '5/60日量倍', '日K量倍', '量能环比', '峰倍比', '换手%', '5日均额(亿)', '20日涨停',
-      '距线%', '触线%', '主力净流入(万)', '命中条件'];
+      '距线%', '触线%', '主力净流入(万)'];
+    var extra = bullApplied() ? BULL_COLUMNS : [];
+    header = header.concat(extra.map(function (col) { return col.csv; }), ['命中条件']);
     var lines = [header.join(',')];
     rows.forEach(function (r) {
       var cells = [r.code, r.name || '', r.price, r.change_pct, r.ma20_dev, r.ret5, r.ret20,
         r.ret60, r.vol_energy, r.vol_ratio, r.vol_step, r.vol_peak_ratio, r.turnover,
-        r.amount_ma5_yi, r.limit_up_20, r.dist_pct, r.touch_pct, r.main_net_wan];
+        r.amount_ma5_yi, r.limit_up_20, r.dist_pct, r.touch_pct, r.main_net_wan]
+        .concat(extra.map(function (col) { return r[col.key]; }));
       var text = cells.map(function (v) {
         if (v === null || v === undefined || v === '') return '';
         return String(v).replace(/"/g, '""');
@@ -608,6 +690,7 @@
 
   initAdv();
   initChips();
+  initBull();
   bind();
   updateAppliedHint();
   // 稍等压缩包内那条 meta 请求先落地,再覆盖成带缓存规模的版本
@@ -615,11 +698,19 @@
 
   // 覆盖压缩包内旧的 meta 文案:额外展示本地日K/形态缓存规模与有效期,
   // 让「第二次选股为什么变快」对用户可见。
+  var bullMetaTries = 0;
   async function loadMeta() {
     var box = $('scrMetaLine');
     if (!box || typeof window.fetchJson !== 'function') return;
     try {
       var data = await window.fetchJson('/api/screener/meta');
+      var bull = (data && data.bull) || {};
+      applyBullMeta(bull);
+      // 牛股面板在后端后台预热(首次要读 61 日全市场行):没算完就隔几秒再问,拿到命中数为止
+      if ((bull.strategies || []).length && !bull.date && !bull.reason && bullMetaTries < 6) {
+        bullMetaTries += 1;
+        setTimeout(loadMeta, 3000);
+      }
       var dims = (data && data.dims) || {};
       var defaults = (data && data.presets && data.presets.defaults) || {};
       Array.prototype.forEach.call(document.querySelectorAll('[data-scr-param]'), function (input) {
@@ -632,6 +723,7 @@
       if (dims.radar) bits.push('量化雷达 ' + (dims.radar.date || '无') + '(' + (dims.radar.rows || 0) + ')');
       if (dims.dragon) bits.push('龙虎榜 ' + (dims.dragon.date || '无'));
       if (dims.opportunity) bits.push('机会分 ' + (dims.opportunity.date || '无') + '(' + (dims.opportunity.rows || 0) + '只)');
+      if (bull.date) bits.push('牛股挖掘 ' + bull.date);
       var cache = (data && data.cache) || {};
       if (cache.feature) {
         var ttlMin = Math.max(1, Math.round((cache.ttl_seconds || 0) / 60));

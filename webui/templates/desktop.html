@@ -380,6 +380,19 @@
               </div>
             </div>
             <div class="panel-body">
+              <div class="scr-preset-block scr-bull-block">
+                <div class="scr-preset-head">
+                  <span class="scr-preset-title">牛股挖掘 <em>点选即筛选，可多选（满足任一），并与下方条件同时满足</em></span>
+                  <span class="scr-bull-legend">波动风险
+                    <i data-risk="low"></i>低 <i data-risk="mid"></i>中 <i data-risk="high"></i>高</span>
+                </div>
+                <div class="scr-preset-chips" id="scrBullChips">
+                  <button class="scr-bull-chip" type="button" data-bull="ambush_steady" data-risk="low">底部埋伏·稳健</button>
+                  <button class="scr-bull-chip" type="button" data-bull="ambush_balanced" data-risk="mid">底部埋伏·均衡</button>
+                  <button class="scr-bull-chip" type="button" data-bull="ambush_aggressive" data-risk="high">底部埋伏·进攻</button>
+                </div>
+                <p class="panel-meta control-help">只筛还在底部、没有启动的股票：处于60日区间下部、近20日无涨停、近期未放量；再按逆势承接分（主力在下跌日净买入、资金不追涨）排名，取各档前两成。三档按历史波动划分：波动越大，历史上大幅上涨与大幅回撤的比例都越高，且回撤升得更快；承接分位只代表相对同档股票的资金结构，不代表上涨概率。按最近收盘日的全市场资金流面板计算，已排除ST、次新、停牌与低流动性股票；悬停标签可查看口径。规则筛选仅供研究，不构成投资建议。</p>
+              </div>
               <div class="scr-preset-block">
                 <div class="scr-preset-head">
                   <span class="scr-preset-title">形态标签 <em>仅启用选中的标签</em></span>
@@ -556,6 +569,10 @@
                     <option value="dragon_net_wan">龙虎榜净买</option>
                     <option value="turnover">换手率</option>
                     <option value="quant_buy">量化买入票数</option>
+                    <option value="ambush_score">逆势承接分位（牛股挖掘）</option>
+                    <option value="pos60">60日位置（牛股挖掘）</option>
+                    <option value="dip60">下跌日主力净占比（牛股挖掘）</option>
+                    <option value="elasticity">日波动（牛股挖掘）</option>
                   </select>
                 </label>
                 <button class="button" type="button" id="scrRunBtn">开始选股</button>
@@ -585,7 +602,7 @@
             <div class="panel-body">
               <div id="scrNotes"></div>
               <div class="capital-table-wrap compact scr-result-wrap" id="scrResultTable">
-                <p class="muted">勾选形态标签或展开高级条件后点击「开始选股」。</p>
+                <p class="muted">点选牛股挖掘直接筛选，或勾选形态标签、展开高级条件后点击「开始选股」。</p>
               </div>
             </div>
           </div>

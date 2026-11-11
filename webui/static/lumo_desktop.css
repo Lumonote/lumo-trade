@@ -7296,3 +7296,31 @@ body[data-page="market_cloud"] .mc-empty {
   font-size: 0.8rem; color: var(--muted); cursor: pointer;
 }
 .scr-timing { font-size: 0.76rem; color: var(--faint); margin-left: 6px; }
+
+/* 条件选股 · 牛股挖掘快速选择 (2026-11-11):点选即筛选,色点 = 回测标定的波动风险档 */
+.scr-bull-legend { display: inline-flex; align-items: center; gap: 4px; font-size: 0.76rem; color: var(--muted); }
+.scr-bull-legend i, .scr-bull-chip::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--amber); flex: none;
+}
+.scr-bull-legend i { margin-left: 6px; }
+.scr-bull-legend i[data-risk="low"], .scr-bull-chip[data-risk="low"]::before { background: var(--green); }
+.scr-bull-legend i[data-risk="high"], .scr-bull-chip[data-risk="high"]::before { background: var(--red); }
+.scr-bull-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
+  border-radius: 999px; padding: 5px 14px; font-size: 0.82rem; font-weight: 600; line-height: 1.5;
+  cursor: pointer; transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+.scr-bull-chip:hover { border-color: var(--blue); color: var(--blue); }
+.scr-bull-chip.active {
+  background: var(--blue); border-color: var(--blue); color: #fff;
+  box-shadow: 0 2px 8px rgba(47, 111, 221, 0.28);
+}
+.scr-bull-chip.active::before { box-shadow: 0 0 0 2px #fff; }
+.scr-bull-chip[data-count]::after {
+  content: attr(data-count); font-weight: 500; font-size: 0.74rem; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.scr-bull-chip.active[data-count]::after { color: rgba(255, 255, 255, 0.82); }
+.scr-bull-block .control-help { margin: 8px 0 0; }

@@ -338,6 +338,38 @@ def get_market_window(end_date: str, days: int, snapshot_top_n: int = 0) -> pd.D
     )
 
 
+_LEAN_FIELDS = (
+    "ts_code", "name", "pct_change", "close", "net_amount", "net_amount_rate",
+    "buy_elg_amount", "buy_elg_amount_rate", "buy_lg_amount", "buy_lg_amount_rate",
+    "buy_md_amount", "buy_md_amount_rate", "buy_sm_amount", "buy_sm_amount_rate",
+)
+
+
+def recent_dates(days: int, snapshot_top_n: int = 0) -> list[str]:
+    """最近 N 个有数据的交易日(升序 ISO)。"""
+    rows = get_conn().execute(
+        """
+        SELECT DISTINCT trade_date FROM moneyflow_dc
+        WHERE top_n=? ORDER BY trade_date DESC LIMIT ?
+        """,
+        (int(snapshot_top_n), max(1, int(days or 1))),
+    ).fetchall()
+    return sorted(str(r[0]) for r in rows)
+
+
+def get_day_lean(trade_date: str, snapshot_top_n: int = 0) -> list[dict]:
+    """单个交易日的全市场行,只取数值列(不带 raw_json)。
+
+    供需要长窗口全市场面板的调用方(牛股挖掘 61 日 × 全市场)逐日装载:
+    走主键前缀定位,且不读每行约 400 字节的 raw_json,比 get_market_window 轻一个量级。
+    """
+    rows = get_conn().execute(
+        f"SELECT {','.join(_LEAN_FIELDS)} FROM moneyflow_dc WHERE trade_date=? AND top_n=?",
+        (_date_key(trade_date), int(snapshot_top_n)),
+    ).fetchall()
+    return [dict(zip(_LEAN_FIELDS, row)) for row in rows]
+
+
 def latest_date(top_n: int = None):
     if top_n is None:
         row = get_conn().execute("SELECT MAX(trade_date) FROM moneyflow_dc").fetchone()
