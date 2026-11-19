@@ -9,7 +9,7 @@
   const head=(title,note="")=>`<div class="mh-box-head"><div><h3>${esc(title)}</h3><p>${esc(note)}</p></div></div>`;
   const stat=(title,value,note="")=>`<div class="mm-stat"><span>${esc(title)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></div>`;
   const link=(url,label)=>/^https:\/\//.test(url||"")?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`:esc(label);
-  const state={data:null,id:0,poll:null,started:false,sort:new Map(),tables:new Map(),factors:[]};
+  const state={data:null,id:0,poll:null,started:false,sort:new Map(),tables:new Map(),factors:[],candle:null,candles:[],candleWidth:0};
   const selected=()=>({equity:$("mmEquity").value,factor:$("mmFactor").value,frequency:$("mmFrequency").value,window:$("mmWindow").value,lag:$("mmLag").value,category:$("mmCategory").value,keyword:$("mmKeyword").value.trim()});
   function error(message=""){$("mmError").hidden=!message;$("mmError").textContent=message;}
   async function api(url,opts={}){const response=await fetch(url,{...opts,headers:{"Content-Type":"application/json"}});const body=await response.json();if(!response.ok)throw new Error(body.error||"宏观研究读取失败");return body;}
@@ -40,6 +40,75 @@
   }
   function factors(){const frequency=$("mmFrequency").value,previous=$("mmFactor").value;const rows=state.factors.filter(r=>r.frequency!=="quarterly"&&(frequency==="monthly"||r.frequency==="daily"));$("mmFactor").innerHTML=rows.map(r=>`<option value="${r.key}">${esc(r.name)}</option>`).join("");$("mmFactor").value=rows.some(r=>r.key===previous)?previous:frequency==="monthly"?"m2":"real10y";}
   function frequencyChanged(){const monthly=$("mmFrequency").value==="monthly";$("mmWindow").innerHTML=(monthly?[24,36,60,120]:[60,120,252,756]).map(n=>`<option value="${n}" ${n===(monthly?60:252)?"selected":""}>${n}${monthly?"月":"交易日"}</option>`).join("");$("mmLag").innerHTML=(monthly?[0,1,3,6]:[0,1,5,20]).map(n=>`<option value="${n}">${n?`领先${n}${monthly?"个月":"交易日"}`:"同期变化"}</option>`).join("");factors();}
+  function renderValuationComparison(d){
+    const v=d.valuation_comparison, rank=n=>n==null?"—":`${num(n,1)}%`;
+    $("mmValuationComparison").innerHTML=head("五指数股债利差与低估对比", `股债利差 = 100 ÷ PE TTM − 同日中国10年期国债收益率（%）。以各指数配对日为基准，回看${v.years}年（不含当日）。PE分位 ≤${v.pe_max}% 且利差分位 ≥${v.spread_min}% 标为历史低估；少于${v.min_samples}个历史样本则不可判定。`)+table("valuation-comparison",[
+      ["指数","name",r=>`${esc(r.name)}<small>${esc(r.code)}${r.key===d.equity?" · 研究指数":""}</small>`],
+      ["判定","status",r=>`<span${r.low===true?' class="mm-low-mark"':""}>${esc(r.status)}</span>`],
+      ["配对日","date",r=>esc(r.date||"—")],["PE TTM（倍）","pe",r=>num(r.pe)],
+      ["股债利差（百分点）","spread",r=>num(r.spread)],["10年国债（%）","cn10y",r=>num(r.cn10y)],
+      ["PE历史分位","pe_percentile",r=>rank(r.pe_percentile)],["利差历史分位","spread_percentile",r=>rank(r.spread_percentile)],
+      ["历史样本","samples",r=>num(r.samples,0)],
+    ],v.rows);
+  }
+  function candlePeriod(date,bucket){
+    if(bucket==="quarter")return `${date.slice(0,4)}-Q${Math.ceil(Number(date.slice(5,7))/3)}`;
+    if(bucket==="month")return date.slice(0,7);
+    const day=new Date(date);day.setUTCDate(day.getUTCDate()-(day.getUTCDay()+6)%7);
+    return day.toISOString().slice(0,10);
+  }
+  function makeCandles(rows,{start,end,bucket}){
+    const bars=[];
+    for(const {date,value} of rows){
+      if(date<start||date>end)continue;
+      const period=candlePeriod(date,bucket),bar=bars.at(-1);
+      if(bar?.period===period){bar.end=date;bar.high=Math.max(bar.high,value);bar.low=Math.min(bar.low,value);bar.close=value;bar.n++;}
+      else bars.push({period,start:date,end:date,open:value,high:value,low:value,close:value,n:1});
+    }
+    return bars;
+  }
+  function candleDescription({start,end,open,high,low,close,n}){
+    const d=state.data.factor==="usdcny"?4:2;
+    return `${start}${end===start?"":` 至 ${end}`} · 开 ${num(open,d)}　高 ${num(high,d)}　低 ${num(low,d)}　收 ${num(close,d)} · ${n} 条观测`;
+  }
+  function renderCandlePlot(){
+    const box=$("mmCandlePlot"),bars=state.candles;
+    if(!bars.length)return;
+    const width=box.clientWidth||680,left=60,right=width-12,top=16,bottom=186;
+    state.candleWidth=box.clientWidth;
+    const lo=Math.min(...bars.map(b=>b.low)),hi=Math.max(...bars.map(b=>b.high)),pad=(hi-lo)*.08||Math.max(.01,Math.abs(hi)*.005);
+    const max=hi+pad,span=hi-lo+2*pad,y=v=>top+(max-v)/span*(bottom-top),slot=(right-left)/bars.length,w=Math.min(16,slot*.62);
+    const digits=state.data.factor==="usdcny"?4:span<.08?3:Math.abs(max)>=100?0:2;
+    const grid=Array.from({length:4},(_,i)=>{const at=top+i*(bottom-top)/3;return `<line class="grid" x1="${left}" x2="${right}" y1="${at}" y2="${at}"/><text x="${left-7}" y="${at+4}" text-anchor="end">${num(max-i*span/3,digits)}</text>`;}).join("");
+    const marks=bars.map((b,i)=>{
+      const x=left+(i+.5)*slot,up=b.close>b.open,flat=b.close===b.open,color=flat?"#64748b":up?"#ad4f50":"#397b64";
+      return `<g data-mm-candle="${i}"><title>${esc(candleDescription(b))}</title><rect x="${x-slot/2}" y="${top}" width="${slot}" height="${bottom-top}" fill="transparent"/><line x1="${x}" x2="${x}" y1="${y(b.high)}" y2="${y(b.low)}" stroke="${color}"/><rect x="${x-w/2}" y="${Math.min(y(b.open),y(b.close))}" width="${w}" height="${Math.max(2,Math.abs(y(b.open)-y(b.close)))}" fill="${color}"/></g>`;
+    }).join("");
+    const first=bars[0].start,last=bars.at(-1).end,dates=first===last?`<text x="${(left+right)/2}" y="209" text-anchor="middle">${first}</text>`:`<text x="${left}" y="209">${first}</text><text x="${right}" y="209" text-anchor="end">${last}</text>`;
+    box.innerHTML=`<svg class="mm-candle-chart" viewBox="0 0 ${width} 220" role="img" aria-label="${esc($("mmFactorHistoryTitle").textContent)}：${bars.length} 根">${grid}${marks}${dates}</svg>`;
+  }
+  function filterFactorHistory(){
+    const c=state.candle,rows=state.data.chart.factor_history;
+    state.candles=c.start<=c.end?makeCandles(rows,c):[];
+    const latest=state.candles.at(-1);
+    $("mmCandleDetail").textContent=latest?candleDescription(latest):"";
+    if(latest)renderCandlePlot();
+    else $("mmCandlePlot").innerHTML=empty(c.start>c.end?"开始日期不能晚于结束日期。":rows.length?"所选区间没有实际观测。":"当前快照没有该指标的实际观测。");
+  }
+  function renderFactorHistory(d,factor,reset=false){
+    const rows=d.chart.factor_history,first=rows[0]?.date,last=rows.at(-1)?.date,end=last||d.as_of;
+    $("mmFactorHistory").hidden=false;
+    $("mmFactorHistoryTitle").textContent=`${d.factor==="equity_bond_spread"?d.equity_name+" ":""}${d.factor_name} · 指标 K 线`;
+    $("mmFactorCoverage").textContent=`${first?`历史观测 ${first} 至 ${last}`:"暂无历史观测"} · 单位：${factor.unit} · 开收取周期内首末观测，高低取极值`;
+    const previous=state.candle;
+    if(reset||previous?.factor!==d.factor||(!previous.custom&&previous.end!==end)){
+      const start=new Date(Date.parse(end)-364*864e5).toISOString().slice(0,10);
+      const bucket=previous?.factor===d.factor?previous.bucket:factor.frequency==="monthly"||["lpr1y","lpr5y"].includes(d.factor)?"month":"week";
+      state.candle={factor:d.factor,start,end,bucket,custom:false};
+      $("mmCandleStart").value=start;$("mmCandleEnd").value=end;$("mmCandleBucket").value=bucket;
+    }
+    filterFactorHistory();
+  }
   function render(){const d=state.data,r=d.relationship;state.factors=d.factors;if($("mmFactor").options.length===1)factors();
     $("mmMeta").textContent=`研究快照 ${d.as_of} · 读取时间 ${d.updated_at||"尚未采集"} · 指标各自保留实际数据日`;
     $("mmMetrics").innerHTML=d.metrics.map(m=>`<button type="button" class="mm-metric" data-mm-factor="${m.key}" ${m.frequency==="quarterly"?'disabled title="季频环境指标，暂不参与日/月频相关研究"':""} aria-pressed="${m.key===d.factor}"><span>${esc(m.name)}</span><strong>${num(m.value,m.key==="usdcny"?4:2)} <span style="display:inline">${esc(m.unit)}</span></strong><small>观测 ${esc(m.period||m.date||"未取得")}</small><small>${m.published_on?`刊载 ${esc(m.published_on)}`:m.frequency==="monthly"||m.frequency==="quarterly"?"原始发布日期未提供":"观测日不等于精确发布时间"}${m.age_days>60?` · 距今${m.age_days}天`:""}</small></button>`).join("");
@@ -47,6 +116,7 @@
     const factor=d.metrics.find(m=>m.key===d.factor),asset=d.chart.asset,last=asset.at(-1)?.date,first=asset[0]?.date;
     $("mmTrend").innerHTML=head(`${d.equity_name} × ${d.factor_name}`,"双轴仅便于对照原始走势；统计使用变化量，不以曲线接近认定因果。")+lineChart([{name:d.equity_name,rows:asset},{name:`${d.factor_name} (${factor.unit})`,rows:d.chart.factor.filter(r=>(!first||r.date>=first)&&(!last||r.date<=last))}],{dual:true});
     $("mmScatter").innerHTML=head("变化量关系与稳定性",`${r.start||"—"} 至 ${r.end||"—"} · ${r.status}`)+`<div class="mm-stats">${stat("Pearson相关 r",num(r.rho),"范围 -1 至 +1")}${stat("Spearman秩相关",num(r.spearman),"观察单调关系")}${stat("有效样本",num(r.n,0),`${d.frequency==="monthly"?"月":"日"}频`)}${stat("样本 R²",r.r2==null?"—":`${num(r.r2*100,1)}%`,"单因子线性拟合解释度")}</div>`+scatter(r)+`<p class="mm-subtle">β ${num(r.beta,4)}（指数对数收益% / ${esc(r.x_unit)}）；窗口对照 ${r.stability.map(s=>`${s.window}${d.frequency==="monthly"?"月":"日"} r=${num(s.rho)} / n=${s.n}`).join("；")}。${esc(d.alignment_note)}</p>`;
+    renderValuationComparison(d);renderFactorHistory(d,factor);
     const corrCell=row=>`<span class="mm-corr"><i style="width:${Math.abs(row.rho||0)*80}px;background:${(row.rho||0)<0?"#b88f5d":"#3d806c"}"></i>${num(row.rho)}</span>`;
     $("mmCorrelations").innerHTML=head("宏观因子联动矩阵","点击因子切换研究；点击任意表头升降序，缺失值始终排在最后。")+table("correlations",[["宏观因子","name",row=>`<button class="mc-row-btn" data-mm-factor="${row.key}" type="button">${esc(row.name)}</button>`],["相关 r","rho",corrCell],["有效样本","n",row=>num(row.n,0)],["β","beta",row=>num(row.beta,4)],["覆盖起点","start"],["覆盖终点","end"]],d.correlations);
     $("mmSectors").innerHTML=head("行业敏感度","申万一级行业历史变化关系，当前分类与成分会变化；相关程度不是板块涨跌预测。")+table("sectors",[["行业","name"],["相关 r","rho",corrCell],["秩相关","spearman",row=>num(row.spearman)],["β","beta",row=>num(row.beta,4)],["样本","n",row=>num(row.n,0)],["截至","end"]],d.sector_sensitivity);
@@ -72,6 +142,11 @@
   function renderJob(job){clearTimeout(state.poll);const busy=job&&["queued","running"].includes(job.status);$("mmRefresh").disabled=!!busy;$("mmJob").hidden=!job;$("mmJob").textContent=job?busy?`宏观公开数据更新中 ${num(job.progress||0,0)}% · 已有研究保留原日期，完成后替换成功通道。`:job.status==="failed"?job.error||"更新失败，原研究保留":`更新完成 · ${job.finished_at||""}`:"";if(busy)state.poll=setTimeout(()=>load(true),3000);}
   async function load(poll=false){const id=++state.id;if(!poll){error();$("mmQueryButton").disabled=true;}root.setAttribute("aria-busy","true");try{const d=await api("/api/market-health/macro?"+new URLSearchParams(selected()));if(id!==state.id)return;state.data=d;render();if(!d.available)error("宏观研究尚未采集，请更新宏观研究；数据缺失不会显示为零。");}catch(e){if(id===state.id){error(`${e.message}；已显示的研究与原日期保留。`);if(poll)state.poll=setTimeout(()=>load(true),7000);}}finally{if(id===state.id){root.setAttribute("aria-busy","false");$("mmQueryButton").disabled=false;}}}
   $("mmQuery").addEventListener("submit",e=>{e.preventDefault();load();});$("mmEventQuery").addEventListener("submit",e=>{e.preventDefault();load();});
+  $("mmCandleQuery").addEventListener("submit",e=>{e.preventDefault();if(!state.candle)return;
+    Object.assign(state.candle,{start:$("mmCandleStart").value,end:$("mmCandleEnd").value,bucket:$("mmCandleBucket").value,custom:true});filterFactorHistory();});
+  $("mmCandleReset").addEventListener("click",()=>{const d=state.data;if(d)renderFactorHistory(d,d.metrics.find(m=>m.key===d.factor),true);});
+  for(const type of ["pointerover","click"])$("mmCandlePlot").addEventListener(type,e=>{const mark=e.target.closest("[data-mm-candle]");if(mark)$("mmCandleDetail").textContent=candleDescription(state.candles[Number(mark.dataset.mmCandle)]);});
+  new ResizeObserver(()=>{if($("mmCandlePlot").clientWidth>0&&$("mmCandlePlot").clientWidth!==state.candleWidth)renderCandlePlot();}).observe($("mmCandlePlot"));
   $("mmFrequency").addEventListener("change",frequencyChanged);$("mmScenario").addEventListener("input",renderScenario);$("mmScenario").addEventListener("submit",e=>e.preventDefault());
   $("mmRefresh").addEventListener("click",async()=>{error();$("mmRefresh").disabled=true;try{const d=await api("/api/market-health/macro/refresh",{method:"POST",body:"{}"});renderJob(d.job);}catch(e){error(e.message);$("mmRefresh").disabled=false;}});
   document.addEventListener("market-health-full-refresh",()=>{if(state.started&&!$("mmRefresh").disabled)$("mmRefresh").click();});

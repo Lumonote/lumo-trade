@@ -1,8 +1,8 @@
 #mhView-macro .mm-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
 #mhView-macro .mm-grid>.mh-box{min-width:0;margin:0}
 .mm-filters{display:grid;grid-template-columns:1fr 1.65fr 1.2fr 1fr 1fr auto;gap:12px;align-items:end;margin-top:18px}
-.mm-filters label,.mm-event-filters label,.mm-scenario label{display:grid;gap:6px;font-size:12px;color:var(--text-muted,#738176)}
-.mm-filters select,.mm-event-filters select,.mm-event-filters input,.mm-scenario input{width:100%;min-width:0;padding:9px 10px;border:1px solid var(--border,#dce2d9);border-radius:6px;background:var(--panel-bg,#fff);color:var(--text,#23382d);font:inherit}
+.mm-filters label,.mm-event-filters label,.mm-scenario label,.mm-candle-filters label{display:grid;gap:6px;font-size:12px;color:var(--text-muted,#738176);min-width:0}
+.mm-filters select,.mm-event-filters select,.mm-event-filters input,.mm-scenario input,.mm-candle-filters input,.mm-candle-filters select{width:100%;min-width:0;padding:9px 10px;border:1px solid var(--border,#dce2d9);border-radius:6px;background:var(--panel-bg,#fff);color:var(--text,#23382d);font:inherit}
 .mm-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}
 .mm-metric{background:var(--panel-bg,#fff);border:1px solid var(--border,#dce2d9);border-radius:8px;padding:14px;text-align:left;min-width:0;cursor:pointer;color:inherit;font:inherit}
 .mm-metric:hover,.mm-metric[aria-pressed=true]{border-color:#4d7a65;background:#f1f6f0}
@@ -15,6 +15,12 @@
 .mm-legend i{display:inline-block;height:3px;width:16px;margin:0 6px 3px 0;background:#397b64}
 .mm-chart{display:block;width:100%;height:auto;max-height:300px;overflow:visible;font-size:10px;fill:#7b857e;font-family:var(--font-mono,monospace)}
 .mm-chart .grid{stroke:#e4e8e0;stroke-width:1}
+.mm-candle-filters{display:grid;grid-template-columns:repeat(2,minmax(120px,150px)) minmax(72px,110px) auto auto;gap:10px;align-items:end;justify-content:start;margin:12px 0}
+.mm-candle-chart{display:block;width:100%;height:220px;fill:var(--text-muted,#738176);font:11px var(--font-mono,monospace)}
+.mm-candle-chart .grid{stroke:var(--border,#dce2d9)}
+.mm-candle-chart g[data-mm-candle]{cursor:crosshair}
+.mm-low-mark{font-weight:700;color:#176657}
+#mmValuationComparison .mm-table{max-height:none}
 .mm-stats,.mm-event-summary{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
 .mm-stat{flex:1;min-width:90px;background:var(--bg,#f6f7f2);padding:10px;border-radius:6px}
 .mm-stat span,.mm-stat small{display:block;font-size:10px;color:var(--text-muted,#738176)}
@@ -43,4 +49,5 @@
 .mm-unavailable{padding:24px 6px;color:var(--text-muted,#738176);font-size:12px;line-height:1.8}
 @media(max-width:1250px){.mm-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}.mm-filters{grid-template-columns:repeat(3,minmax(0,1fr))}.mm-transmissions{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:800px){#mhView-macro .mm-grid{grid-template-columns:1fr}.mm-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.mm-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.mm-transmissions{grid-template-columns:1fr}.mm-event-filters{flex-wrap:wrap}.mm-event-filters label:nth-child(2){min-width:160px}.mm-intro>.mh-box-head{flex-wrap:wrap}.mm-intro{scroll-margin-top:210px}}
+@media(max-width:600px){.mm-candle-filters{grid-template-columns:repeat(2,minmax(0,1fr));justify-content:stretch}}
 @media(max-width:720px){body[data-page="market_health"] .topbar{grid-template-columns:minmax(0,1fr)}body[data-page="market_health"] .topbar>div{min-width:0;max-width:100%}body[data-page="market_health"] .toolbar{justify-content:flex-start}}

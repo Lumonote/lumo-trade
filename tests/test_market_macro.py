@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from analysis.market_macro import (SPECS, build_report, clean_series, event_study, pairs_for,
+from analysis.market_macro import (SPECS, SPREAD, build_report, clean_series, event_study, pairs_for,
                                    pearson, relationship, scenario, valuation_decomposition)
 from webui.services import market_macro_service as service
 
@@ -155,6 +155,68 @@ def test_distributable_baseline_data_coverage_and_complete_report():
     assert all(r["name"] for r in report["sector_sensitivity"])
     assert report["metrics"][6]["date"] <= data["as_of"]
     json.dumps(report, allow_nan=False)
+
+
+def test_spread_uses_index_specific_same_day_positive_pe_and_preserves_history():
+    data = service.baseline()
+    report = build_report(data, factor=SPREAD, window=60)
+    recent = report["chart"]["factor_history"][-1]
+    assert recent["date"] == "2026-10-30"
+    assert recent["value"] == pytest.approx(100 / 12.9122 - 1.65)
+    assert len(report["chart"]["factor_history"]) > len(report["chart"]["factor"]) > 60
+    report500 = build_report(data, factor=SPREAD, equity="csi500", frequency="monthly", window=24)
+    assert report500["chart"]["factor_history"][-1]["value"] == pytest.approx(100 / 26.7601 - 1.65)
+    assert report500["valuation_comparison"] == report["valuation_comparison"]
+    assert build_report(data, factor="lpr5y", window=60)["chart"]["factor_history"][0]["date"] < "2020-01-01"
+
+    report = build_report({"as_of": "2024-01-03", "series": {"cn10y": series(2, value=lambda i: 2)},
+                           "valuations": {"csi300": [{"date": "2024-01-01", "pe_ttm": 10},
+                                                      {"date": "2024-01-02", "pe_ttm": 0},
+                                                      {"date": "2024-01-03", "pe_ttm": 5}]}}, factor=SPREAD)
+    assert report["chart"]["factor_history"] == [{"date": "2024-01-01", "value": 8}]
+    assert all(r["low"] is None and r["status"] == "不可判定" for r in report["valuation_comparison"]["rows"])
+
+
+def test_valuation_comparison_requires_both_percentiles_and_excludes_current_day():
+    bonds = series(253, value=lambda i: 1 if i == 252 else 2)
+    data = {"as_of": bonds[-1]["date"], "series": {"cn10y": bonds}, "valuations": {
+        "csi300": [{"date": r["date"], "pe_ttm": 10 if i == 252 else 20} for i, r in enumerate(bonds)],
+        "csi500": [{"date": r["date"], "pe_ttm": 20} for r in bonds],
+    }}
+    rows = {r["key"]: r for r in build_report(data)["valuation_comparison"]["rows"]}
+    assert rows["csi300"]["low"] is True and rows["csi300"]["samples"] == 252
+    assert rows["csi300"]["pe_percentile"] == 0 and rows["csi300"]["spread_percentile"] == 100
+    assert rows["csi500"]["low"] is False
+    assert rows["csi500"]["pe_percentile"] == 50 and rows["csi500"]["spread_percentile"] == 100
+
+
+def test_older_user_snapshot_only_backfills_bonds_through_its_own_cutoff(monkeypatch):
+    saved = {"as_of": "2024-01-02", "updated_at": "original", "series": {"gold": series(1)}}
+    monkeypatch.setattr(service, "_read", lambda key: saved)
+    monkeypatch.setattr(service, "baseline", lambda: {"series": {"cn10y": series(3)}})
+    data = service.bundle()
+    assert data["updated_at"] == "original" and data["series"]["gold"] == saved["series"]["gold"]
+    assert data["series"]["cn10y"] == series(2)
+    assert data["sources"][0]["date"] == "2024-01-02" and "cn10y" not in saved["series"]
+
+
+def test_cn10y_history_splits_queries_and_refresh_revises_only_overlap(monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+    calls = []
+
+    def read(url):
+        params = parse_qs(urlsplit(url).query)
+        start, end = params["startDate"][0], params["endDate"][0]
+        assert (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days <= 364
+        calls.append((start, end))
+        return json.dumps({"flag": "0", "heList": [{"workTime": end, "tenYear": "1.65"}]})
+
+    monkeypatch.setattr(service, "_text", read)
+    rows = service.cn10y_series("2024-01-01", "2025-01-04")
+    assert calls == [("2024-01-01", "2024-12-30"), ("2024-12-31", "2025-01-04")]
+    prior = [{"date": "2023-01-01", "value": 2}, {"date": "2025-01-04", "value": 1.7}]
+    assert service.refresh_cn10y(prior, "2025-01-04") == [prior[0], rows[-1]]
+    assert calls[-1] == ("2024-12-05", "2025-01-04")
 
 
 def test_refresh_reuses_active_job_and_failure_keeps_previous_bundle(monkeypatch):

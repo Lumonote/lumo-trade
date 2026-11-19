@@ -265,28 +265,55 @@
     if(kind==="financing")return new URLSearchParams({window:$("mfWindow").value,deposit:$("mfDeposit").value,warning:$("mfWarning").value,closeout:$("mfCloseout").value});
     return new URLSearchParams({participant,start:$("mpStart").value,end:$("mpEnd").value,keyword:$("mpSearch").value,sector:$("mpSector").value});
   }
+  function refreshStatus(data,busy) {
+    const job=data.job,params=job?.params,result=job?.result;
+    const span=params?.participant==="etf"?`ETF ${params.start} 至 ${params.end} · `:"";
+    const notes=(data.errors||[]).join("；");
+    if(busy)return `${span}更新中 ${job.progress||0}% · ${job.logs?.at(-1)||"准备读取公开数据"}`;
+    if(job?.status==="failed")return span+(job.error||"更新失败");
+    if(span&&data.participant==="etf"&&job.status==="finished"&&result?.processed_days!=null){
+      return `${span}已处理 ${result.processed_days} 个交易日，其中 ${result.amount_days} 日有可估算净额${notes?` · ${notes}`:""}`;
+    }
+    return notes;
+  }
   async function load(kind) {
     const s=state[kind],prefix=kind==="financing"?"mf":"mp",id=++s.id;clearTimeout(s.poll);error(prefix);
     try {
       const data=await api(`/api/market-health/${kind}?${query(kind)}`);if(id!==s.id)return false;s.data=data;
       if(kind==="financing")renderFinance(data);else renderParticipants(data);
-      const busy=data.job&&["queued","running"].includes(data.job.status);$(prefix+"Refresh").disabled=Boolean(busy);$(prefix+"Export").disabled=!data.as_of;
-      $(prefix+"Status").textContent=busy?`更新中 ${data.job.progress||0}% · ${data.job.logs?.at(-1)||"准备读取公开数据"}`:data.job?.status==="failed"?data.job.error:(data.errors||[]).join("；");
+      const busy=data.job&&["queued","running"].includes(data.job.status);$(prefix+"Refresh").disabled=Boolean(busy||s.refreshing);$(prefix+"Export").disabled=!data.as_of;
+      if(!s.refreshing)$(prefix+"Status").textContent=refreshStatus(data,busy);
       if(busy)s.poll=setTimeout(()=>load(kind),2500);
       return true;
-    }catch(e){if(id!==s.id)return false;error(prefix,`${e.message}。已显示的研究保留原日期。`);$(prefix+"Refresh").disabled=false;return false;}
+    }catch(e){if(id!==s.id)return false;error(prefix,`${e.message}。已显示的研究保留原日期。`);$(prefix+"Refresh").disabled=Boolean(s.refreshing);return false;}
   }
   async function selectParticipantSector(name) {
     const select=$("mpSector");if(name&&!Array.from(select.options,o=>o.value).includes(name))select.add(new Option(name,name));
     select.value=name;state.participants.page=1;$("mpDetail").hidden=true;
     if(await load("participants"))$("mpStocks").scrollIntoView({behavior:"smooth",block:"start"});
   }
-  async function refresh(kind) {const prefix=kind==="financing"?"mf":"mp";$(prefix+"Refresh").disabled=true;error(prefix);$(prefix+"Status").textContent="正在启动完整公开数据采集，已显示的研究保留…";try{await api(`/api/market-health/${kind}/refresh`,{method:"POST",body:"{}"});await load(kind);}catch(e){error(prefix,e.message);$(prefix+"Refresh").disabled=false;}}
+  async function refresh(kind,{useEtfRange=false}={}) {
+    const s=state[kind],prefix=kind==="financing"?"mf":"mp";
+    if(s.refreshing)return;
+    const params={};
+    if(useEtfRange&&kind==="participants"&&participant==="etf"){
+      const start=$("mpStart").value,end=$("mpEnd").value;
+      if(start||end)Object.assign(params,{participant,start,end});
+    }
+    s.refreshing=true;$(prefix+"Refresh").disabled=true;error(prefix);
+    $(prefix+"Status").textContent=params.participant?"正在启动 ETF 区间采集…":"正在启动完整公开数据采集，已显示的研究保留…";
+    try {
+      await api(`/api/market-health/${kind}/refresh`,{method:"POST",body:JSON.stringify(params)});
+    }catch(e){
+      error(prefix,e.message);$(prefix+"Status").textContent="";$(prefix+"Refresh").disabled=false;return;
+    }finally{s.refreshing=false;}
+    await load(kind);
+  }
   for(const kind of Object.keys(state)) {
     const prefix=kind==="financing"?"mf":"mp",root=$("mhView-"+kind);
     function activate(){if(!root.hidden&&!state[kind].started){state[kind].started=true;load(kind);}}
     new MutationObserver(activate).observe(root,{attributes:true,attributeFilter:["hidden"]});activate();
-    $(prefix+"Refresh").addEventListener("click",()=>refresh(kind));$(prefix+"Export").addEventListener("click",()=>state[kind].data&&download(`${kind}_${state[kind].data.as_of}.json`,state[kind].data));
+    $(prefix+"Refresh").addEventListener("click",()=>refresh(kind,{useEtfRange:true}));$(prefix+"Export").addEventListener("click",()=>state[kind].data&&download(`${kind}_${state[kind].data.as_of}.json`,state[kind].data));
     $(prefix+"Csv").addEventListener("click",()=>csv(`${kind}_${state[kind].data?.as_of}.csv`,kind==="financing"?financeRows():participantRows()));
     root.addEventListener("click",e=>{const sort=e.target.closest("[data-mc-sort]")||e.target.closest("th[aria-sort]")?.querySelector("[data-mc-sort]");if(sort){sortTable(sort,root);return;}const page=e.target.closest("[data-mc-page]");if(page){const[p,n]=page.dataset.mcPage.split(":");state[kind].page=Number(n);p==="mf"?renderFinanceStocks():renderParticipantStocks();}const stock=e.target.closest("[data-mc-stock]");if(stock&&typeof window.openStockKlineModal==="function")window.openStockKlineModal(stock.dataset.mcStock,240,{stockName:stock.dataset.mcName}).catch(e=>error(prefix,e.message));});
   }

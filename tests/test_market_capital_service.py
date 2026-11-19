@@ -154,8 +154,101 @@ def test_collect_etf_includes_predecessor_for_first_window_day(store, monkeypatc
     monkeypatch.setattr(service, "read_baseline", lambda: {})
     monkeypatch.setattr(service, "_etf_day", lambda date, meta: [{"trade_date": date, "ts_code": "510300.SH", "total_share": int(date[-2:]), "nav": 2}])
     result = service.collect("participants")
-    assert result["calendar"][0] == "2026-10-09" and result["etf_previous_date"] == "2026-10-08"
+    assert result["calendar"][0] == "2026-10-09" and result["etf_predecessors"]["2026-10-09"] == "2026-10-08"
     assert service.participants(participant="etf", start="2026-10-09", end="2026-10-09")["rows"][0]["net"] == 20000
+
+
+def test_etf_refresh_backfills_more_than_default_window_and_keeps_history(store, monkeypatch, tmp_path):
+    code = "510300.SH"
+    start, end = "2026-08-29", "2026-10-10"
+    monday, friday = "2026-08-31", "2026-10-09"
+    previous = "2026-08-28"
+    missing = "2026-09-21"
+    days = [dt.date(2026, 8, 27) + dt.timedelta(days=i) for i in range(66)]
+    calendar = [{"cal_date": d.isoformat(), "is_open": int(d.weekday() < 5 and not dt.date(2026, 10, 1) <= d <= dt.date(2026, 10, 7))}
+                for d in days]
+    stock = {"ts_code": "600000.SH", "name": "样本"}
+    reads, methods = [], []
+
+    def records(method, **params):
+        methods.append(method)
+        if method == "trade_cal":
+            assert params["exchange"] == "SSE" and params["is_open"] == "1"
+            return calendar  # 即使源返回休市日或范围外日期，也不得误采。
+        return {"stock_basic": [stock], "etf_basic": [{"ts_code": code, "extname": "样本ETF"}]}.get(method, [])
+
+    def etf_day(date, _):
+        reads.append(date)
+        return [] if date == missing else [{"trade_date": date, "ts_code": code,
+                                            "total_share": dt.date.fromisoformat(date).toordinal(), "nav": 2}]
+
+    latest = "2026-10-30"
+    store["participants"] = {"as_of": latest, "calendar": [latest], "etf_previous_date": "2026-10-29",
+                             "etf": etf_day(latest, {}), "flows": [{**stock, "trade_date": latest, "net_amount": 1}],
+                             "sources": [{"key": "flows", "as_of": latest}]}
+    initial = deepcopy(store["participants"])
+    reads.clear()
+    monkeypatch.setattr(service, "_records", records)
+    monkeypatch.setattr(service, "_etf_day", etf_day)
+    monkeypatch.setattr(service.calendar_repo, "open_days", lambda: [])
+    jobs = BackgroundJobService(JobStore(tmp_path / "jobs.sqlite"))
+    params = {"participant": "etf", "start": start, "end": end}
+    job = service.start_refresh("participants", jobs, **params)
+    deadline = time.monotonic() + 10
+    while (job := jobs.get(job["id"]))["status"] in ("queued", "running") and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert job["status"] == "finished" and job["progress"] == 100, job
+    assert job["params"] == params
+    assert job["logs"][-1].endswith("25/25 个区间交易日")
+    assert job["result"] == {"start": start, "end": end, "as_of": friday,
+                             "notes": ["ETF有1个区间交易日读取失败或未披露；缺失不补零，保留已有记录"],
+                             "processed_days": 25, "amount_days": 23}
+    assert methods == ["trade_cal", "etf_basic"]
+    assert sorted(reads) == [previous] + [r["cal_date"] for r in calendar if r["is_open"] and start <= r["cal_date"] <= end]
+    saved = store["participants"]
+    assert saved["as_of"] == initial["as_of"] and saved["calendar"] == initial["calendar"] and saved["flows"] == initial["flows"]
+    assert saved["etf_predecessors"][monday] == previous and saved["etf_calendar_ends"][friday] == end
+    report = service.participants(participant="etf", start=start, end=end)
+    history = service.history(participant="etf", code=code, start=start, end=end)
+    assert report["data_as_of"] == latest  # 源的最近日期不随回补历史而倒退。
+    assert report["rows"][0]["observed_net"] == history["totals"]["net"]
+    assert history["rows"][0]["date"] == monday and history["rows"][0]["net"] == 60000
+    assert history["coverage"]["days"] == 25 and history["coverage"]["amount_days"] == 23
+
+    monkeypatch.setattr(service, "_day", lambda *args: [])
+    monkeypatch.setattr(service.quant_radar_repo, "list_dates", lambda **kwargs: [])
+    monkeypatch.setattr(service, "read_baseline", lambda: {})
+    refreshed = service.collect("participants")
+    assert len(refreshed["calendar"]) == 22 and monday not in refreshed["calendar"]
+    assert refreshed["etf_predecessors"][monday] == previous
+    assert service.participants(participant="etf", start=monday, end=monday)["rows"][0]["net"] == 60000
+
+
+@pytest.mark.parametrize("minute", [29, 30])
+def test_single_day_etf_refresh_obeys_beijing_cutoff(store, monkeypatch, minute):
+    date = "2026-10-30"
+    previous = "2026-10-29"
+    monkeypatch.setattr(service, "now", lambda: dt.datetime(2026, 10, 30, 15, minute, tzinfo=dt.timezone(dt.timedelta(hours=8))))
+    monkeypatch.setattr(service, "_records", lambda method, **params: [{"cal_date": d, "is_open": 1} for d in (previous, date)]
+                        if method == "trade_cal" else [])
+    monkeypatch.setattr(service, "_etf_day", lambda d, _: [{"trade_date": d, "ts_code": "510300.SH", "total_share": 100, "nav": 1}])
+    store["participants"] = {"calendar": [], "as_of": previous}
+    progress = []
+    log = lambda *args: progress.append(args)
+    if minute == 29:
+        with pytest.raises(ValueError, match="15:30"):
+            service.collect_etf_range(date, date, log)
+        assert not progress and store["participants"] == {"calendar": [], "as_of": previous}
+        result = service.collect_etf_range(previous, date, log)
+        assert result["as_of"] is None and result["processed_days"] == 1
+        assert result["notes"][-1] == f"{date} 未到北京时间15:30，未计入采集交易日"
+        assert date not in store["participants"]["etf_predecessors"]
+    else:
+        result = service.collect_etf_range(date, date, log)
+        assert result["as_of"] == date and result["processed_days"] == result["amount_days"] == 1
+        assert [event[1:] for event in progress] == [(0, 1), (1, 1)]
+        assert service.participants(participant="etf", start=date, end=date)["rows"][0]["net"] == 0
 
 
 def test_history_is_read_only_and_actual_cutoff_is_not_query_end(store, monkeypatch):

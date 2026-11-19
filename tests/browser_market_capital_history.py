@@ -1,4 +1,5 @@
-"""独立夹具检查资金历史的零值、缺日、区间和请求竞争；不采集实盘数据。"""
+"""独立夹具检查资金历史与 ETF 区间刷新；不采集实盘数据。"""
+import datetime as dt
 import json
 from pathlib import Path
 import sys
@@ -9,7 +10,7 @@ from playwright.sync_api import sync_playwright, expect, Error
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from analysis.market_capital import capital_report, participant_history
+from analysis.market_capital import capital_report, etf_rows, participant_history
 
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7098"
 OUT = ROOT / "results/market_capital_preview"
@@ -26,6 +27,15 @@ fixture = {"calendar": DATES, "as_of": DATES[-1], "etf_previous_date": "2026-11-
            "etf": [{"ts_code": "158000.SZ", "trade_date": d, "total_share": 2292.5835, "nav": 1.0326} for d in DATES[1:]] +
                   [{"ts_code": "158001.SZ", "trade_date": d, "total_share": share, "nav": nav} for d, share, nav in
                    [("2026-11-13", 90, 1), (DATES[0], 100, 1), (DATES[1], 110, 1), (DATES[2], 115, None)]]}
+REFRESH_START, REFRESH_END = "2026-10-15", "2026-11-19"
+refresh_params = {"participant": "etf", "start": REFRESH_START, "end": REFRESH_END}
+first, last = dt.date.fromisoformat(REFRESH_START), dt.date.fromisoformat(REFRESH_END)
+refresh_days = [d.isoformat() for n in range((last - first).days + 1)
+                if (d := first + dt.timedelta(days=n)).weekday() < 5]
+refreshed_fixture = {**fixture, "calendar": refresh_days, "as_of": REFRESH_END, "etf_previous_date": "2026-10-14",
+                     "etf": [*fixture["etf"], {"ts_code": "158001.SZ", "trade_date": REFRESH_END, "total_share": 120, "nav": 1}]}
+refresh_result = {"processed_days": len(refresh_days),
+                  "amount_days": len({r["date"] for r in etf_rows(refreshed_fixture) if r["net"] is not None})}
 
 
 with sync_playwright() as p:
@@ -36,6 +46,7 @@ with sync_playwright() as p:
     page = browser.new_page(viewport={"width": 1440, "height": 1000})
     page.set_default_timeout(15000)
     errors, prices, history_requests = [], [], []
+    participant_requests, refresh_requests, refresh_polls = [], [], []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("request", lambda request: prices.append(request.url) if "/api/stock-kline/" in request.url else None)
     page.route("**/api/market-health?*", lambda route: route.fulfill(json=snapshot))
@@ -43,8 +54,20 @@ with sync_playwright() as p:
 
     def participants(route):
         q = {k: v[0] for k, v in parse_qs(urlsplit(route.request.url).query).items()}
-        result = capital_report(fixture, participant=q.get("participant", "main"), start=q.get("start"), end=q.get("end"))
-        route.fulfill(json={**result, "data_as_of": DATES[-1], "today": "2026-11-19", "disclosure": "独立测试夹具"})
+        participant_requests.append(q)
+        bundle, job = fixture, None
+        if refresh_requests:
+            refresh_polls.append(q)
+            job = {"id": "test-etf-range", "params": refresh_params, "status": "running", "progress": 50}
+            if len(refresh_polls) > 1:
+                bundle = refreshed_fixture
+                job.update(status="finished", progress=100, result=refresh_result)
+        result = capital_report(bundle, participant=q.get("participant", "main"), start=q.get("start"), end=q.get("end"))
+        route.fulfill(json={**result, "job": job, "data_as_of": bundle["as_of"], "today": REFRESH_END, "disclosure": "独立测试夹具"})
+
+    def refresh(route):
+        refresh_requests.append(route.request.post_data_json)
+        route.fulfill(status=202, json={"job": {"id": "test-etf-range", "status": "queued", "params": refresh_params}})
 
     def history(route):
         q = {k: v[0] for k, v in parse_qs(urlsplit(route.request.url).query).items()}
@@ -52,6 +75,7 @@ with sync_playwright() as p:
         route.fulfill(json=participant_history(fixture, **q))
 
     page.route("**/api/market-health/participants?*", participants)
+    page.route("**/api/market-health/participants/refresh", refresh)
     page.route("**/api/market-health/participants/history?*", history)
     page.goto(URL + "/desktop/market_health?section=participants", wait_until="domcontentloaded")
     if page.locator("#riskDisclaimerModal").is_visible():
@@ -126,6 +150,20 @@ with sync_playwright() as p:
     page.locator("#mpHistoryQuery button").click()
     expect(page.locator("#mpHistoryStatus")).to_contain_text("查询已完成")
     expect(page.locator("#mpHistoryPoint")).to_contain_text("当前区间没有记录")
+    page.locator("#mpHistoryClose").click()
+
+    # 榜单查询与历史区间搜索保持只读；未点查询的新日期直接用于 ETF 刷新。
+    assert participant_requests[-1]["start"] == DATES[0] and not refresh_requests
+    page.locator("#mpStart").fill(REFRESH_START)
+    page.locator("#mpEnd").fill(REFRESH_END)
+    page.locator("#mpRefresh").click()
+    expect(page.locator("#mpStatus")).to_contain_text(f"ETF {REFRESH_START} 至 {REFRESH_END} · 更新中")
+    expect(page.locator("#mpRefresh")).to_be_disabled()
+    expect(page.locator("#mpStatus")).to_contain_text("已处理 26 个交易日，其中 4 日有可估算净额")
+    expect(page.locator("#mpRefresh")).to_be_enabled()
+    expect(page.locator("#mpMeta")).to_contain_text(f"查询 {REFRESH_START} 至 {REFRESH_END}")
+    expect(partial_row.locator("td").nth(1)).to_contain_text("+25.00万")
+    assert refresh_requests == [refresh_params] and all(q == refresh_params for q in refresh_polls)
     assert not errors and not prices, (errors, prices)
-    print(json.dumps({"checks": "real zero, missing day, missing NAV, partial totals, sorting, independent range, stale response, empty range, 800px layout", "errors": errors}, ensure_ascii=False))
+    print(json.dumps({"checks": "real zero, missing day, missing NAV, partial totals, sorting, independent range, stale response, empty range, 800px layout, read-only queries, 26-day range refresh", "errors": errors}, ensure_ascii=False))
     browser.close()

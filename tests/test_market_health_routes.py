@@ -109,6 +109,28 @@ def test_capital_routes_reject_invalid_queries(runtime):
         assert client.get("/api/market-health/participants",query_params={"start":"2026-10-30","end":"2026-10-20"}).status_code==400
 
 
+def test_participant_refresh_validates_range_and_matches_running_job(runtime, monkeypatch):
+    from robyn.testing import TestClient
+    path = "/api/market-health/participants/refresh"
+    params = {"participant": "etf", "start": "2026-01-01", "end": "2026-10-30"}
+    active = {"id": "etf-range", "status": "running", "params": params}
+    service = runtime.market_capital_service
+    monkeypatch.setattr(service, "_status", lambda kind, jobs: active)
+
+    with TestClient(runtime.app) as client:
+        for invalid in (["etf"], {**params, "keyword": "ETF"}, {**params, "start": None}, {**params, "end": ""},
+                        {**params, "participant": "main"}, {**params, "end": "20261030"},
+                        {**params, "end": "2026-02-30"}, {**params, "end": "2025-01-01"},
+                        {**params, "end": "2099-01-01"}, {**params, "start": "2000-01-01"}):
+            assert client.post(path, json_data=invalid).status_code == 400, invalid
+
+        response = client.post(path, json_data=params)
+        assert response.status_code == 202 and response.json()["job"] == active
+        for conflicting in ({}, {**params, "start": "2026-01-02"}):
+            response = client.post(path, json_data=conflicting)
+            assert response.status_code == 409 and "正在执行" in response.json()["error"]
+
+
 def test_participant_history_native_route_and_validation(runtime, monkeypatch):
     from robyn.testing import TestClient
     data = {"calendar": ["2026-11-17", "2026-11-18"], "etf": [
@@ -126,19 +148,27 @@ def test_participant_history_native_route_and_validation(runtime, monkeypatch):
 
 
 def test_macro_native_query_refresh_and_packaged_assets(runtime, monkeypatch):
+    from analysis.market_macro import INDEXES, SPECS, SPREAD
     from robyn.testing import TestClient
     monkeypatch.setattr(runtime.market_macro_service, "start_refresh", lambda jobs: {"id": "macro", "status": "queued"})
     with TestClient(runtime.app) as client:
         response = client.get("/api/market-health/macro", query_params={"factor": "gold"})
         assert response.status_code == 200
         payload = response.json()
-        assert payload["factor"] == "gold" and len(payload["metrics"]) == 21
+        assert payload["factor"] == "gold" and {r["key"] for r in payload["metrics"]} == SPECS.keys()
         assert len(payload["sector_sensitivity"]) == 31 and payload["relationship"]["n"] > 200
         assert payload["valuation"]["available"] and payload["events"]["total"] == len(payload["events"]["rows"])
+        assert {r["key"] for r in payload["valuation_comparison"]["rows"]} == INDEXES.keys()
+        assert any(r["key"] == SPREAD for r in payload["factors"])
+        response = client.get("/api/market-health/macro", query_params={"factor": SPREAD, "equity": "csi500", "frequency": "monthly", "window": "60"})
+        assert response.status_code == 200
+        spread = response.json()
+        assert spread["equity"] == "csi500" and spread["chart"]["factor_history"][-1]["value"] == pytest.approx(100 / 26.7601 - 1.65)
         job = client.post("/api/market-health/macro/refresh", json_data={})
         assert job.status_code == 202 and job.json()["job"]["id"] == "macro"
         page = client.get("/desktop/market_health").text
         assert 'id="mhView-macro"' in page and "宏观经济" in page
+        assert 'id="mmValuationComparison"' in page and 'id="mmCandleQuery"' in page
         for name in ("lumo_market_macro.js", "lumo_market_macro.css"):
             assert name in page and client.get("/static/" + name).status_code == 200
 

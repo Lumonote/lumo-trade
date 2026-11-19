@@ -1024,7 +1024,20 @@ def market_health_participant_history(request: Request) -> Response:
 
 @_native_post("/api/market-health/participants/refresh")
 def market_health_participants_refresh(request: Request) -> Response:
-    return _json_response({"job": market_capital_service.start_refresh("participants", webui_core.JOB_SERVICE)}, status_code=202)
+    body = _request_body(request)
+    try:
+        params = json.loads(body) if body else {}
+    except (ValueError, TypeError):
+        return _json_response({"error": "更新参数不是有效的JSON"}, status_code=400)
+    if not isinstance(params, dict) or params.keys() - {"participant", "start", "end"}:
+        return _json_response({"error": "更新参数须为包含 participant、start、end 或为空的JSON对象"}, status_code=400)
+    try:
+        job = market_capital_service.start_refresh("participants", webui_core.JOB_SERVICE, **params)
+    except market_capital_service.RefreshConflict as exc:
+        return _json_response({"error": str(exc)}, status_code=409)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+    return _json_response({"job": job}, status_code=202)
 
 
 @_native_get("/api/market-health/macro")

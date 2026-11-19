@@ -38,7 +38,7 @@ with sync_playwright() as p:
     assert page.locator("#mmScatter svg").count() == 1
     assert "样本 R²" in page.locator("#mmScatter").inner_text()
     # 每张表的表头都可排序，数值而非格式化字符串进行比较。
-    for name in ("correlations", "sectors", "gold", "events", "fiscal", "debt", "calendar"):
+    for name in ("valuation-comparison", "correlations", "sectors", "gold", "events", "fiscal", "debt", "calendar"):
         header = page.locator(f'[data-mm-table="{name}"] th').first
         header.click()
         expect(header).to_have_attribute("aria-sort", "ascending")
@@ -51,13 +51,63 @@ with sync_playwright() as p:
     page.locator('#marketHealthRoot').evaluate('(el)=>{for(let p=el.parentElement;p;p=p.parentElement)p.scrollTop=0;window.scrollTo(0,0);}')
     page.screenshot(path=str(OUT / "macro_top.png"))
     page.screenshot(path=str(OUT / "macro_full.png"), full_page=True)
+
+    def analyze_factor(factor):
+        with page.expect_response(lambda r: '/macro?' in r.url and f'factor={factor}' in r.url) as response:
+            page.locator('#mmQueryButton').click()
+        assert response.value.ok, (response.value.status, response.value.url)
+        expect(page.locator('#mmQueryButton')).to_be_enabled()
+        assert page.locator('#mmError').is_hidden(), page.locator('#mmError').text_content()
+
+    # 联动双轴保留；独立指标 K 线不丢弃单点、平值，也不把无报价区间补成数据。
+    page.locator('#mmFactor').select_option('lpr5y')
+    analyze_factor('lpr5y')
+    expect(page.locator('#mmTrend h3')).to_have_text('沪深300 × 5年期LPR')
+    expect(page.locator('#mmTrend .mm-legend')).to_contain_text('左轴')
+    expect(page.locator('#mmTrend .mm-legend')).to_contain_text('右轴')
+    expect(page.locator('#mmFactorHistoryTitle')).to_contain_text('5年期LPR')
+    assert page.locator('#mmCandlePlot svg').count() == 1
+
+    def candle_range(start, end):
+        page.locator('#mmCandleStart').fill(start)
+        page.locator('#mmCandleEnd').fill(end)
+        page.locator('#mmCandleQuery button[type="submit"]').click()
+
+    candle_range('2026-07-20', '2026-07-20')
+    expect(page.locator('[data-mm-candle]')).to_have_count(1)
+    expect(page.locator('#mmCandleDetail')).to_contain_text('开 3.50')
+    assert float(page.locator('[data-mm-candle] rect').last.get_attribute('height')) >= 2
+    candle_range('2026-07-20', '2026-08-20')
+    expect(page.locator('[data-mm-candle]')).to_have_count(2)
+    expect(page.locator('#mmCandleDetail')).to_contain_text('收 3.50')
+    candle_range('2026-07-21', '2026-08-19')
+    expect(page.locator('#mmCandlePlot')).to_contain_text('所选区间没有实际观测')
+    assert page.locator('#mmCandlePlot svg').count() == 0
+    page.locator('#mmCandleReset').click()
+    expect(page.locator('#mmCandlePlot svg')).to_have_count(1)
+
+    page.locator('#mmFactor').select_option('equity_bond_spread')
+    analyze_factor('equity_bond_spread')
+    expect(page.locator('#mmTrend h3')).to_have_text('沪深300 × 股债利差')
+    comparison = page.locator('#mmValuationComparison tbody tr')
+    expect(comparison).to_have_count(5)
+    expect(comparison.filter(has_text='沪深300').locator('td').nth(4)).to_have_text('6.09')
+    expect(comparison.filter(has_text='创业板指').locator('.mm-low-mark')).to_have_text('历史低估')
+    expect(page.locator('#mmFactorHistoryTitle')).to_contain_text('沪深300 股债利差')
+    page.locator('#mmEquity').select_option('csi500')
+    page.locator('#mmFrequency').select_option('monthly')
+    expect(page.locator('#mmFactor')).to_have_value('equity_bond_spread')
+    analyze_factor('equity_bond_spread')
+    expect(page.locator('#mmTrend h3')).to_have_text('中证500 × 股债利差')
+    expect(comparison.filter(has_text='中证500').first).to_contain_text('研究指数')
+    expect(page.locator('#mmFactorHistoryTitle')).to_contain_text('中证500 股债利差')
+    expect(page.locator('#mmCandlePlot svg')).to_have_count(1)
+    page.locator('#mmValuationComparison').screenshot(path=str(OUT / 'macro_spread_valuation.png'))
     # 月频自动切换有效窗口与领先期，并使用真实API。
     page.locator('#mmFrequency').select_option('monthly')
     page.locator('#mmFactor').select_option('m2')
-    with page.expect_response(lambda r: '/macro?' in r.url and 'factor=m2' in r.url):
-        page.locator('#mmQueryButton').click()
+    analyze_factor('m2')
     expect(page.locator('#mmTrend h3')).to_contain_text('M2同比')
-    expect(page.locator('#mmQueryButton')).to_be_enabled()
     assert '月频' in page.locator('#mmScatter').inner_text()
     # 黄金卡片点击和政策检索。
     with page.expect_response(lambda r: '/macro?' in r.url and 'factor=gold' in r.url):

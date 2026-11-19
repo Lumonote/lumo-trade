@@ -14,6 +14,19 @@
   <div id="mmMetrics" class="mm-metrics mh-space"></div>
   <div id="mmInsights" class="mh-box mh-space"></div>
   <div class="mm-grid mh-space"><div id="mmTrend" class="mh-box"></div><div id="mmScatter" class="mh-box"></div></div>
+  <div id="mmValuationComparison" class="mh-box mh-space"></div>
+  <section id="mmFactorHistory" class="mh-box mh-space" aria-labelledby="mmFactorHistoryTitle" hidden>
+    <div class="mh-box-head"><div><h3 id="mmFactorHistoryTitle">指标 K 线</h3><p id="mmFactorCoverage"></p></div></div>
+    <form id="mmCandleQuery" class="mm-candle-filters">
+      <label>开始日期<input id="mmCandleStart" type="date" required></label>
+      <label>结束日期<input id="mmCandleEnd" type="date" required></label>
+      <label>聚合周期<select id="mmCandleBucket"><option value="week">周</option><option value="month">月</option><option value="quarter">季</option></select></label>
+      <button class="button secondary" type="submit">查询区间</button>
+      <button class="button secondary" id="mmCandleReset" type="button">最近一年</button>
+    </form>
+    <p class="mh-note" id="mmCandleDetail"></p>
+    <div id="mmCandlePlot" aria-live="polite"></div>
+  </section>
   <div class="mm-grid mh-space"><div id="mmCorrelations" class="mh-box"></div><div id="mmSectors" class="mh-box"></div></div>
   <div id="mmGold" class="mh-box mh-space"></div>
   <div id="mmTransmission" class="mh-space"></div>

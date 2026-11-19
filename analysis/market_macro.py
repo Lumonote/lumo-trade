@@ -11,6 +11,10 @@ from analysis.market_health_fusion import iso
 
 INDEXES = {"shcomp": ("000001.SH", "上证指数"), "csi300": ("000300.SH", "沪深300"),
            "chinext": ("399006.SZ", "创业板指"), "csi500": ("000905.SH", "中证500"), "csi1000": ("000852.SH", "中证1000")}
+CN10Y_SOURCE = {"name": "中国10年期国债收益率", "source": "财政部：中国国债收益率曲线",
+                "url": "https://yield.chinabond.com.cn/cbweb-czb-web/czb/showHistory?locale=cn_ZH&nameType=1"}
+SPREAD = "equity_bond_spread"
+LOW_VALUATION = {"years": 5, "min_samples": 252, "pe_max": 20, "spread_min": 80}
 FRED = {"fed_upper": ("DFEDTARU", "联邦基金目标上限", "%", "rate"),
         "fed_lower": ("DFEDTARL", "联邦基金目标下限", "%", "rate"),
         "us10y": ("DGS10", "美国10年国债收益率", "%", "rate"),
@@ -36,6 +40,8 @@ SPECS.update({
     "spending": {"name": "一般公共预算累计支出同比", "unit": "%", "kind": "rate", "frequency": "monthly", "source": "财政部原文 / 累计口径", "url": "https://www.mof.gov.cn/zhengwuxinxi/redianzhuanti/quanguocaizhengshouzhiqingkuang/"},
     "local_new": {"name": "新增地方政府债券发行", "unit": "亿元", "kind": "level", "frequency": "monthly", "source": "财政部债务管理司 / 当月新增", "url": "https://zwgls.mof.gov.cn/tjsj/"},
     "local_refinance": {"name": "地方政府再融资债券发行", "unit": "亿元", "kind": "level", "frequency": "monthly", "source": "财政部债务管理司 / 当月再融资", "url": "https://zwgls.mof.gov.cn/tjsj/"},
+    SPREAD: {"name": "股债利差", "unit": "个百分点", "kind": "rate", "frequency": "daily", "max_age": 0,
+             "source": "指数 PE_TTM / 财政部中国国债收益率曲线", "url": CN10Y_SOURCE["url"]},
 })
 
 TRANSMISSIONS = [
@@ -247,6 +253,48 @@ def scenario(earnings=0, pe=0, discount_bp=-25, duration=10):
             "note": "独立教学情景：盈利×PE恒等式与恒定久期折现近似分开计算。折现率变化由你设定，不代表美联储政策利率一比一传导；久期是假设，不是估计出的A股久期。"}
 
 
+def equity_bond_spread(valuations, bonds, end):
+    """Only compare an index's positive trailing PE with the same day's CN10Y (%)."""
+    rows = []
+    for row in clean_series([{"date": r.get("date"), "value": r.get("pe_ttm")} for r in valuations or []], end):
+        date, pe = row["date"], row["value"]
+        if pe <= 0 or date not in bonds:
+            continue
+        earnings_yield = 100 / pe
+        spread = earnings_yield - bonds[date]
+        if math.isfinite(spread):
+            rows.append({"date": date, "value": spread, "pe": pe, "cn10y": bonds[date], "earnings_yield": earnings_yield})
+    return rows
+
+
+def compare_valuations(spreads):
+    rule = LOW_VALUATION
+    rows = []
+    for key, (code, name) in INDEXES.items():
+        series = spreads[key]
+        latest = series[-1] if series else {}
+        history = []
+        if latest:
+            day = dt.date.fromisoformat(latest["date"])
+            cutoff = day.replace(year=day.year - rule["years"], day=28 if (day.month, day.day) == (2, 29) else day.day).isoformat()
+            history = [r for r in series[:-1] if r["date"] >= cutoff]
+
+        def percentile(field):
+            if len(history) < rule["min_samples"]:
+                return None
+            # Midrank for ties; a constant history must not register as an extreme.
+            value = latest[field]
+            return 100 * (sum(r[field] < value for r in history) + 0.5 * sum(r[field] == value for r in history)) / len(history)
+
+        pe_rank, spread_rank = percentile("pe"), percentile("value")
+        low = None if pe_rank is None else pe_rank <= rule["pe_max"] and spread_rank >= rule["spread_min"]
+        rows.append({"key": key, "code": code, "name": name, "date": latest.get("date"), "pe": latest.get("pe"),
+                     "cn10y": latest.get("cn10y"), "spread": latest.get("value"), "pe_percentile": pe_rank,
+                     "spread_percentile": spread_rank, "samples": len(history), "low": low,
+                     "status": "历史低估" if low else "未达低估条件" if low is False else "不可判定"})
+    return {**rule, "rows": rows}
+
+
 def latest_metrics(series, end):
     result = []
     for key, spec in SPECS.items():
@@ -269,6 +317,11 @@ def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0
         raise ValueError("窗口或领先期不在支持范围内")
     end = iso(bundle.get("as_of")) or dt.date.today().isoformat()
     series = {key: clean_series(value, end) for key, value in (bundle.get("series") or {}).items()}
+    valuations = bundle.get("valuations") or {}
+    bonds = {r["date"]: r["value"] for r in series.get("cn10y", [])}
+    spreads = {key: equity_bond_spread(valuations.get(key), bonds, end) for key in INDEXES}
+    series[SPREAD] = spreads[equity]
+    factor_rows = series.get(factor, [])
     all_prices = clean_series((bundle.get("equities") or {}).get(equity, []), end)
     prices = all_prices
     complete_end = end
@@ -279,7 +332,7 @@ def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0
         if day != next_month - dt.timedelta(days=1):
             prices = [r for r in prices if r["date"][:7] < end[:7]]
             complete_end = (day.replace(day=1) - dt.timedelta(days=1)).isoformat()
-    chosen = relationship(prices, series.get(factor, []), SPECS[factor], window=window, lag=lag, frequency=frequency)
+    chosen = relationship(prices, factor_rows, SPECS[factor], window=window, lag=lag, frequency=frequency)
     overview = []
     for key, spec in SPECS.items():
         if frequency == "daily" and spec["frequency"] != "daily" or spec["frequency"] == "quarterly":
@@ -288,7 +341,7 @@ def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0
         overview.append({k: v for k, v in {"key": key, "name": spec["name"], **row}.items() if k not in ("pairs", "stability")})
     sectors = []
     for key, raw in (bundle.get("sectors") or {}).items():
-        row = relationship(clean_series(raw.get("rows"), complete_end), series.get(factor, []), SPECS[factor], window=window, lag=lag, frequency=frequency)
+        row = relationship(clean_series(raw.get("rows"), complete_end), factor_rows, SPECS[factor], window=window, lag=lag, frequency=frequency)
         sectors.append({"code": key, "name": raw.get("name") or key, **{k: v for k, v in row.items() if k not in ("pairs", "stability")}})
     events = [r for r in bundle.get("events", []) if iso(r.get("date")) and r["date"] <= end]
     for key, category_key in (("fed_upper", "fed"), ("lpr1y", "monetary")):
@@ -316,6 +369,8 @@ def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0
         notes.append(f"{INDEXES[equity][1]}与{SPECS[factor]['name']}变化量的样本相关为{chosen['rho']:.2f}，有效观测{chosen['n']}个；仅描述所选窗口，不能据此认定因果。")
     else:
         notes.append(f"所选联动暂不可判定：{chosen['status']}。缺失不填零，也不用价格水平相关代替收益相关。")
+    if factor == SPREAD:
+        notes.append("股债利差含研究指数自身估值，特别是同期相关可能有机械关联；相关系数和领先期不代表预测能力。")
     if lookup["pmi"]["value"] is not None:
         notes.append(f"制造业PMI统计期{lookup['pmi']['period'] or lookup['pmi']['date']}为{lookup['pmi']['value']:g}，{'高于' if lookup['pmi']['value'] > 50 else '低于' if lookup['pmi']['value'] < 50 else '等于'}50；需结合价格与信用验证需求环境。")
     if lookup["spending"]["value"] is not None:
@@ -325,10 +380,12 @@ def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0
             "gold_links": gold_links,
             "sector_sensitivity": sorted(sectors, key=lambda r: abs(r["rho"]) if r["rho"] is not None else -1, reverse=True),
             "events": event_study(list(unique.values()), all_prices, category=category, keyword=keyword),
-            "valuation": valuation_decomposition(all_prices, (bundle.get("valuations") or {}).get(equity, [])),
+            "valuation": valuation_decomposition(all_prices, valuations.get(equity, [])),
+            "valuation_comparison": compare_valuations(spreads),
             "scenario": scenario(earnings, pe, discount_bp, duration), "transmissions": TRANSMISSIONS,
             "chart": {"asset": (monthly(prices) if frequency == "monthly" else prices)[-window - 1:],
-                      "factor": (monthly(series.get(factor, [])) if frequency == "monthly" else series.get(factor, []))[-window * 2 - 40:]},
+                      "factor": (monthly(factor_rows) if frequency == "monthly" else factor_rows)[-window * 2 - 40:],
+                      "factor_history": [{"date": r["date"], "value": r["value"]} for r in factor_rows]},
             "fiscal": bundle.get("fiscal", []), "debt": bundle.get("debt", []), "calendar": bundle.get("calendar", []),
             "insights": notes, "sources": bundle.get("sources", []), "errors": bundle.get("errors", []), "updated_at": bundle.get("updated_at"),
             "alignment_note": "日频：美国观测仅匹配严格早于A股日期的数值；额外领先期按A股交易日计算。重复沿用同一因子观测日不产生新样本；超过10天未更新（日频LPR允许45天）不匹配。月频：按完整统计月份描述关系，不冒充宏观数据公布前即可交易的回测。",

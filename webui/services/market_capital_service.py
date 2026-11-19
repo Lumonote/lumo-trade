@@ -12,7 +12,7 @@ from pathlib import Path
 import sqlite3
 import threading
 
-from analysis.market_capital import capital_report, margin_report, participant_history, security_code, text
+from analysis.market_capital import capital_report, etf_predecessors, etf_rows, margin_report, participant_history, security_code, text
 from analysis.market_health import number
 from analysis.market_health_fusion import iso, margin_metrics
 from data_store import calendar_repo, kv_repo, quant_radar_repo, tushare_client
@@ -25,6 +25,10 @@ BASELINE = Path(__file__).resolve().parents[2] / "config/market_capital_baseline
 _locks = {key: threading.Lock() for key in ("financing", "participants")}
 PARTICIPANTS = {"main", "elg", "lg", "md", "sm", "institution", "etf", "national", "quant"}
 NATIONAL_NAMES = ("中央汇金投资有限责任公司", "中央汇金资产管理有限责任公司", "中国证券金融股份有限公司", "中国国新控股有限责任公司", "中国诚通控股集团有限公司")
+
+
+class RefreshConflict(ValueError):
+    pass
 
 
 def _records(method, cap=5000, **params):
@@ -110,7 +114,9 @@ def participants(jobs=None, **params):
     report = capital_report(data, start=start, end=end, participant=participant,
                             keyword=str(params.get("keyword") or "")[:100], sector=str(params.get("sector") or "")[:100])
     report["data_as_of"] = source.get("as_of") or max((iso(r.get("trade_date") or r.get("as_of")) or "" for r in data.get(source_key, [])), default=None)
-    report.update(job=_status("participants", jobs), updated_at=data.get("updated_at"), errors=data.get("errors", []), today=now().date().isoformat(),
+    etf = participant == "etf"
+    report.update(job=_status("participants", jobs), updated_at=(data.get("etf_updated_at") if etf else None) or data.get("updated_at"),
+                  errors=data.get("etf_errors", data.get("errors", [])) if etf else data.get("errors", []), today=now().date().isoformat(),
                   disclosure="资金类型可能重叠，不可加总为市场增量资金。大单/小单为订单规模；ETF为份额变化×同日净值的申赎估算；机构仅限龙虎榜公开单日席位；国家队为已公告持仓；量化为公开行为代理。")
     return report
 
@@ -142,7 +148,8 @@ def history(*, participant="main", code="", start="", end=""):
         first, last = quant_radar_repo.date_bounds()
         report["available_start"] = min(filter(None, (first, report["available_start"])), default=None)
         report["data_as_of"] = max(filter(None, (last, report["data_as_of"])), default=None)
-    report.update(today=now().date().isoformat(), source=source, updated_at=data.get("updated_at"))
+    report.update(today=now().date().isoformat(), source=source,
+                  updated_at=(data.get("etf_updated_at") if participant == "etf" else None) or data.get("updated_at"))
     return report
 
 
@@ -235,6 +242,109 @@ def _quarter(day):
     return dt.date(day.year, month + 1, 1) - dt.timedelta(days=1)
 
 
+def _sse_open_days(start, end):
+    if start > end:
+        return []
+    rows = _records("trade_cal", exchange="SSE", start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"), is_open="1")
+    first, last = start.isoformat(), end.isoformat()
+    return sorted({d for r in rows if str(r.get("is_open")) in ("1", "1.0")
+                   and (d := iso(r.get("cal_date"))) and first <= d <= last})
+
+
+def _publishable_day(current):
+    return current.date() - dt.timedelta(days=current.time() < dt.time(15, 30))
+
+
+def _collect_etf(result, dates, previous, through, progress):
+    predecessors = etf_predecessors(result)
+    previous = previous or predecessors.get(dates[0])
+    result["etf_predecessors"] = {**predecessors, **dict(zip(dates, [previous, *dates]))}
+    prior_ends = result.get("etf_calendar_ends", {})
+    result["etf_calendar_ends"] = {**prior_ends, dates[-1]: max(through, prior_ends.get(dates[-1], dates[-1]))}
+    errors = []
+    metadata = {r["ts_code"]: r for r in result.get("etf_meta", [])}
+    try:
+        for row in _records("etf_basic", list_status="L", fields="ts_code,extname,index_code,index_name"):
+            if code := text(row.get("ts_code")):
+                metadata[code] = {**metadata.get(code, {}), **{k: v for k, v in row.items() if text(v)}}
+    except Exception:
+        errors.append("ETF跟踪指数分类读取失败，保留已有分类")
+    result["etf_meta"] = list(metadata.values())
+
+    prior = {date: [] for date in dates}
+    if previous:
+        prior[previous] = []
+    merged = []
+    for row in result.get("etf", []):
+        date = iso(row.get("trade_date"))
+        if date in prior:
+            prior[date].append(row)
+        else:
+            merged.append(row)
+
+    def fetch(date):
+        return [r for r in _etf_day(date, metadata) if iso(r.get("trade_date")) == date]
+
+    def fetched(future):
+        try:
+            return future.result()
+        except Exception:
+            return []  # 当日采集失败时保留已缓存的独立字段。
+
+    failures = 0
+    total = len(dates)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        baseline = pool.submit(fetch, previous) if previous else None
+        work = {pool.submit(fetch, date): date for date in dates}
+        if baseline:
+            progress(f"ETF份额/净值：读取前一交易日 {previous} 的份额基准", 0, total)
+            before = _merge_etf(prior[previous], fetched(baseline))
+            merged.extend(before)
+        else:
+            before = []
+        if not any(r["total_share"] is not None for r in before):
+            errors.append("ETF首日前一交易日份额基准未取得，无法估算缺基准标的的首日净额")
+        for processed, future in enumerate(as_completed(work), 1):
+            date = work[future]
+            rows = fetched(future)
+            failures += not any(number(r.get("total_share")) is not None or number(r.get("nav")) is not None for r in rows)
+            merged.extend(_merge_etf(prior[date], rows))
+            progress(f"ETF份额/净值：已处理 {processed}/{total} 个区间交易日", processed, total)
+
+    if failures:
+        errors.append(f"ETF有{failures}个区间交易日读取失败或未披露；缺失不补零，保留已有记录")
+    result["etf"] = merged
+    result["etf_errors"] = errors
+    result["etf_updated_at"] = now().isoformat()
+    source = {"key": "etf", "as_of": max((date for r in merged if (date := iso(r.get("trade_date"))) in result["etf_predecessors"]
+                                          and (number(r.get("total_share")) is not None or number(r.get("nav")) is not None)), default=None),
+              "rows": len(merged), "status": "部分缺失 / 保留已有记录" if errors else "已读取", "failures": failures,
+              "note": "etf_share_size优先；不可用时使用fund_share+fund_nav同日ETF白名单，缺净值不估金额"}
+    result["sources"] = [s for s in result.get("sources", []) if s["key"] != "etf"] + [source]
+    return source
+
+
+def collect_etf_range(start, end, progress):
+    result = dict(bundle("participants"))
+    first = dt.date.fromisoformat(start)
+    requested_end = dt.date.fromisoformat(end)
+    publishable = _publishable_day(now()).isoformat()
+    lookback = dt.date.fromordinal(max(1, first.toordinal() - 35))
+    calendar = _sse_open_days(lookback, requested_end)
+    through = min(end, publishable) if end in calendar else end
+    dates = [d for d in calendar if start <= d <= through]
+    if not dates:
+        raise ValueError("所选区间没有已收盘的交易日可刷新；当日数据在北京时间15:30后采集")
+    previous = max((d for d in calendar if d < start), default=None)
+    _collect_etf(result, dates, previous, through, progress)
+    amount_dates = {r["date"] for r in etf_rows(result, start=start, end=through) if r["net"] is not None}
+    if through < end:
+        result["etf_errors"].append(f"{end} 未到北京时间15:30，未计入采集交易日")
+    kv_repo.set_(NAMESPACE, "participants", result)
+    return {"start": start, "end": end, "as_of": max(amount_dates, default=None), "notes": result["etf_errors"],
+            "processed_days": len(dates), "amount_days": len(amount_dates)}
+
+
 def collect(kind, progress=lambda message: None):
     if kind not in _locks:
         raise ValueError("研究类型须为financing或participants")
@@ -242,14 +352,12 @@ def collect(kind, progress=lambda message: None):
     old = bundle(kind)
     result = dict(old)
     result["sources"], result["errors"] = [], []
-    raw_calendar = _records("trade_cal", exchange="SSE", start_date=(current.date() - dt.timedelta(days=90)).strftime("%Y%m%d"), end_date=current.strftime("%Y%m%d"), is_open="1")
-    dates = sorted({iso(r.get("cal_date")) for r in raw_calendar if str(r.get("is_open")) in ("1", "1.0") and iso(r.get("cal_date"))})
-    dates = [d for d in dates if d < current.date().isoformat() or current.time() >= dt.time(15, 30)]
+    through = _publishable_day(current)
+    dates = _sse_open_days(current.date() - dt.timedelta(days=90), through)
     etf_previous = dates[-23] if len(dates) > 22 else None
     dates = dates[-22:]
     if len(dates) < 21:
         raise ValueError("交易日历不足21日，保留原研究")
-    result["calendar"] = dates
     stocks = _records("stock_basic", exchange="", list_status="L", fields="ts_code,name,industry,market")
     if not stocks:
         raise ValueError("股票分类未返回，保留原研究")
@@ -268,25 +376,22 @@ def collect(kind, progress=lambda message: None):
         if failures:
             result["errors"].append(f"{key}有{failures}项读取失败或未披露；缺失不补零，已有数据保留原日期")
 
-    def batch(key, method, wanted, fields=None, fetcher=None):
+    def batch(key, method, wanted, fields=None):
         rows, failures = [], 0
         prior = {}
         for r in old.get(key, []):
             prior.setdefault(iso(r.get("trade_date")), []).append(r)
         with ThreadPoolExecutor(max_workers=4) as pool:
-            work = {pool.submit(fetcher, day) if fetcher else pool.submit(_day, method, day, fields): day for day in wanted}
+            work = {pool.submit(_day, method, day, fields): day for day in wanted}
             for i, future in enumerate(as_completed(work), 1):
                 date = work[future]
                 try:
                     batch_rows = future.result()
                 except Exception:
-                    batch_rows = [] if fetcher else (_read(f"raw:{method}:{date}") or [])
+                    batch_rows = _read(f"raw:{method}:{date}") or []
                 if not batch_rows:
                     failures += 1
-                if key == "etf":
-                    rows.extend(_merge_etf(prior.get(date, []), batch_rows))
-                else:
-                    rows.extend(batch_rows or prior.get(date, []))
+                rows.extend(batch_rows or prior.get(date, []))
                 progress(f"{method}：{i}/{len(wanted)}个交易日")
         record(key, rows, failures)
 
@@ -308,16 +413,7 @@ def collect(kind, progress=lambda message: None):
         batch("flows", "moneyflow_dc", dates[-21:])
         result["flow_as_of"] = max((iso(r.get("trade_date")) or "" for r in result["flows"]), default=None)
         batch("institutions", "top_inst", dates[-21:])
-        try:
-            result["etf_meta"] = _records("etf_basic", list_status="L", fields="ts_code,extname,index_code,index_name") or old.get("etf_meta", [])
-        except Exception:
-            result["errors"].append("ETF跟踪指数分类读取失败，保留已有分类")
-        etf_meta = {r["ts_code"]: r for r in result.get("etf_meta", [])}
-        result["etf_previous_date"] = etf_previous
-        batch("etf", "ETF份额/净值", ([etf_previous] if etf_previous else []) + dates, fetcher=lambda day: _etf_day(day, etf_meta))
-        for source in result["sources"]:
-            if source["key"] == "etf":
-                source["note"] = "etf_share_size优先；不可用时使用fund_share+fund_nav同日ETF白名单，缺净值不估金额"
+        _collect_etf(result, dates, etf_previous, through.isoformat(), lambda message, *_: progress(message))
         national, failures = [], 0
         meta = {r["ts_code"]: r for r in stocks}
         period = _quarter(current.date()).strftime("%Y%m%d")
@@ -350,6 +446,7 @@ def collect(kind, progress=lambda message: None):
         result["sources"].append({"key": "quant", "as_of": iso(quant_dates[0]) if quant_dates else None, "rows": len(quant), "status": "现有雷达或研究基线行为代理 / 不推算资金金额"})
         if not any(result.get(key) for key in ("flows", "institutions", "etf", "national", "quant")):
             raise ValueError("资金接口未返回可用数据，请检查现有TuShare权限；原研究保留")
+    result["calendar"] = dates
     result["updated_at"] = now().isoformat()
     if old.get("as_of") and result["as_of"] < old["as_of"]:
         raise ValueError("接口数据日期倒退，原研究保留")
@@ -357,31 +454,50 @@ def collect(kind, progress=lambda message: None):
     return result
 
 
-def start_refresh(kind, jobs):
+def start_refresh(kind, jobs, *, participant="", start="", end=""):
     if kind not in _locks:
         raise ValueError("研究类型须为financing或participants")
+    if not all(isinstance(v, str) for v in (participant, start, end)) or participant and participant not in PARTICIPANTS:
+        raise ValueError("无效的资金类型或日期")
+    params = {}
+    if start or end:
+        if kind != "participants" or participant != "etf":
+            raise ValueError("区间刷新仅适用于ETF资金研究")
+        if not start or not end or iso(start) != start or iso(end) != end or start > end:
+            raise ValueError("请选择完整的起止日期（YYYY-MM-DD），开始日期不能晚于结束日期")
+        if end > now().date().isoformat():
+            raise ValueError("结束日期不能晚于北京时间今日")
+        if (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days > 3660:
+            raise ValueError("单次刷新区间最长十年")
+        params = {"participant": "etf", "start": start, "end": end}
     with _locks[kind]:
         active = _status(kind, jobs)
         if active and active.get("status") in ("queued", "running"):
+            if (active.get("params") or {}) != params:
+                raise RefreshConflict("另一个资金研究区间或默认刷新正在执行，请在完成后重试")
             return active
         def worker(job_id, params):
             jobs.update(job_id, status="running", started_at=now().isoformat(), progress=1)
             count = 0
             warned = False
-            def progress(message):
+            def progress(message, *, percent=None):
                 nonlocal count, warned
                 count += 1
                 try:
-                    jobs.update(job_id, progress=min(95, count))
+                    jobs.update(job_id, progress=min(95, count) if percent is None else percent)
                     jobs.append_log(job_id, message)
                 except sqlite3.Error:
                     if not warned:
                         logger.warning("研究任务 %s 未能写入进度，继续采集", job_id, exc_info=True)
                         warned = True
             try:
-                result = collect(kind, progress)
-                jobs.update(job_id, status="finished", finished_at=now().isoformat(), progress=100,
-                            result={"as_of": result["as_of"], "notes": result["errors"]})
+                if params:
+                    result = collect_etf_range(params["start"], params["end"],
+                                               lambda message, done, total: progress(message, percent=1 + 94 * done // total))
+                else:
+                    data = collect(kind, progress)
+                    result = {"as_of": data["as_of"], "notes": data["errors"] + data.get("etf_errors", [])}
+                jobs.update(job_id, status="finished", finished_at=now().isoformat(), progress=100, result=result)
             except Exception as exc:
                 # 外部异常可能包含请求体，不把Token或连接信息回显到界面。
                 if isinstance(exc, sqlite3.Error):
@@ -393,6 +509,6 @@ def start_refresh(kind, jobs):
                 jobs.update(job_id, status="failed", finished_at=now().isoformat(), error=message)
             finally:
                 close_conn()
-        job = jobs.start("market_capital_" + kind, {}, worker)
+        job = jobs.start("market_capital_" + kind, params, worker)
         kv_repo.set_(NAMESPACE, "job:" + kind, job["id"])
         return job

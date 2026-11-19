@@ -19,7 +19,7 @@ import httpx
 
 from analysis.market_health import number
 from analysis.market_health_fusion import iso
-from analysis.market_macro import FRED, INDEXES, SPECS, build_report, clean_series
+from analysis.market_macro import CN10Y_SOURCE, FRED, INDEXES, SPECS, SPREAD, build_report, clean_series
 from data_store import kv_repo, tushare_client
 from data_store.connection import close_conn
 from webui.services.market_health_service import now
@@ -56,7 +56,20 @@ def baseline():
 
 
 def bundle():
-    return _read("bundle") or baseline()
+    saved = _read("bundle")
+    if not saved:
+        return baseline()
+    series = saved.get("series") or {}
+    end = iso(saved.get("as_of"))
+    if series.get("cn10y") or not end:
+        return saved
+    # 老版本用户的其他通道可能比分发包更新，只补国债且不越过用户快照截止日。
+    rows = clean_series(baseline().get("series", {}).get("cn10y"), end)
+    if not rows:
+        return saved
+    sources = [s for s in saved.get("sources", []) if s.get("name") != CN10Y_SOURCE["name"]]
+    return {**saved, "series": {**series, "cn10y": rows}, "sources": [*sources, {
+        **CN10Y_SOURCE, "rows": len(rows), "date": rows[-1]["date"], "status": "分发基线"}]}
 
 
 def query(jobs=None, **params):
@@ -130,6 +143,34 @@ def fred_series(code, end):
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={code}&cosd=2014-01-01"
     rows = csv.DictReader(io.StringIO(_text(url)))
     return clean_series([{"date": r.get("observation_date") or r.get("DATE"), "value": number(r.get(code))} for r in rows], end)
+
+
+def cn10y_series(start, end):
+    """财政部历史查询每段起止日期差须小于365天；tenYear原单位为%。"""
+    cursor, stop = dt.date.fromisoformat(start), dt.date.fromisoformat(end)
+    rows = []
+    while cursor <= stop:
+        last = min(stop, cursor + dt.timedelta(days=364))
+        payload = json.loads(_text("https://yield.chinabond.com.cn/cbweb-czb-web/czb/historyQuery"
+                                   f"?startDate={cursor}&endDate={last}&gjqx=10&locale=cn_ZH&qxmc=1"))
+        if str(payload.get("flag")) != "0" or not isinstance(payload.get("heList"), list):
+            raise ValueError("国债收益率区间查询失败")
+        batch = clean_series([{"date": r.get("workTime"), "value": r.get("tenYear")} for r in payload["heList"]], last.isoformat())
+        batch = [r for r in batch if r["date"] >= cursor.isoformat()]
+        if not batch and (last - cursor).days >= 15:
+            raise ValueError("国债收益率历史区间缺失")
+        rows.extend(batch)
+        cursor = last + dt.timedelta(days=1)
+    return rows
+
+
+def refresh_cn10y(old_rows, end):
+    prior = clean_series(old_rows, end)
+    start = (dt.date.fromisoformat(prior[-1]["date"]) - dt.timedelta(days=30)).isoformat() if prior else "2014-01-01"
+    rows = cn10y_series(start, end)
+    if not rows or prior and rows[-1]["date"] < prior[-1]["date"]:
+        raise ValueError("国债收益率缺失或最新观测日倒退")
+    return clean_series([*prior, *rows], end)
 
 
 def _document(html):
@@ -251,6 +292,7 @@ def collect(progress=lambda message: None, old=None):
     start, compact_end = "20140101", end.replace("-", "")
     for key, (code, *_) in FRED.items():
         tasks[("series", key)] = lambda code=code: fred_series(code, end)
+    tasks[("series", "cn10y")] = lambda: refresh_cn10y(old.get("series", {}).get("cn10y"), end)
     for key, (code, _) in INDEXES.items():
         tasks[("equities", key)] = lambda code=code: _series(_records("index_daily", ts_code=code, start_date=start, end_date=compact_end, fields="ts_code,trade_date,close"), "close")
         tasks[("valuations", key)] = lambda code=code: [{"date": r["date"], "pe_ttm": r["value"]} for r in _series(_records("index_dailybasic", ts_code=code, start_date=start, end_date=compact_end, fields="ts_code,trade_date,pe_ttm"), "pe_ttm")]
@@ -351,7 +393,9 @@ def collect(progress=lambda message: None, old=None):
         if result[group]:
             result["series"][key] = clean_series([{k: r.get(k) for k in ("date", "period", "published_on", "url")} | {"value": r.get(field)} for r in result[group]], end)
     result["events"] = POLICIES + [{"date": r["published_on"], "category": "fiscal", "title": r["title"], "summary": f"统计期{r['period']}；数据披露事件，未视作新政策公告。", "url": r["url"], "source": "财政部", "date_kind": "原文/列表刊载日（取较晚值）"} for r in result["fiscal"] + result["debt"]]
-    for key, spec in SPECS.items():
+    for key, spec in {**SPECS, "cn10y": CN10Y_SOURCE}.items():
+        if key == SPREAD:  # 按研究指数动态计算，不是独立采集通道。
+            continue
         rows = result["series"].get(key, [])
         result["sources"].append({"name": spec["name"], "source": spec["source"], "url": spec["url"], "rows": len(rows), "date": rows[-1]["date"] if rows else None,
                                   "status": "本次读取" if ("series", key) in fresh else "保留原快照" if rows else "未取得"})

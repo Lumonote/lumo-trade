@@ -214,12 +214,39 @@ def institution_rows(raw_rows):
     return list(unique.values())
 
 
-def etf_rows(bundle):
-    raw = indexed(bundle.get("etf", []))
+def etf_predecessors(bundle):
+    if "etf_predecessors" in bundle:
+        return bundle["etf_predecessors"]
+    dates = bundle.get("calendar", [])
+    return dict(zip(dates, [bundle.get("etf_previous_date"), *dates]))
+
+
+def _etf_uncovered(bundle, predecessors, start, end):
+    if not start or not end:
+        return False
+    days = sorted(d for d in predecessors if start <= d <= end)
+    next_day = min((d for d in predecessors if d > end), default=None)
+    next_previous = predecessors.get(next_day)
+    last = days[-1] if days else max((d for d in predecessors if d < start), default="")
+    through = bundle.get("etf_calendar_ends", {}).get(last, last)
+    if not days:
+        return end > through and not (next_previous and next_previous < start)
+    previous = predecessors[days[0]]
+    # 相邻采集区间可以合并，但不能把区间之间跳过的交易日当作相邻日。
+    return ((start < days[0] and (previous is None or previous >= start))
+            or any(predecessors[day] != before for before, day in zip(days, days[1:]))
+            or (end > through and next_previous != last))
+
+
+def etf_rows(bundle, *, start=None, end=None, code=None):
+    predecessors = {d: prev for d, prev in etf_predecessors(bundle).items()
+                    if (not start or d >= start) and (not end or d <= end)}
+    wanted = predecessors.keys() | set(predecessors.values())
+    raw = {(date, ts_code): r for r in bundle.get("etf", [])
+           if (ts_code := text(r.get("ts_code"))) and (not code or ts_code == code)
+           and (date := iso(r.get("trade_date"))) and date in wanted}
     meta = {text(r.get("ts_code")): r for r in bundle.get("etf_meta", []) if text(r.get("ts_code"))}
     index_names = {text(r.get("index_code")): text(r.get("index_name")) for r in meta.values() if text(r.get("index_code")) and text(r.get("index_name"))}
-    dates = bundle.get("calendar", [])
-    predecessors = dict(zip(dates, [bundle.get("etf_previous_date"), *dates]))
     result = []
     for (date, code), r in sorted(raw.items()):
         if date not in predecessors:
@@ -271,7 +298,9 @@ def participant_history(bundle, *, participant, code, start, end, calendar=None,
     if participant in ("main", "elg", "lg", "md", "sm"):
         daily = {r["date"]: {**r, "net": r[participant]} for r in flow_rows(bundle) if r["code"] == code}
     elif participant == "etf":
-        daily = {r["date"]: r for r in etf_rows(bundle) if r["code"] == code}
+        predecessors = etf_predecessors(bundle)
+        calendar = sorted(set(calendar) | predecessors.keys() | {d for d in predecessors.values() if d})
+        daily = {r["date"]: r for r in etf_rows(bundle, code=code)}
     elif participant == "institution":
         grouped = defaultdict(list)
         for r in institution_rows(bundle.get("institutions", [])):
@@ -317,7 +346,10 @@ def participant_history(bundle, *, participant, code, start, end, calendar=None,
     outside = bool(calendar and (start < calendar[0] or end > calendar[-1]))
     if participant not in ("national", "quant"):
         note += " 资金K线以区间内有效净额从零累计，开/收为当日前后累计值，高/低仅为开收端点，不代表盘中极值；缺日留空，累计仅为有效小计。"
-    if outside:
+    if participant == "etf":
+        if _etf_uncovered(bundle, predecessors, start, end):
+            note += " 区间含未刷新交易日或交易日历缺口，仅展示已有数据。"
+    elif outside:
         note += " 查询范围超出本地交易日历，未覆盖日期不补零。"
     return {"participant": participant, "code": code, "name": name, "start": start, "end": end,
             "data_as_of": all_dates[-1] if all_dates else None, "available_start": all_dates[0] if all_dates else None,
@@ -331,6 +363,12 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
     start = start or end
     expected = sum(1 for d in dates if start and start <= d <= end)
     outside_window = bool(dates and start and (start < dates[0] or end > dates[-1]))
+    if participant == "etf":
+        predecessors = etf_predecessors(bundle)
+        dates = sorted(predecessors)
+        known_days = predecessors.keys() | {d for d in predecessors.values() if d}
+        expected = sum(1 for d in known_days if start and start <= d <= end)
+        outside_window = _etf_uncovered(bundle, predecessors, start, end)
     meta = stock_meta(bundle)
     flows = [] if participant == "etf" else flow_rows(bundle)
     daily = [r for r in flows if start and start <= r["date"] <= end]
@@ -356,9 +394,8 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
                  "as_of": max(r["date"] for r in items), "evidence": items} for code, items in group.items()]
     elif participant == "etf":
         group = defaultdict(list)
-        for r in etf_rows(bundle):
-            if start and start <= r["date"] <= end:
-                group[r["code"]].append(r)
+        for r in etf_rows(bundle, start=start, end=end) if start and end else ():
+            group[r["code"]].append(r)
         rows = [_etf_range(items, expected, outside_window) for items in group.values()]
     elif participant == "national":
         rows = [dict(r) for r in bundle.get("national", [])]
@@ -420,7 +457,8 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
     return {"as_of": end, "start": start, "participant": participant, "rows": sorted(rows, key=sort_amount, reverse=True),
             "sectors": sorted(sectors, key=lambda r: r["observed_net"] if r["observed_net"] is not None else float("-inf"), reverse=True), "history": history,
             "totals": {**amounts(rows), "count": len(rows), "complete": sum(r.get("complete", False) for r in rows)},
-            "matrix": matrix, "range_note": "查询区间超出已采集交易日窗口，仅展示已取得数据，不宣称区间完整" if outside_window else "",
+            "matrix": matrix, "range_note": ("查询区间含未刷新交易日或交易日历缺口，仅展示已取得数据" if participant == "etf" else
+                                             "查询区间超出已采集交易日窗口，仅展示已取得数据，不宣称区间完整") if outside_window else "",
             "excluded_nonstock": excluded_nonstock,
             "metadata_coverage": {"missing_names": sum(not text(r["name"]) for r in rows), "missing_sectors": sum(not text(r["sector"]) for r in rows)},
             "calendar": dates, "sources": bundle.get("sources", []), "flow_as_of": bundle.get("flow_as_of")}

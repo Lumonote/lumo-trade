@@ -254,6 +254,31 @@ def test_etf_single_day_real_zero_and_missing_nav_independent(etf_sample):
     assert daily["2026-11-12"]["share_change"] == 1000000 and daily["2026-11-12"]["net"] is None
 
 
+def test_etf_disjoint_refresh_windows_do_not_claim_complete_coverage():
+    code = "158000.SZ"
+    first, last = "2026-11-16", "2026-11-20"
+    first_previous, last_previous = "2026-11-13", "2026-11-19"
+    end = "2026-11-22"
+    data = {"calendar": [last], "etf_predecessors": {first: first_previous, last: last_previous},
+            "etf_calendar_ends": {last: end}, "etf": [
+                {"ts_code": code, "trade_date": d, "total_share": shares, "nav": 1}
+                for d, shares in ((first_previous, 100), (first, 102), (last_previous, 110), (last, 107))]}
+    report = capital_report(data, participant="etf", start="2026-11-14", end=end)
+    row = report["rows"][0]
+    assert report["range_note"] and not row["complete"]
+    assert row["net"] is None and row["observed_net"] == -10000
+    assert row["amount_days"] == 2
+    history = participant_history(data, participant="etf", code=code, start=first, end=end,
+                                  calendar=[first, "2026-11-17", "2026-11-18", last_previous, last])
+    assert [r["net"] for r in history["rows"]] == [20000, None, None, None, -30000]
+    assert history["totals"]["net"] == -10000 and "交易日历缺口" in history["note"]
+
+    for start, stop, net in (("2026-11-14", first, 20000), (last, end, -30000)):
+        report = capital_report(data, participant="etf", start=start, end=stop)
+        assert not report["range_note"]
+        assert report["rows"][0]["complete"] and report["rows"][0]["net"] == net
+
+
 def test_institution_history_sums_seats_and_keeps_missing_days(sample):
     base = {"trade_date": "20261020", "ts_code": "600000.SH", "exalter": "机构专用", "buy": 120, "sell": 20, "reason": "日涨幅偏离"}
     sample["institutions"] = [base, {**base, "side": "1"}, {**base, "buy": 40}, {**base, "reason": "连续三日累计"}]
