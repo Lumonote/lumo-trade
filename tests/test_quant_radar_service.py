@@ -1121,6 +1121,24 @@ def test_get_stock_history_three_states(tmp_db,monkeypatch):
     assert hist[1]["changes_total"] == 0 and hist[1]["badges"] == []
 
 
+def test_get_stock_range_preserves_historical_dates_and_three_states(tmp_db):
+    from data_store import quant_radar_repo as repo
+    from analysis.market_capital import participant_history
+    dates = ["2026-07-01", "2026-07-02", "2026-07-03"]
+    repo.upsert_day(dates[0], [{"code": "600000", "activity": 57, "changes_bull": 3, "changes_bear": 1}])
+    repo.upsert_day(dates[1], [{"code": "600001", "activity": 21}])
+    repo.upsert_day("2026-11-18", [{"code": "600000", "activity": 99}])
+    assert repo.date_bounds() == (dates[0], "2026-11-18")
+    rows = repo.get_stock_range("600000.SH", dates[0], dates[-1], dates)
+    assert [r["trade_date"] for r in rows] == dates
+    assert [r["status"] for r in rows] == ["observed", "no_activity", "unrecorded"]
+    assert [r["activity"] for r in rows] == [57, 0, None]
+    report = participant_history({"calendar": dates}, participant="quant", code="600000.SH", start=dates[0], end=dates[-1], quant=rows)
+    assert report["totals"]["net"] is None
+    assert [r["bull"] for r in report["rows"]] == [3, 0, None]
+    assert report["data_as_of"] == dates[1]
+
+
 def test_get_stock_history_weekday_fallback_without_calendar(tmp_db):
     """本地无交易日历 → 工作日近似,全部标 unrecorded,不抛错。"""
     from data_store.quant_radar_repo import get_stock_history

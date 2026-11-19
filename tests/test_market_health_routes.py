@@ -109,6 +109,22 @@ def test_capital_routes_reject_invalid_queries(runtime):
         assert client.get("/api/market-health/participants",query_params={"start":"2026-10-30","end":"2026-10-20"}).status_code==400
 
 
+def test_participant_history_native_route_and_validation(runtime, monkeypatch):
+    from robyn.testing import TestClient
+    data = {"calendar": ["2026-11-17", "2026-11-18"], "etf": [
+        {"trade_date": d, "ts_code": "158000.SZ", "total_share": 2292.5835, "nav": 1.0326} for d in ("20261117", "20261118")]}
+    monkeypatch.setattr(runtime.market_capital_service, "bundle", lambda kind: data)
+    monkeypatch.setattr(runtime.market_capital_service.calendar_repo, "open_days", lambda: [])
+    with TestClient(runtime.app) as client:
+        path = "/api/market-health/participants/history"
+        response = client.get(path, query_params={"participant": "etf", "code": "158000.SZ", "start": "2026-11-18", "end": "2026-11-18"})
+        assert response.status_code == 200
+        result = response.json()
+        assert result["totals"]["net"] == 0 and result["rows"][0]["share_change"] == 0
+        for params in ({"code": "invalid"}, {"code": "600000", "participant": "invalid"}, {"code": "600000", "start": "bad"}):
+            assert client.get(path, query_params=params).status_code == 400
+
+
 def test_macro_native_query_refresh_and_packaged_assets(runtime, monkeypatch):
     from robyn.testing import TestClient
     monkeypatch.setattr(runtime.market_macro_service, "start_refresh", lambda jobs: {"id": "macro", "status": "queued"})

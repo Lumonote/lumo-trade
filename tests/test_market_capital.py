@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from analysis.market_capital import capital_report, etf_rows, institution_rows, margin_report
+from analysis.market_capital import capital_report, etf_rows, institution_rows, margin_report, participant_history
 
 
 @pytest.fixture
@@ -204,3 +204,67 @@ def test_etf_name_and_index_can_use_other_verified_metadata(sample):
                      for date, shares in (("20261020", 100), ("20261021", 110))]
     row = capital_report(sample, participant="etf")["rows"][0]
     assert row["name"] == "样本ETF" and row["sector"] == "沪深300"
+
+
+def test_order_partial_fields_and_selected_positive_days(sample):
+    sample["flows"][-1]["buy_sm_amount"] = None
+    report = capital_report(sample, participant="sm", start="2026-10-17")
+    row = report["rows"][0]
+    assert row["net"] == -80000 and row["positive_days"] == 0
+    assert row["field_days"]["main"] == 5 and row["amount_days"] == 4
+    assert not row["complete"] and report["totals"]["observed_net"] == -80000
+    history = participant_history(sample, participant="sm", code="600000.SH", start=report["start"], end=report["as_of"])
+    assert history["totals"]["net"] == row["net"]
+    assert history["totals"]["buy"] is None and history["totals"]["sell"] is None
+    assert history["rows"][-1]["close"] is None
+
+
+def test_sector_ranking_uses_observed_subtotals_with_missing_stock(sample):
+    sample["stocks"] += [{"ts_code": "600001.SH", "name": "缺金额样本", "industry": "银行"},
+                         {"ts_code": "600002.SH", "name": "小额样本", "industry": "煤炭"}]
+    sample["flows"] += [{"ts_code": "600001.SH", "trade_date": sample["as_of"], "net_amount": None},
+                        {"ts_code": "600002.SH", "trade_date": sample["as_of"], "net_amount": 1}]
+    sectors = capital_report(sample)["sectors"]
+    assert [r["name"] for r in sectors] == ["银行", "煤炭"]
+    assert sectors[0]["net"] is None and sectors[0]["observed_net"] == 30000
+
+
+@pytest.fixture
+def etf_sample():
+    dates = ["2026-11-03", "2026-11-04", "2026-11-05", "2026-11-12", "2026-11-17", "2026-11-18"]
+    return {"calendar": dates, "as_of": dates[-1], "etf_meta": [{"ts_code": "158000.SZ", "extname": "样本ETF"}],
+            "etf": [{"ts_code": "158000.SZ", "trade_date": d, "total_share": shares, "nav": nav} for d, shares, nav in (
+                (dates[0], 2000, 1), (dates[2], 2100, 1), (dates[3], 2200, None),
+                (dates[4], 2292.5835, 1.03), (dates[5], 2292.5835, 1.0326))]}
+
+
+def test_etf_single_day_real_zero_and_missing_nav_independent(etf_sample):
+    report = capital_report(etf_sample, participant="etf", start="2026-11-18", end="2026-11-18")
+    row = report["rows"][0]
+    assert row["shares"] == 22925835 and row["net"] == row["share_change"] == 0
+    history = participant_history(etf_sample, participant="etf", code="158000.SZ", start=report["start"], end=report["as_of"])
+    assert len(history["rows"]) == 1 and history["rows"][0]["open"] == history["rows"][0]["close"] == 0
+    assert history["totals"]["buy"] == history["totals"]["sell"] == history["totals"]["net"] == 0
+    partial = capital_report(etf_sample, participant="etf", start="2026-11-03", end="2026-11-18")["rows"][0]
+    assert partial["net"] is None and partial["observed_net"] == pytest.approx(925835 * 1.03)
+    assert partial["amount_days"] == 2 and partial["share_days"] == 3 and not partial["complete"]
+    daily = {r["date"]: r for r in participant_history(etf_sample, participant="etf", code="158000.SZ", start="2026-11-03", end="2026-11-18")["rows"]}
+    assert daily["2026-11-04"]["status"] == "unrecorded" and daily["2026-11-04"]["net"] is None
+    assert daily["2026-11-05"]["share_change"] is None  # 不跨越缺失的前一交易日。
+    assert daily["2026-11-12"]["share_change"] == 1000000 and daily["2026-11-12"]["net"] is None
+
+
+def test_institution_history_sums_seats_and_keeps_missing_days(sample):
+    base = {"trade_date": "20261020", "ts_code": "600000.SH", "exalter": "机构专用", "buy": 120, "sell": 20, "reason": "日涨幅偏离"}
+    sample["institutions"] = [base, {**base, "side": "1"}, {**base, "buy": 40}, {**base, "reason": "连续三日累计"}]
+    history = participant_history(sample, participant="institution", code="600000.SH", start="2026-10-20", end="2026-10-21")
+    assert history["totals"] == {"buy": 160, "sell": 40, "net": 120, "share_change": None}
+    assert history["rows"][1]["net"] is None and history["rows"][1]["status"] == "unrecorded"
+
+
+def test_national_history_preserves_weekend_disclosures_and_holders(sample):
+    sample["national"] = [{"code": "600000.SH", "as_of": "2026-10-24", "holder": holder, "period": "2026-09-30", "shares": 100, "change_shares": None, "net": 999}
+                          for holder in ("中央汇金投资有限责任公司", "中国证券金融股份有限公司")]
+    history = participant_history(sample, participant="national", code="600000.SH", start="2026-10-23", end="2026-10-25")
+    assert len(history["rows"]) == 2 and history["rows"][0]["date"] == "2026-10-24"
+    assert history["totals"]["net"] is None and history["rows"][0]["change_shares"] is None

@@ -217,6 +217,30 @@ def get_stock_history(code: str, days: int = 60) -> List[Dict[str, Any]]:
     return out
 
 
+def get_stock_range(code: str, start: str, end: str, calendar: List[str]) -> List[Dict[str, Any]]:
+    """按指定区间读取三态历史；不把历史查询锚定在今天。"""
+    core = str(code).split(".")[0]
+    rows = {r["trade_date"]: _row_to_item(r) for r in get_conn().execute(
+        f"SELECT {','.join(_FIELDS)} FROM quant_radar_stock_daily "
+        "WHERE (code=? OR code=?) AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
+        (core, code, start, end),
+    )}
+    recorded = {r[0] for r in get_conn().execute(
+        "SELECT DISTINCT trade_date FROM quant_radar_stock_daily WHERE trade_date BETWEEN ? AND ?", (start, end))}
+    dates = sorted({d for d in map(_date_key, calendar) if start <= d <= end} | recorded | rows.keys())
+    return [dict(rows[d], status="observed") if d in rows else {
+        "code": core, "trade_date": d, "status": "no_activity" if d in recorded else "unrecorded",
+        "activity": 0 if d in recorded else None, "changes_bull": 0 if d in recorded else None,
+        "changes_bear": 0 if d in recorded else None,
+    } for d in dates]
+
+
+def date_bounds():
+    """实际采集区间，供历史查询导航；不受当前查询区间影响。"""
+    row = get_conn().execute("SELECT MIN(trade_date), MAX(trade_date) FROM quant_radar_stock_daily").fetchone()
+    return row[0], row[1]
+
+
 def list_dates(limit: int = 120) -> List[str]:
     """有按日榜单数据的日期(最新在前)。"""
     rows = get_conn().execute(

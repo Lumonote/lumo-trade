@@ -1012,6 +1012,16 @@ def market_health_participants(request: Request) -> Response:
         return _json_response({"error": str(exc)}, status_code=400)
 
 
+@_native_get("/api/market-health/participants/history")
+def market_health_participant_history(request: Request) -> Response:
+    try:
+        params = {key: _query_value(request, key, "") for key in ("code", "start", "end")}
+        params["participant"] = _query_value(request, "participant", "main")
+        return _json_response(market_capital_service.history(**params))
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
 @_native_post("/api/market-health/participants/refresh")
 def market_health_participants_refresh(request: Request) -> Response:
     return _json_response({"job": market_capital_service.start_refresh("participants", webui_core.JOB_SERVICE)}, status_code=202)

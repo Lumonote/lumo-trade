@@ -5,13 +5,16 @@
   const $=id=>document.getElementById(id);
   const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const num=(v,d=1)=>v==null||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d});
-  const money=v=>v==null?"—":`${v>0?"+":""}${num(v/1e8,2)}亿`;
+  const money=v=>v==null?"—":`${v>0?"+":""}${num(v/(Math.abs(v)>=1e8?1e8:Math.abs(v)>=1e4?1e4:1),2)}${Math.abs(v)>=1e8?"亿":Math.abs(v)>=1e4?"万":"元"}`;
   const pct=v=>v==null?"—":`${num(v)}%`;
   const tone=v=>v>0?"mh-positive":v<0?"mh-negative":"mh-neutral";
   const kpi=(label,value,note)=>`<div class="mh-kpi"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></div>`;
   const head=(title,note="")=>`<div class="mh-box-head"><div><h3>${esc(title)}</h3><p>${esc(note)}</p></div></div>`;
   const empty=message=>`<p class="mh-empty">${esc(message)}</p>`;
   const stockButton=r=>`<button type="button" class="mc-row-btn" data-mc-stock="${esc(r.code)}" data-mc-name="${esc(r.name)}">查看K线</button>`;
+  const historyButton=r=>`<button type="button" class="mc-row-btn" data-mp-history="${esc(r.code)}">查看K线</button>`;
+  const observed=(r,key="net")=>r["observed_"+key]??r[key];
+  const coverage=(days,expected)=>`<small>有效 ${days??0}/${expected??0} 日</small>`;
   const tableSort=new Map(),tableModels=new Map();
   const sortValue=(row,key)=>typeof key==="function"?key(row):row[key];
   const missing=v=>v==null||v===""||typeof v==="number"&&!Number.isFinite(v);
@@ -75,9 +78,10 @@
   let participant="main",participantOrder="desc";
   const financeFields=[r=>[r.name,r.sector,r.code],"rzye","rzmre","rzche","net",r=>[r.net5,r.net20],r=>[r.rqye,r.rqyl],r=>[r.rqmcl,r.rqchl],r=>[r.close,r.cost],"model_ratio","buffer","float_ratio","buy_ratio",r=>(r.flags||[]).join("；")];
   function participantFields() {
+    const participant=state.participants.data?.participant;
     const first=r=>[r.name,r.sector,r.code];
     if(participant==="institution")return [first,"buy","sell","net","days","as_of"];
-    if(participant==="etf")return [first,"net","share_change","shares","size","nav","days","as_of"];
+    if(participant==="etf")return [first,r=>observed(r),r=>observed(r,"share_change"),"shares","size","nav","days","as_of"];
     if(participant==="national")return [first,"holder","shares","hold_ratio","change_shares","period","as_of"];
     if(participant==="quant")return [first,"activity","direction","bull","bear","as_of","net"];
     return [first,"net","elg","lg","md","sm",r=>[r.positive_days,r.days],"as_of"];
@@ -122,11 +126,13 @@
     $("mfDetail").hidden=false;$("mfDetail").innerHTML=head(`${r.name} · 风险证据`,`${r.code} / ${r.sector} / ${r.as_of}`)+`<dl class="mc-detail-grid">${[["融资余额",money(r.rzye)],["同日收盘价",num(r.close,2)],["窗口代理成本",num(r.cost,2)],["模型担保比例",pct(r.model_ratio)],["距平仓情景线缓冲",pct(r.buffer)],["平仓情景价 / 非实际平仓价",num(r.model_price,2)],["余额变化",money(r.balance_change)],["变化与净买入差额",money(r.adjustment)],["融资余额/当日成交",`${num(r.cover_days)}倍`],["5 / 10 / 20日融资净额",`${money(r.net5)} / ${money(r.net10)} / ${money(r.net20)}`]].map(([k,v])=>`<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl><p class="mc-boundary">${esc(data.model_note)}</p><p class="mc-foot">${esc(r.flags.join("；")||"本轮未触发所列集中风险；这不表示不存在其他风险。")}</p>${stockButton(r)}`;$("mfDetail").scrollIntoView({behavior:"smooth",block:"nearest"});
   }
   function participantRows() {
+    const participant=state.participants.data?.participant;
     const identity=["national","quant"].includes(participant);
-    const rows=(state.participants.data?.rows||[]).filter(r=>identity||$("mpDirection").value==="all"||$("mpDirection").value==="buy"&&r.net>0||$("mpDirection").value==="sell"&&r.net<0);
-    return sortedRows(`mpStocks-${participant}`,rows,participantFields(),{key:participant==="quant"?"activity":participant==="national"?"shares":"net",direction:participantOrder});
+    const rows=(state.participants.data?.rows||[]).filter(r=>identity||$("mpDirection").value==="all"||$("mpDirection").value==="buy"&&observed(r)>0||$("mpDirection").value==="sell"&&observed(r)<0);
+    return sortedRows(`mpStocks-${participant}`,rows,participantFields(),{key:participant==="quant"?"activity":participant==="national"?"shares":r=>observed(r),direction:participantOrder});
   }
   function renderParticipantStocks() {
+    const participant=state.participants.data?.participant;
     const rows=participantRows(),s=state.participants,identity=["national","quant"].includes(participant);s.page=Math.min(s.page,Math.max(1,Math.ceil(rows.length/50)));
     $("mpDirection").disabled=identity;$("mpSort").disabled=identity;
     $("mpCount").textContent=`${$("mpSector").value?`行业 / 跟踪指数：${$("mpSector").value} · `:""}当前 ${rows.length} 项 · 点击表头切换升降序，全部结果排序后分页 · 缺失值始终置后，每条保留来源日期${identity&&$("mpDirection").value!=="all"?" · 此类证据不提供净额方向，方向选择已保留，切回资金类型后生效":""}`;
@@ -136,16 +142,17 @@
     if(participant==="national")labels=["股票 / 行业","披露股东","持股数量（股）","持股占总股本","披露持股变化（股）","报告期","公告日期"];
     if(participant==="quant")labels=["股票 / 行业","疑似活跃刻度","方向代理","偏多行为数","偏空行为数","观测日期","资金金额"];
     $("mpStocks").innerHTML=table(labels,rows.slice((s.page-1)*50,s.page*50).map((r,i)=>{
-      const first=`<td><button type="button" class="mc-row-btn" data-mp-row="${(s.page-1)*50+i}">${esc(r.name)}</button> ${stockButton(r)}<small>${esc(r.code)} / ${esc(r.sector)}</small></td>`;
-      let cells=`<td class="${tone(r.net)}">${money(r.net)}</td>${[r.elg,r.lg,r.md,r.sm].map(v=>`<td class="${tone(v)}">${money(v)}</td>`).join("")}<td>${r.positive_days} / ${r.days}<small>${r.complete?"窗口完整":`已取得${r.days}/${r.expected_days}日`}</small></td><td>${esc(r.as_of)}</td>`;
+      const first=`<td><button type="button" class="mc-row-btn" data-mp-row="${(s.page-1)*50+i}">${esc(r.name)}</button> ${historyButton(r)}<small>${esc(r.code)} / ${esc(r.sector)}</small></td>`;
+      let cells=`<td class="${tone(r.net)}">${money(r.net)}${coverage(r.amount_days,r.expected_days)}</td>${["elg","lg","md","sm"].map(k=>`<td class="${tone(r[k])}">${money(r[k])}${coverage(r.field_days?.[k],r.expected_days)}</td>`).join("")}<td>${r.positive_days} / ${r.days}<small>${r.complete?"窗口完整":`已取得${r.days}/${r.expected_days}日`}</small></td><td>${esc(r.as_of)}</td>`;
       if(participant==="institution")cells=`<td>${money(r.buy)}</td><td>${money(r.sell)}</td><td class="${tone(r.net)}">${money(r.net)}</td><td>${r.days}日</td><td>${esc(r.as_of)}</td>`;
-      if(participant==="etf")cells=`<td class="${tone(r.net)}">${money(r.net)}</td><td>${num(r.share_change,0)}</td><td>${num(r.shares,0)}</td><td>${money(r.size)}</td><td>${num(r.nav,4)}</td><td>${r.days}/${r.expected_days}<small>${r.complete?"完整相邻日":"窗口不完整"}</small></td><td>${esc(r.as_of)}</td>`;
+      if(participant==="etf")cells=`<td class="${tone(observed(r))}">${money(observed(r))}${coverage(r.amount_days,r.expected_days)}</td><td>${num(observed(r,"share_change"),0)}${coverage(r.share_days,r.expected_days)}</td><td>${num(r.shares,0)}</td><td>${money(r.size)}</td><td>${num(r.nav,4)}</td><td>${r.days}/${r.expected_days}<small>${r.complete?"完整相邻日":"窗口不完整"}</small><small>${esc(r.missing_reason)}</small></td><td>${esc(r.as_of)}</td>`;
       if(participant==="national")cells=`<td>${esc(r.holder)}</td><td>${num(r.shares,0)}</td><td>${pct(r.hold_ratio)}</td><td>${num(r.change_shares,0)}<small>缺值表示新进 / 未披露，非0</small></td><td>${esc(r.period)}</td><td>${esc(r.as_of)}</td>`;
       if(participant==="quant")cells=`<td>${num(r.activity)}</td><td>${esc(r.direction||"未取得")}</td><td>${num(r.bull,0)}</td><td>${num(r.bear,0)}</td><td>${esc(r.as_of)}</td><td>不可识别</td>`;
       return `<tr>${first}${cells}</tr>`;
     }),"",{id:`mpStocks-${participant}`,fields:participantFields(),ordered:true});syncSortSelect(`mpStocks-${participant}`,"mpSort");pager("mp",rows.length,s.page);$("mpCsv").disabled=!rows.length;
   }
   function renderParticipants(data) {
+    const participant=data.participant;
     typeButtons();const kind=types.find(r=>r[0]===participant)||types[1],t=data.totals,identity=["national","quant"].includes(participant);
     const sectorSelect=$("mpSector"),selectedSector=sectorSelect.value;
     const sectorNames=selectedSector?new Set([...Array.from(sectorSelect.options,o=>o.value).filter(Boolean),...data.sectors.map(r=>r.name)]):new Set(data.sectors.map(r=>r.name));
@@ -156,11 +163,11 @@
     if(data.excluded_nonstock)$("mpBoundary").textContent+=` A股榜已排除 ${data.excluded_nonstock} 条非A股记录（含可转债、优先股、B股等）。`;
     const missingMeta=data.metadata_coverage||{};
     if(missingMeta.missing_names||missingMeta.missing_sectors)$("mpBoundary").textContent+=` 当前仍有 ${missingMeta.missing_names||0} 项名称、${missingMeta.missing_sectors||0} 项行业/跟踪指数未取得，已明确标记。`;
-    $("mpSummary").innerHTML=`<div class="mh-kpis">${kpi(identity?"证据条目":"有效样本净额",identity?`${t.count}项`:money(t.observed_net??t.net),identity?"不推算每日净流入金额":`金额覆盖 ${t.amount_covered??t.count}/${t.count}项；非全市场增量资金`)}${kpi(identity?"覆盖股票":"净买入 / 申购",identity?`${new Set(data.rows.map(r=>r.code)).size}只`:`${t.buying}只`,identity?"以公开证据为边界":"按所选口径净额大于0")}${kpi(identity?"覆盖行业":"净卖出 / 赎回",identity?`${data.sectors.length}项`:`${t.selling}只`,identity?"股票当前分类":"按所选口径净额小于0")}${kpi("实际数据截止",data.as_of||"未取得",participant==="national"?"公告日期；报告期在明细列示":"每个来源独立保留真实数据日")}</div>`;
-    const best=data.sectors.find(r=>r.net>0),worst=[...data.sectors].reverse().find(r=>r.net<0);
-    $("mpInsights").textContent=identity?`${kind[1]}使用${kind[2]}。当前查询得到${t.count}条证据，行业覆盖${data.sectors.length}项；明细可追溯到观测日或公告日，不能据此判断当日买入卖出金额。`:`已取得观测中，${best?`${best.name}承接最强（${money(best.net)}）`:"没有正净额行业"}，${worst?`${worst.name}净卖出最强（${money(worst.net)}）`:"没有负净额行业"}。当前${t.complete}/${t.count}项具备所选完整交易日窗口；净额仅描述所列公开样本，不作为上涨概率。`;
+    $("mpSummary").innerHTML=`<div class="mh-kpis">${kpi(identity?"证据条目":"有效样本净额",identity?`${t.count}项`:money(t.observed_net??t.net),identity?"不推算每日净流入金额":`金额覆盖 ${t.amount_covered??t.count}/${t.count}项；按有效日期小计`)}${kpi(identity?"覆盖股票":"净买入 / 申购",identity?`${new Set(data.rows.map(r=>r.code)).size}只`:`${t.buying}只`,identity?"以公开证据为边界":"按所选口径净额大于0")}${kpi(identity?"覆盖行业":"净卖出 / 赎回",identity?`${data.sectors.length}项`:`${t.selling}只`,identity?"股票当前分类":"按所选口径净额小于0")}${kpi("实际数据截止",data.data_as_of||"未取得",participant==="national"?"公告日期；报告期在明细列示":"每个来源独立保留真实数据日")}</div>`;
+    const best=data.sectors.find(r=>observed(r)>0),worst=[...data.sectors].reverse().find(r=>observed(r)<0);
+    $("mpInsights").textContent=identity?`${kind[1]}使用${kind[2]}。当前查询得到${t.count}条证据，行业覆盖${data.sectors.length}项；明细可追溯到观测日或公告日，不能据此判断当日买入卖出金额。`:`已取得观测中，${best?`${best.name}承接最强（${money(observed(best))}）`:"没有正净额行业"}，${worst?`${worst.name}净卖出最强（${money(observed(worst))}）`:"没有负净额行业"}。当前${t.complete}/${t.count}项具备所选完整交易日窗口；各字段按有效日期小计，净额仅描述所列公开样本。`;
     $("mpTrend").innerHTML=head("所选资金的逐日轨迹",identity?"身份类证据不伪造资金曲线":"按查询的股票与日期统计 / 金额元已换算亿元")+(data.history.length?chart(data.history,[{key:"net",label:"逐日净额"}],"资金净额逐日轨迹"):empty(identity?"该维度不提供可验证的每日净额；请查看下方日期与证据。":"当前维度未提供可比的日资金序列。"));
-    $("mpSectors").innerHTML=head(participant==="etf"?"ETF流向的跟踪指数":"行业影响与覆盖",`点击${participant==="etf"?"跟踪指数":"行业"}名称，筛选并定位到对应${participant==="etf"?"ETF":"股票"}列表${identity?"；按证据条目数量展示":""}`)+(identity?bars(data.sectors.slice(0,12),"count",r=>`${r.count}项`,"data-mp-sector"):bars([...data.sectors].sort((a,b)=>Math.abs(b.net||0)-Math.abs(a.net||0)).slice(0,12),"net",r=>money(r.net),"data-mp-sector"));
+    $("mpSectors").innerHTML=head(participant==="etf"?"ETF流向的跟踪指数":"行业影响与覆盖",`点击${participant==="etf"?"跟踪指数":"行业"}名称，筛选并定位到对应${participant==="etf"?"ETF":"股票"}列表${identity?"；按证据条目数量展示":"；按有效金额小计"}`)+(identity?bars(data.sectors.slice(0,12),"count",r=>`${r.count}项`,"data-mp-sector"):bars(data.sectors.map(r=>({...r,net:observed(r)})).sort((a,b)=>Math.abs(b.net||0)-Math.abs(a.net||0)).slice(0,12),"net",r=>money(r.net),"data-mp-sector"));
     if(["main","elg","lg","md"].includes(participant))$("mpBoundary").innerHTML+=` <label for="mpAmountKind">订单口径</label> <select id="mpAmountKind" class="mc-mini-select">${[["main","主力（大单+超大单）"],["elg","超大单"],["lg","大单"],["md","中单"]].map(([k,v])=>`<option value="${k}" ${participant===k?"selected":""}>${v}</option>`).join("")}</select>`;
     $("mpSources").innerHTML=sourceTable(data.sources,"mpSources");renderParticipantStocks();
     if(data.range_note)$("mpInsights").textContent+=` ${data.range_note}。`;
@@ -169,10 +176,91 @@
   function participantDetail(index) {
     const r=participantRows()[index];if(!r)return;$("mpDetail").hidden=false;
     const labels={code:"股票 / 基金代码",name:"股票 / 基金名称",net:"所选净额（元）",shares:"持有份额 / 股数",holder:"披露股东",as_of:"数据日期",period:"报告期",date:"交易日",previous_date:"前一交易日",index_code:"跟踪指数代码",share_change:"份额变化（份）",sector:"行业 / 跟踪指数",nav:"净值",size:"总规模（元）",activity:"疑似活跃刻度",direction:"行为方向",main:"主力净额（元）",elg:"超大单净额（元）",lg:"大单净额（元）",md:"中单净额（元）",sm:"小单净额（元）",buy:"买入金额（元）",sell:"卖出金额（元）",days:"已取得交易日数",positive_days:"主力正流入天数",expected_days:"窗口交易日数",complete:"窗口完整性",hold_ratio:"持股占比（%）",change_shares:"披露持股变化（股）",bull:"偏多行为数",bear:"偏空行为数"};
-    const counts=new Set(["days","positive_days","expected_days","bull","bear"]);
+    Object.assign(labels,{net:"所选净额有效小计（元）",observed_net:"申赎估算有效小计（元）",observed_share_change:"份额变化有效小计（份）",amount_days:"金额有效日数",share_days:"份额有效日数",missing_reason:"缺失原因",positive_days:"所选口径正流入天数"});
+    const counts=new Set(["days","positive_days","expected_days","bull","bear","amount_days","share_days"]);
     const value=(key,v)=>typeof v==="boolean"?(key==="complete"?(v?"完整":"不完整"):(v?"是":"否")):typeof v==="number"?num(v,counts.has(key)?0:2):String(v);
-    $("mpDetail").innerHTML=head(`${r.name} · 公开证据`,`${r.code} / ${r.sector} / ${r.as_of}`)+(r.evidence?table(["交易日","公开席位","买入","卖出","净额","上榜依据"],r.evidence.map(v=>`<tr><td>${esc(v.date)}</td><td>${esc(v.seat)}</td><td>${money(v.buy)}</td><td>${money(v.sell)}</td><td>${money(v.net)}</td><td>${esc(v.reason)}</td></tr>`),"",{id:"mpEvidence",fields:["date","seat","buy","sell","net","reason"],records:r.evidence}):`<dl class="mc-detail-grid">${Object.entries(r).filter(([k,v])=>!Array.isArray(v)&&v!=null).map(([k,v])=>`<div><dt>${esc(labels[k]||k)}</dt><dd>${esc(value(k,v))}</dd></div>`).join("")}</dl>`)+`<p class="mc-boundary">${esc($("mpBoundary").textContent)}</p>${stockButton(r)}`;$("mpDetail").scrollIntoView({behavior:"smooth",block:"nearest"});
+    $("mpDetail").innerHTML=head(`${r.name} · 公开证据`,`${r.code} / ${r.sector} / ${r.as_of}`)+(r.evidence?table(["交易日","公开席位","买入","卖出","净额","上榜依据"],r.evidence.map(v=>`<tr><td>${esc(v.date)}</td><td>${esc(v.seat)}</td><td>${money(v.buy)}</td><td>${money(v.sell)}</td><td>${money(v.net)}</td><td>${esc(v.reason)}</td></tr>`),"",{id:"mpEvidence",fields:["date","seat","buy","sell","net","reason"],records:r.evidence}):`<dl class="mc-detail-grid">${Object.entries(r).filter(([k,v])=>v!=null&&typeof v!=="object").map(([k,v])=>`<div><dt>${esc(labels[k]||k)}</dt><dd>${esc(value(k,v))}</dd></div>`).join("")}</dl>`)+`<p class="mc-boundary">${esc($("mpBoundary").textContent)}</p>${historyButton(r)}`;$("mpDetail").scrollIntoView({behavior:"smooth",block:"nearest"});
   }
+  const historyState={id:0,target:null,data:null,controller:null};
+  const historyLabel=kind=>({main:"大资金",elg:"超大单",lg:"大单",md:"中单",sm:"散户",institution:"大机构",etf:"ETF",quant:"量化资金",national:"国家队"}[kind]);
+  const historyStatus=r=>r.status==="unrecorded"?"未采集 / 未披露":r.status==="no_activity"?"已采集 · 该股无异动":r.missing_reason||"已观测";
+  function historyColumns(kind) {
+    if(kind==="national")return [["公告日","date"],["披露股东","holder"],["报告期","period"],["持股数量（股）","shares",v=>num(v,0)],["披露持股变化（股）","change_shares",v=>num(v,0)],["持股占比","hold_ratio",pct]];
+    if(kind==="quant")return [["观测日","date"],["疑似活跃刻度","activity",num],["偏多行为数","bull",v=>num(v,0)],["偏空行为数","bear",v=>num(v,0)],["方向代理","direction"]];
+    if(kind==="etf")return [["交易日","date"],["净申购估算","buy",money],["净赎回估算","sell",money],["净申赎估算","net",money],["份额变化（份）","share_change",v=>num(v,0)],["总份额（份）","shares",v=>num(v,0)],["同日净值","nav",v=>num(v,4)]];
+    return [["交易日","date"],["买入金额","buy",money],["卖出金额","sell",money],["所选净额","net",money]];
+  }
+  function historyPoint(row,kind) {
+    return historyColumns(kind).map(([label,key,format])=>`${label}：${format?format(row[key]):row[key]??"—"}`).join(" · ")+` · ${historyStatus(row)}`;
+  }
+  function historyPlot(data,series,{candles=false,points=false,label="",format=money}={}) {
+    const rows=data.rows,values=rows.flatMap(r=>candles?[r.open,r.close]:series.map(s=>r[s.key])).filter(v=>v!=null);
+    if(!values.length)return empty(`${label}：当前区间无有效观测，缺失值留空。`);
+    const low=Math.min(0,...values),high=Math.max(0,...values)|| (low===0?1:0),span=high-low;
+    const left=110,right=875,top=32,bottom=205,step=(right-left)/Math.max(rows.length,1),width=Math.max(1,Math.min(20,step*.6));
+    const x=i=>left+step*(i+.5),y=v=>bottom-(v-low)/span*(bottom-top);
+    const grid=[0,.5,1].map(f=>`<line x1="${left}" x2="${right}" y1="${top+(bottom-top)*f}" y2="${top+(bottom-top)*f}" stroke="#e1ebe7"/><text x="${left-8}" y="${top+(bottom-top)*f+4}" text-anchor="end">${esc(format(high-f*span))}</text>`).join("");
+    const marks=rows.map((r,i)=>{
+      let mark="";
+      if(candles&&r.open!=null){const color=r.net>=0?"#b55e4a":"#328067";mark=`<rect data-candle="${esc(r.date)}" x="${x(i)-width/2}" y="${Math.min(y(r.open),y(r.close))- (r.net===0?1:0)}" width="${width}" height="${Math.max(2,Math.abs(y(r.open)-y(r.close)))}" fill="${color}"/>`;}
+      else if(!candles)mark=series.map((s,j)=>{const v=r[s.key];if(v==null)return "";const xx=x(i)+(j-(series.length-1)/2)*width/series.length;return points?`<circle cx="${xx}" cy="${y(v)}" r="4" fill="${s.color}"/>`:`<rect x="${xx-width/series.length/2}" y="${Math.min(y(0),y(v))-(v===0?1:0)}" width="${Math.max(1,width/series.length)}" height="${Math.max(2,Math.abs(y(0)-y(v)))}" fill="${s.color}"/>`;}).join("");
+      return `<g tabindex="0" data-mp-point="${i}" aria-label="${esc(historyPoint(r,data.participant))}"><title>${esc(historyPoint(r,data.participant))}</title><rect class="mc-hit" x="${left+i*step}" y="${top}" width="${step}" height="${bottom-top}"/>${mark}</g>`;
+    }).join("");
+    const legend=candles?`<span><i style="background:#b55e4a"></i>净流入</span><span><i style="background:#328067"></i>净流出</span>`:series.map(s=>`<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("");
+    return `<div class="mc-history-legend"><strong>${esc(label)}</strong>${legend}</div><svg class="mc-history-chart" viewBox="0 0 920 245" role="img" aria-label="${esc(label)}">${grid}${marks}<text x="${left}" y="232">${esc(rows[0]?.date)}</text><text x="${right}" y="232" text-anchor="end">${esc(rows.at(-1)?.date)}</text></svg>`;
+  }
+  function renderHistory(data) {
+    const kind=data.participant,identity=["national","quant"].includes(kind),t=data.totals,c=data.coverage;
+    $("mpHistoryMeta").textContent=`${data.code} · 查询 ${data.start} 至 ${data.end} · 实际数据截止 ${data.data_as_of||"未取得"}`;
+    $("mpHistorySummary").innerHTML=`<div class="mh-kpis">${identity?kpi("有效证据",`${c.observed}项`,kind==="quant"?"含已采集无异动日期":"按股东、公告日与报告期列示")+kpi("资金金额","不可识别","该类证据不提供实际买卖金额"):kpi(kind==="etf"?"净申购估算小计":"买入金额小计",money(t.buy),kind==="etf"?"正向日净申赎估算":kind==="institution"?"公开单日机构席位":"来源未提供双边金额")+kpi(kind==="etf"?"净赎回估算小计":"卖出金额小计",money(t.sell),kind==="etf"?"负向日净申赎绝对额":kind==="institution"?"公开单日机构席位":"来源未提供双边金额")+kpi("净额有效小计",money(t.net),`有效 ${c.amount_days}/${c.days} 日`)}${kpi(kind==="etf"?"份额变化有效小计":"观测覆盖",kind==="etf"?`${num(t.share_change,0)} 份`:`${c.observed}/${c.days}`,kind==="etf"?`有效 ${c.share_days}/${c.days} 日`:"缺失日期不补零")}</div>`;
+    $("mpHistoryNote").textContent=data.note;
+    let charts="";
+    if(kind==="national")charts=historyPlot(data,[{key:"shares",label:"披露持股（股）",color:"#14766d"}],{points:true,label:"持仓披露轨迹 · 每点对应一条股东公告",format:v=>num(v,0)});
+    else if(kind==="quant")charts=historyPlot(data,[{key:"activity",label:"疑似活跃刻度",color:"#14766d"}],{points:true,label:"量化行为轨迹",format:num})+historyPlot(data,[{key:"bull",label:"偏多行为",color:"#b55e4a"},{key:"bear",label:"偏空行为",color:"#328067"}],{label:"行为次数",format:v=>num(v,0)});
+    else {
+      charts=historyPlot(data,[],{candles:true,label:"资金K线 · 有效净额累计"});
+      const series=kind==="institution"||kind==="etf"?[{key:"buy",label:kind==="etf"?"净申购估算":"买入金额",color:"#b55e4a"},{key:"sell",label:kind==="etf"?"净赎回估算":"卖出金额",color:"#328067"},{key:"net",label:"净额",color:"#4177a2"}]:[{key:"net",label:"所选订单净额",color:"#14766d"}];
+      charts+=historyPlot(data,series,{label:"逐日资金金额"});
+      if(kind==="etf")charts+=historyPlot(data,[{key:"share_change",label:"份额变化（份）",color:"#14766d"}],{label:"逐日份额变化",format:v=>num(v,0)});
+    }
+    $("mpHistoryChart").innerHTML=charts;
+    $("mpHistoryPoint").textContent=data.rows.length?historyPoint(data.rows.at(-1),kind):"当前区间没有记录，可调整区间或更新资金研究。";
+    const columns=historyColumns(kind);
+    $("mpHistoryRows").innerHTML=table([...columns.map(c=>c[0]),"覆盖状态"],data.rows.map(r=>`<tr>${columns.map(([,key,format])=>`<td>${esc(format?format(r[key]):r[key]??"—")}</td>`).join("")}<td>${esc(historyStatus(r))}</td></tr>`));
+  }
+  async function loadHistory() {
+    if(!historyState.target)return;
+    const id=++historyState.id;historyState.controller?.abort();historyState.controller=new AbortController();
+    const target={...historyState.target,start:$("mpHistoryStart").value,end:$("mpHistoryEnd").value};
+    $("mpHistoryStatus").textContent="正在读取区间证据…";error("mpHistory");historyState.data=null;
+    for(const suffix of ["Summary","Chart","Rows","Point","Note"])$("mpHistory"+suffix).textContent="";
+    try {
+      const data=await api(`/api/market-health/participants/history?${new URLSearchParams(target)}`,{signal:historyState.controller.signal});
+      if(id!==historyState.id||!$("mpHistoryModal").open)return;
+      historyState.data=data;renderHistory(data);$("mpHistoryStatus").textContent="区间查询已完成 · 悬停或聚焦图形查看逐日明细";
+    }catch(e){if(id!==historyState.id||e.name==="AbortError")return;$("mpHistoryStatus").textContent="";error("mpHistory",e.message);}
+  }
+  function openHistory(code) {
+    const data=state.participants.data,r=data?.rows.find(r=>r.code===code);if(!r)return;
+    historyState.target={participant:data.participant,code};
+    $("mpHistoryTitle").textContent=`${r.name} · ${historyLabel(data.participant)}${["national","quant"].includes(data.participant)?"历史轨迹":"资金K线"}`;
+    $("mpHistoryMeta").textContent=code;
+    $("mpHistoryStart").value=data.start||data.as_of;$("mpHistoryEnd").value=data.as_of;
+    $("mpHistoryStart").max=data.today;$("mpHistoryEnd").max=data.today;
+    if(!$("mpHistoryModal").open)$("mpHistoryModal").showModal();loadHistory();
+  }
+  $("mpHistoryQuery").addEventListener("submit",e=>{e.preventDefault();loadHistory();});
+  $("mpHistoryClose").addEventListener("click",()=>$("mpHistoryModal").close());
+  $("mpHistoryModal").addEventListener("close",()=>{historyState.id++;historyState.controller?.abort();historyState.target=null;});
+  $("mpHistoryModal").addEventListener("click",e=>{
+    const button=e.target.closest("[data-mp-history-days]"),data=historyState.data;if(!button||!data)return;
+    const count=button.dataset.mpHistoryDays,dates=data.calendar.filter(d=>d<=$("mpHistoryEnd").value);
+    if(count==="all"&&data.available_start){$("mpHistoryStart").value=data.available_start;$("mpHistoryEnd").value=data.data_as_of;}
+    else if(dates.length)$("mpHistoryStart").value=dates[Math.max(0,dates.length-Number(count))];
+    loadHistory();
+  });
+  for(const event of ["pointerover","focusin"])$("mpHistoryChart").addEventListener(event,e=>{const point=e.target.closest("[data-mp-point]"),data=historyState.data;if(point&&data)$("mpHistoryPoint").textContent=historyPoint(data.rows[Number(point.dataset.mpPoint)],data.participant);});
+  $("mhView-participants").addEventListener("click",e=>{const button=e.target.closest("[data-mp-history]");if(button)openHistory(button.dataset.mpHistory);});
   function query(kind) {
     if(kind==="financing")return new URLSearchParams({window:$("mfWindow").value,deposit:$("mfDeposit").value,warning:$("mfWarning").value,closeout:$("mfCloseout").value});
     return new URLSearchParams({participant,start:$("mpStart").value,end:$("mpEnd").value,keyword:$("mpSearch").value,sector:$("mpSector").value});

@@ -42,6 +42,11 @@ def total(rows, key):
     return sum(values) if values and all(v is not None for v in values) else None
 
 
+def observed_total(rows, key):
+    values = [r[key] for r in rows if r.get(key) is not None]
+    return sum(values) if values else None
+
+
 def ratio(a, b):
     return a / b * 100 if a is not None and b is not None and b > 0 else None
 
@@ -214,30 +219,120 @@ def etf_rows(bundle):
     meta = {text(r.get("ts_code")): r for r in bundle.get("etf_meta", []) if text(r.get("ts_code"))}
     index_names = {text(r.get("index_code")): text(r.get("index_name")) for r in meta.values() if text(r.get("index_code")) and text(r.get("index_name"))}
     dates = bundle.get("calendar", [])
+    predecessors = dict(zip(dates, [bundle.get("etf_previous_date"), *dates]))
     result = []
     for (date, code), r in sorted(raw.items()):
-        if date not in dates or dates.index(date) == 0:
+        if date not in predecessors:
             continue
-        previous = dates[dates.index(date) - 1]
+        previous = predecessors[date]
         old = raw.get((previous, code), {})
         current, before, nav = number(r.get("total_share")), number(old.get("total_share")), number(r.get("nav"))
         delta = (current - before) * 1e4 if current is not None and before is not None else None
+        nav = nav if nav is not None and nav > 0 else None
+        reasons = []
+        if current is None: reasons.append("缺当日份额")
+        if before is None: reasons.append("缺前一交易日份额")
+        if nav is None: reasons.append("缺当日有效净值")
         info = meta.get(code, {})
         index_code = text(info.get("index_code"))
         index_name = text(info.get("index_name"), index_names.get(index_code, "跟踪指数未取得"))
         result.append({"date": date, "previous_date": previous, "code": code, "name": security_name(r.get("etf_name"), code, security_name(info.get("extname"), code)),
                        "sector": index_name, "index_code": index_code or None, "shares": current * 1e4 if current is not None else None,
-                       "share_change": delta, "net": delta * nav if delta is not None and nav is not None and nav > 0 else None,
+                       "share_change": delta, "net": delta * nav if delta is not None and nav is not None else None, "missing_reason": "、".join(reasons),
                        "nav": nav, "size": number(r.get("total_size")) * 1e4 if number(r.get("total_size")) is not None else None})
     return result
+
+
+def _etf_range(items, expected, outside):
+    row = {**items[-1], "days": len(items), "as_of": items[-1]["date"]}
+    reasons = {r["missing_reason"] for r in items if r["missing_reason"]}
+    if len(items) < expected: reasons.add("区间内有交易日无记录")
+    if outside: reasons.add("超出已采集交易日历")
+    row["missing_reason"] = "；".join(sorted(reasons))
+    for field, coverage in (("net", "amount_days"), ("share_change", "share_days")):
+        row[coverage] = sum(r[field] is not None for r in items)
+        row["observed_" + field] = observed_total(items, field)
+        row[field] = row["observed_" + field] if row[coverage] == expected and not outside else None
+    return row
+
+
+def participant_history(bundle, *, participant, code, start, end, calendar=None, quant=()):
+    """同一证券、同一资金口径的历史。缺日留空，零值有效，身份代理不造金额。"""
+    calendar = sorted(set(calendar if calendar is not None else bundle.get("calendar", [])))
+    info = stock_meta(bundle).get(code, {})
+    daily, events = {}, []
+    notes = {
+        "institution": "仅龙虎榜公开机构专用单日席位，买入与卖出分别统计；未上榜不代表未交易。",
+        "etf": "净申赎估算=相邻交易日份额变化×同日净值；净申购/净赎回为该日净额的方向拆分，不是双边申购赎回总额。缺净值仍展示份额变化。",
+        "national": "按公告日展示股东与报告期持股；持股变化不是公告日买卖，不估计资金金额。",
+        "quant": "疑似量化行为代理；区分有观测、已采集无异动与未采集，不估计量化资金金额。",
+    }
+    note = notes.get(participant, "订单规模代理；来源只披露该口径净额，不能据此反推出买入和卖出的双边金额。")
+    if participant in ("main", "elg", "lg", "md", "sm"):
+        daily = {r["date"]: {**r, "net": r[participant]} for r in flow_rows(bundle) if r["code"] == code}
+    elif participant == "etf":
+        daily = {r["date"]: r for r in etf_rows(bundle) if r["code"] == code}
+    elif participant == "institution":
+        grouped = defaultdict(list)
+        for r in institution_rows(bundle.get("institutions", [])):
+            if r["code"] == code and r["date"]:
+                grouped[r["date"]].append(r)
+        daily = {date: {"date": date, **{key: total(items, key) for key in ("buy", "sell", "net")}, "evidence": items}
+                 for date, items in grouped.items()}
+    elif participant == "national":
+        events = sorted((dict(r, date=r["as_of"], net=None, status="observed") for r in bundle.get("national", [])
+                         if security_code(r.get("code")) == code and r.get("as_of")),
+                        key=lambda r: (r["date"], r.get("holder") or "", r.get("period") or ""))
+    elif participant == "quant":
+        for r in bundle.get("quant", []):
+            if security_code(r.get("code")) == code and r.get("as_of"):
+                daily[r["as_of"]] = dict(r, date=r["as_of"], status="observed", net=None)
+        for r in quant:
+            date = iso(r.get("trade_date"))
+            if date and (r.get("status") != "unrecorded" or date not in daily):
+                daily[date] = {**r, "date": date, "net": None, "bull": r.get("changes_bull"), "bear": r.get("changes_bear")}
+    all_dates = sorted({r["date"] for r in events} if participant == "national" else
+                       {d for d, r in daily.items() if r.get("status") != "unrecorded"})
+    dates = sorted({d for d in calendar if start <= d <= end} | {d for d in daily if start <= d <= end})
+    rows = [r for r in events if start <= r["date"] <= end] if participant == "national" else [
+        {"date": d, "net": None, "status": "observed" if d in daily else "unrecorded", **daily.get(d, {})} for d in dates]
+    cumulative = 0
+    for row in rows:
+        row.setdefault("buy", None)
+        row.setdefault("sell", None)
+        net = number(row.get("net"))
+        row["net"] = net
+        row.update(open=None, close=None, high=None, low=None)
+        if participant == "etf":
+            row["buy"] = max(net, 0) if net is not None else None
+            row["sell"] = max(-net, 0) if net is not None else None
+        if net is not None:
+            row.update(open=cumulative, close=cumulative + net, high=max(cumulative, cumulative + net), low=min(cumulative, cumulative + net))
+            cumulative += net
+    meta = next((r for r in [*daily.values(), *events] if text(r.get("name"))), {})
+    name = security_name(meta.get("name"), code, text(info.get("name"), code))
+    amount_days = sum(r["net"] is not None for r in rows)
+    coverage = {"days": len(rows), "observed": sum(r["status"] != "unrecorded" for r in rows), "amount_days": amount_days,
+                "share_days": sum(r.get("share_change") is not None for r in rows)}
+    outside = bool(calendar and (start < calendar[0] or end > calendar[-1]))
+    if participant not in ("national", "quant"):
+        note += " 资金K线以区间内有效净额从零累计，开/收为当日前后累计值，高/低仅为开收端点，不代表盘中极值；缺日留空，累计仅为有效小计。"
+    if outside:
+        note += " 查询范围超出本地交易日历，未覆盖日期不补零。"
+    return {"participant": participant, "code": code, "name": name, "start": start, "end": end,
+            "data_as_of": all_dates[-1] if all_dates else None, "available_start": all_dates[0] if all_dates else None,
+            "rows": rows, "calendar": calendar, "coverage": coverage, "note": note,
+            "totals": {key: observed_total(rows, key) for key in ("buy", "sell", "net", "share_change")}}
 
 
 def capital_report(bundle, *, start=None, end=None, participant="main", keyword="", sector=""):
     dates = bundle.get("calendar", [])
     end = end or bundle.get("flow_as_of") or bundle.get("as_of")
     start = start or end
+    expected = sum(1 for d in dates if start and start <= d <= end)
+    outside_window = bool(dates and start and (start < dates[0] or end > dates[-1]))
     meta = stock_meta(bundle)
-    flows = flow_rows(bundle)
+    flows = [] if participant == "etf" else flow_rows(bundle)
     daily = [r for r in flows if start and start <= r["date"] <= end]
     group = defaultdict(list)
     for r in daily:
@@ -245,8 +340,10 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
     rows = []
     for code, items in group.items():
         row = {k: items[-1][k] for k in ("code", "name", "sector")}
-        row.update({k: total(items, k) for k in ("main", "elg", "lg", "md", "sm")})
-        row.update(days=len(items), positive_days=sum((r.get("main") or 0) > 0 for r in items), as_of=max(r["date"] for r in items))
+        row.update({k: observed_total(items, k) for k in ("main", "elg", "lg", "md", "sm")})
+        row["field_days"] = {k: sum(r[k] is not None for r in items) for k in ("main", "elg", "lg", "md", "sm")}
+        row.update(days=len(items), amount_days=row["field_days"].get(participant, 0),
+                   positive_days=sum((r.get(participant) or 0) > 0 for r in items), as_of=max(r["date"] for r in items))
         row["net"] = row.get(participant)
         rows.append(row)
     if participant == "institution":
@@ -262,7 +359,7 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
         for r in etf_rows(bundle):
             if start and start <= r["date"] <= end:
                 group[r["code"]].append(r)
-        rows = [{**items[-1], "net": total(items, "net"), "share_change": total(items, "share_change"), "days": len(items), "as_of": items[-1]["date"]} for items in group.values()]
+        rows = [_etf_range(items, expected, outside_window) for items in group.values()]
     elif participant == "national":
         rows = [dict(r) for r in bundle.get("national", [])]
     elif participant == "quant":
@@ -279,12 +376,12 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
     rows = [r for r in rows if (not keyword or keyword.casefold() in " ".join(str(r.get(k) or "") for k in ("code", "name", "sector", "holder", "seat")).casefold())
             and (not sector or r.get("sector") == sector)
             and (participant not in ("quant", "national") or start and start <= (r.get("as_of") or "") <= end)]
-    expected = len([d for d in dates if start and start <= d <= end])
-    outside_window = bool(dates and start and start < dates[0])
     for row in rows:
         if participant not in ("national", "quant"):
             row["expected_days"] = expected
             row["complete"] = row.get("days", 0) == expected and expected > 0 and not outside_window
+            if participant in ("main", "elg", "lg", "md", "sm", "etf"):
+                row["complete"] = row["complete"] and row["amount_days"] == expected
     selected_codes = {r["code"] for r in rows}
     by_bare = {code.split(".")[0]: code for code in meta}
     canonical_codes = selected_codes | {by_bare.get(str(code).split(".")[0], code) for code in selected_codes}
@@ -295,32 +392,35 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
             codes = {r["code"] for r in rows if (r.get("sector") or "未分类") == name}
             codes |= {by_bare.get(str(code).split(".")[0], code) for code in codes}
             items = [r for r in daily if r["code"] in codes]
-            large, small = total(items, "main"), total(items, "sm")
-            matrix.append({"name": name, "main": large, "elg": total(items, "elg"), "lg": total(items, "lg"), "sm": small,
+            large, small = observed_total(items, "main"), observed_total(items, "sm")
+            matrix.append({"name": name, "main": large, "elg": observed_total(items, "elg"), "lg": observed_total(items, "lg"), "sm": small,
                            "institution": total([r for r in inst if r["code"] in codes], "net"),
                            "quant_count": len({r["code"] for r in bundle.get("quant", []) if (r["code"] in codes or by_bare.get(str(r["code"]).split(".")[0]) in codes) and start and start <= (r.get("as_of") or "") <= end}),
                            "national_count": len({r["code"] for r in bundle.get("national", []) if r["code"] in codes and r.get("as_of") and r["as_of"] <= end}),
                            "relation": "缺少可比资金" if large is None or small is None else "大单承接 / 小单流出" if large > 0 > small else "大单流出 / 小单承接" if large < 0 < small else "所列净额同向或为零"})
         matrix.sort(key=lambda r: abs(r["main"] or 0), reverse=True)
+    amount_key = "observed_net" if participant == "etf" else "net"
+    def amounts(items):
+        values = [r[amount_key] for r in items if r.get(amount_key) is not None]
+        return {"net": total(items, "net"), "observed_net": sum(values) if values else None,
+                "amount_covered": len(values), "buying": sum(v > 0 for v in values), "selling": sum(v < 0 for v in values)}
+
     sectors = []
     for name in sorted({r.get("sector") or "未分类" for r in rows}):
         items = [r for r in rows if (r.get("sector") or "未分类") == name]
-        sectors.append({"name": name, "count": len(items), "net": total(items, "net"), "positive": sum(r.get("net") is not None and r["net"] > 0 for r in items),
-                        "observed_net": sum(r["net"] for r in items if r.get("net") is not None) if any(r.get("net") is not None for r in items) else None,
-                        "amount_covered": sum(r.get("net") is not None for r in items),
-                        "negative": sum(r.get("net") is not None and r["net"] < 0 for r in items)})
+        stats = amounts(items)
+        sectors.append({"name": name, "count": len(items), **stats, "positive": stats["buying"], "negative": stats["selling"]})
     history = []
     if participant in ("main", "elg", "lg", "md", "sm"):
         for date in sorted({r["date"] for r in daily}):
             items = [r for r in daily if r["date"] == date and r["code"] in selected_codes]
-            history.append({"date": date, "net": total(items, participant), "count": len(items)})
-    return {"as_of": end, "start": start, "participant": participant, "rows": sorted(rows, key=lambda r: r.get("net") if r.get("net") is not None else float("-inf"), reverse=True),
-            "sectors": sorted(sectors, key=lambda r: r["net"] if r["net"] is not None else float("-inf"), reverse=True), "history": history,
-            "totals": {"net": total(rows, "net"), "count": len(rows), "complete": sum(r.get("complete", False) for r in rows),
-                       "observed_net": sum(r["net"] for r in rows if r.get("net") is not None) if any(r.get("net") is not None for r in rows) else None,
-                       "amount_covered": sum(r.get("net") is not None for r in rows),
-                       "buying": sum(r.get("net") is not None and r["net"] > 0 for r in rows), "selling": sum(r.get("net") is not None and r["net"] < 0 for r in rows)},
-            "matrix": matrix, "range_note": "查询起点早于已采集交易日窗口，仅展示已取得数据，不宣称区间完整" if outside_window else "",
+            history.append({"date": date, "net": observed_total(items, participant), "count": len(items)})
+    def sort_amount(r):
+        return r[amount_key] if r.get(amount_key) is not None else float("-inf")
+    return {"as_of": end, "start": start, "participant": participant, "rows": sorted(rows, key=sort_amount, reverse=True),
+            "sectors": sorted(sectors, key=lambda r: r["observed_net"] if r["observed_net"] is not None else float("-inf"), reverse=True), "history": history,
+            "totals": {**amounts(rows), "count": len(rows), "complete": sum(r.get("complete", False) for r in rows)},
+            "matrix": matrix, "range_note": "查询区间超出已采集交易日窗口，仅展示已取得数据，不宣称区间完整" if outside_window else "",
             "excluded_nonstock": excluded_nonstock,
             "metadata_coverage": {"missing_names": sum(not text(r["name"]) for r in rows), "missing_sectors": sum(not text(r["sector"]) for r in rows)},
             "calendar": dates, "sources": bundle.get("sources", []), "flow_as_of": bundle.get("flow_as_of")}

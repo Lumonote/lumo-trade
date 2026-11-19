@@ -109,3 +109,69 @@ def test_etf_fallback_uses_whitelist_same_day_nav_and_disclosure_date(store, mon
     rows=service._etf_day("2026-10-30",{"510300.SH":{"extname":"样本ETF"}})
     assert len(rows)==1 and rows[0]["total_share"]==100 and rows[0]["nav"]==2
     assert rows[0]["total_size"]==200  # 万份×元=万元
+
+
+@pytest.mark.parametrize("source", ["fund_share + fund_nav", "fund_share + fund_nav（ETF白名单，同日净值）"])
+def test_etf_merge_tracks_size_provenance_separately(source):
+    fallback = {"trade_date": "20261030", "ts_code": "510300.SH", "total_share": 100, "nav": 2, "total_size": 200, "source": source}
+    primary = {"trade_date": "20261030", "ts_code": "510300.SH", "total_share": 110, "nav": 3, "total_size": 350}
+    row = service._merge_etf([fallback], [primary])[0]
+    assert row["total_size"] == 350 and row["size_estimated"] is False
+    assert service._merge_etf([row], [{**fallback, "nav": 4}])[0]["total_size"] == 350
+    revised = service._merge_etf([fallback], [{**primary, "total_size": None}])[0]
+    assert revised["total_size"] == 330 and revised["size_estimated"] is True
+
+
+@pytest.mark.parametrize("failure", ["shares", "nav"])
+def test_etf_fallback_keeps_independent_observations(store, monkeypatch, failure):
+    def day(method, date, fields):
+        if method == "etf_share_size" or failure == "shares":
+            raise RuntimeError("unavailable")
+        return [{"ts_code": "510300.SH", "fd_share": 0}]
+    def records(*args, **kwargs):
+        if failure == "nav":
+            raise RuntimeError("unavailable")
+        return [{"ts_code": "510300.SH", "nav_date": "20261030", "ann_date": "20261031", "unit_nav": 2}]
+    monkeypatch.setattr(service, "_day", day)
+    monkeypatch.setattr(service, "_records", records)
+    row = service._etf_day("2026-10-30", {"510300.SH": {}})[0]
+    assert row["total_share"] == (None if failure == "shares" else 0)
+    assert row["nav"] == (2 if failure == "shares" else None)
+    assert row["total_size"] is None
+
+
+def test_collect_etf_includes_predecessor_for_first_window_day(store, monkeypatch):
+    store["participants"] = {"calendar": []}
+    def records(method, **params):
+        if method == "trade_cal":
+            return [{"cal_date": f"202610{d:02d}", "is_open": 1} for d in range(1, 31)]
+        if method == "stock_basic":
+            return [{"ts_code": "600000.SH", "name": "样本"}]
+        return []
+    monkeypatch.setattr(service, "_records", records)
+    monkeypatch.setattr(service, "_day", lambda *args: [])
+    monkeypatch.setattr(service.quant_radar_repo, "list_dates", lambda **kwargs: [])
+    monkeypatch.setattr(service, "read_baseline", lambda: {})
+    monkeypatch.setattr(service, "_etf_day", lambda date, meta: [{"trade_date": date, "ts_code": "510300.SH", "total_share": int(date[-2:]), "nav": 2}])
+    result = service.collect("participants")
+    assert result["calendar"][0] == "2026-10-09" and result["etf_previous_date"] == "2026-10-08"
+    assert service.participants(participant="etf", start="2026-10-09", end="2026-10-09")["rows"][0]["net"] == 20000
+
+
+def test_history_is_read_only_and_actual_cutoff_is_not_query_end(store, monkeypatch):
+    store["participants"] = {"calendar": ["2026-10-29"], "stocks": [{"ts_code": "600000.SH", "name": "样本"}],
+                             "flows": [{"ts_code": "600000.SH", "trade_date": "20261029", "net_amount": 0}],
+                             "sources": [{"key": "flows", "as_of": "2026-10-29"}]}
+    monkeypatch.setattr(service.calendar_repo, "open_days", lambda: [])
+    monkeypatch.setattr(service, "_records", lambda *a, **k: pytest.fail("只读查询不能采集"))
+    report = service.participants(start="2026-10-29", end="2026-10-31")
+    assert report["data_as_of"] == "2026-10-29" and report["as_of"] == "2026-10-31"
+    history = service.history(code="600000", start="2026-10-29", end="2026-10-31")
+    assert history["totals"]["net"] == 0 and history["data_as_of"] == "2026-10-29"
+
+
+@pytest.mark.parametrize("params", [{"code": "bad"}, {"code": "600000", "participant": "fake"}, {"code": "600000", "start": "bad"},
+                                    {"code": "600000", "start": "2026-10-31", "end": "2026-10-20"}, {"code": "600000", "end": "2099-01-01"}])
+def test_history_rejects_invalid_query(store, params):
+    with pytest.raises(ValueError):
+        service.history(**params)

@@ -28,7 +28,9 @@ with sync_playwright() as p:
     page.set_default_timeout(20000)
     page.set_default_navigation_timeout(60000)
     errors = []
+    stock_kline_requests = []
     page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("request", lambda request: stock_kline_requests.append(request.url) if "/api/stock-kline/" in request.url else None)
     page.on("requestfailed", lambda request: print("request_failed",request.url,request.failure,flush=True) if "/api/market-health/participants" in request.url else None)
     # 现有大盘自动行情和自动全量采集使用只读快照，新增API保持真实请求。
     page.route("**/api/market-health?*", lambda route: route.fulfill(json=snapshot))
@@ -87,6 +89,10 @@ with sync_playwright() as p:
     page.locator("#mfStocks [data-mf-code]").first.click()
     expect(page.locator("#mfDetail")).to_be_visible()
     assert "模型担保比例" in page.locator("#mfDetail").inner_text()
+    page.evaluate("window.__originalKline=window.openStockKlineModal;window.openStockKlineModal=(...args)=>{window.__financeKline=args;return Promise.resolve()}")
+    page.locator("#mfDetail [data-mc-stock]").click()
+    assert page.evaluate("window.__financeKline[0]") == page.locator("#mfDetail [data-mc-stock]").get_attribute("data-mc-stock")
+    page.evaluate("window.openStockKlineModal=window.__originalKline")
     page.locator("#mfRisk").select_option("all")
     page.locator("#mfSearch").fill("不存在的股票")
     expect(page.locator("#mfCount")).to_contain_text("筛选 0")
@@ -126,6 +132,42 @@ with sync_playwright() as p:
     }''')
     assert contrast and min(contrast)>=4.5, contrast
     page.locator('#mpDetail').screenshot(path=str(OUT / 'participants_detail.png'))
+    def check_history(current):
+        kind = current["participant"]
+        before = page.locator("#mpCount").inner_text()
+        saved_start = page.locator("#mpStart").input_value()
+        page.locator("#mpStart").fill("2000-01-01")  # 未提交的表单不得影响图的初始区间。
+        code = page.locator("#mpStocks [data-mp-history]").first.get_attribute("data-mp-history")
+        with page.expect_response(lambda r: "/participants/history?" in r.url) as opened:
+            page.locator("#mpStocks [data-mp-history]").first.click()
+        result = opened.value.json()
+        assert opened.value.status == 200 and result["code"] == code and result["participant"] == kind
+        assert result["start"] == current["start"] and result["end"] == current["as_of"]
+        expect(page.locator("#mpHistoryModal")).to_be_visible()
+        expect(page.locator("#mpHistoryStatus")).to_contain_text("查询已完成")
+        if kind in ("quant", "national"):
+            expect(page.locator("#mpHistorySummary")).to_contain_text("不可识别")
+            assert page.locator("#mpHistoryChart [data-candle]").count() == 0
+        dates = [d for d in current["calendar"] if d <= current["as_of"]]
+        if dates and kind != "national":
+            page.locator("#mpHistoryStart").fill(dates[max(0,len(dates)-5)])
+            with page.expect_response(lambda r: "/participants/history?" in r.url):
+                page.locator("#mpHistoryQuery button").click()
+            expect(page.locator("#mpHistoryStatus")).to_contain_text("查询已完成")
+        assert page.locator("#mpCount").inner_text() == before
+        expect(page.locator("#mpStart")).to_have_value("2000-01-01")
+        page.locator("#mpHistoryModal").screenshot(path=str(OUT / f"history_{kind}.png"))
+        page.locator("#mpHistoryClose").click()
+        page.locator("#mpStart").fill(saved_start)
+        page.locator("#mpStocks [data-mp-row]").first.click()
+        with page.expect_response(lambda r: "/participants/history?" in r.url) as detail_opened:
+            page.locator("#mpDetail [data-mp-history]").click()
+        assert detail_opened.value.json()["code"] == code
+        expect(page.locator("#mpHistoryStatus")).to_contain_text("查询已完成")
+        page.locator("#mpHistoryModal").press("Escape")
+        expect(page.locator("#mpHistoryModal")).not_to_be_visible()
+        assert not stock_kline_requests
+    check_history(capital_snapshot)
     def check_sector_click(selector, expected_total):
         target=page.locator(selector).first
         sector=target.get_attribute('data-mp-sector')
@@ -147,7 +189,8 @@ with sync_playwright() as p:
     check_sector_click('#mpMatrix button[data-mp-sector]',len(capital_snapshot['rows']))
     page.screenshot(path=str(OUT / "participants.png"), full_page=True)
     page.locator('[data-mp-days="5"]').click()
-    expect(page.locator("#mpMeta")).to_contain_text("2026-10-26", timeout=30000)
+    dates=[d for d in capital_snapshot["calendar"] if d<=capital_snapshot["as_of"]]
+    expect(page.locator("#mpMeta")).to_contain_text(dates[max(0,len(dates)-5)], timeout=30000)
     with page.expect_response(lambda response:'/participants?' in response.url and not parse_qs(urlsplit(response.url).query).get('start')):
         page.locator('#mpLatest').click()
     expect(page.locator('#mpStart')).to_have_value('')
@@ -171,6 +214,7 @@ with sync_playwright() as p:
             expect(page.locator("#mpCount")).to_contain_text(str(len(quant_snapshot["rows"])),timeout=30000)
             assert "不可识别" in page.locator("#mpStocks").inner_text()
             assert not any(r["name"] in (r["code"],r["code"].split(".")[0]) for r in quant_snapshot["rows"])
+        check_history(current)
         check_sector_click('#mpSectors button[data-mp-sector]',len(current['rows']))
     page.locator('[data-mp-type="main"]').click()
     expect(page.locator("#mpDirection")).to_be_enabled()
@@ -219,7 +263,7 @@ with sync_playwright() as p:
         result=response.json()
         expect(page.locator('#mpMeta')).to_contain_text('2026-07-01',timeout=30000)
         expect(page.locator('#mpRankTitle')).to_contain_text({'main':'大资金','institution':'大机构','etf':'ETF','national':'国家队','quant':'量化资金','sm':'散户'}[kind])
-        expected=len(result['rows']) if kind in ('national','quant') else sum(r['net'] is not None and r['net']<0 for r in result['rows'])
+        expected=len(result['rows']) if kind in ('national','quant') else sum((r.get('observed_net') if r.get('observed_net') is not None else r.get('net')) is not None and (r.get('observed_net') if r.get('observed_net') is not None else r.get('net'))<0 for r in result['rows'])
         expect(page.locator('#mpCount')).to_contain_text(f'当前 {expected} 项',timeout=30000)
         for key,value in saved.items():
             expect(page.locator('#'+key)).to_have_value(value)
@@ -228,5 +272,5 @@ with sync_playwright() as p:
     page.screenshot(path=str(OUT / "participants_1100.png"), full_page=True)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
     assert not errors, errors
-    print(json.dumps({"browser_errors": errors, "checks": "tabs, filters, global numeric/text header sorting, pagination, sorted CSV, nulls last, model, 6 participants, real NaN-cache search, names/industries, 1100px layout", "screenshots": str(OUT)}, ensure_ascii=False))
+    print(json.dumps({"browser_errors": errors, "checks": "tabs, sorting, pagination, CSV, model, six participants, both history entries, independent date range, financing price K-line dispatch, no participant price-K-line requests, 1100px layout", "screenshots": str(OUT)}, ensure_ascii=False))
     browser.close()
