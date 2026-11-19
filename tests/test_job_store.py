@@ -1,4 +1,24 @@
+import sqlite3
+
+import pytest
+
 from webui.services.job_store import JobStore
+
+
+def test_connection_closed_after_commit_and_rollback(tmp_path):
+    store = JobStore(tmp_path / "jobs.sqlite")
+    with store._connect() as conn:
+        conn.execute("CREATE TABLE sample (value INTEGER)")
+        conn.execute("INSERT INTO sample VALUES (1)")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
+    with pytest.raises(ValueError), store._connect() as conn:
+        conn.execute("INSERT INTO sample VALUES (2)")
+        raise ValueError("rollback")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
+    with store._connect() as conn:
+        assert [r[0] for r in conn.execute("SELECT value FROM sample")] == [1]
 
 
 def test_create_update_and_load_job(tmp_path):

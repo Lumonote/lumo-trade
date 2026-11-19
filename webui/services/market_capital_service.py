@@ -6,7 +6,9 @@ import datetime as dt
 from functools import lru_cache
 import gzip
 import json
+import logging
 from pathlib import Path
+import sqlite3
 import threading
 
 from analysis.market_capital import capital_report, margin_report
@@ -17,6 +19,7 @@ from data_store.connection import close_conn
 from webui.services.market_health_service import now, read_baseline
 
 NAMESPACE = "market_capital"
+logger = logging.getLogger(__name__)
 BASELINE = Path(__file__).resolve().parents[2] / "config/market_capital_baseline.json.gz"
 _locks = {key: threading.Lock() for key in ("financing", "participants")}
 PARTICIPANTS = {"main", "elg", "lg", "md", "sm", "institution", "etf", "national", "quant"}
@@ -289,18 +292,30 @@ def start_refresh(kind, jobs):
             return active
         def worker(job_id, params):
             jobs.update(job_id, status="running", started_at=now().isoformat(), progress=1)
-            count = [0]
+            count = 0
+            warned = False
             def progress(message):
-                count[0] += 1
-                jobs.update(job_id, progress=min(95, count[0]))
-                jobs.append_log(job_id, message)
+                nonlocal count, warned
+                count += 1
+                try:
+                    jobs.update(job_id, progress=min(95, count))
+                    jobs.append_log(job_id, message)
+                except sqlite3.Error:
+                    if not warned:
+                        logger.warning("研究任务 %s 未能写入进度，继续采集", job_id, exc_info=True)
+                        warned = True
             try:
                 result = collect(kind, progress)
                 jobs.update(job_id, status="finished", finished_at=now().isoformat(), progress=100,
                             result={"as_of": result["as_of"], "notes": result["errors"]})
             except Exception as exc:
                 # 外部异常可能包含请求体，不把Token或连接信息回显到界面。
-                message = str(exc) if isinstance(exc, ValueError) else f"公开数据读取失败（{type(exc).__name__}），请检查网络/接口权限；原研究保留"
+                if isinstance(exc, sqlite3.Error):
+                    message = "本地数据库读写失败，请检查磁盘空间和数据目录权限后重试"
+                elif isinstance(exc, ValueError):
+                    message = str(exc)
+                else:
+                    message = f"公开数据读取失败（{type(exc).__name__}），请检查网络/接口权限；原研究保留"
                 jobs.update(job_id, status="failed", finished_at=now().isoformat(), error=message)
             finally:
                 close_conn()

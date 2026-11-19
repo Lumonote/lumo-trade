@@ -20,6 +20,8 @@ class StubKlineService(StockKlineService):
 
 def test_sina_symbol_and_scale_mapping():
     assert StockKlineService.sina_symbol_for_code("600000") == "sh600000"
+    assert StockKlineService.sina_symbol_for_code("510300") == "sh510300"
+    assert StockKlineService.sina_symbol_for_code("159919") == "sz159919"
     assert StockKlineService.sina_symbol_for_code("000001") == "sz000001"
     assert StockKlineService.sina_symbol_for_code("830000") == "bj830000"
     assert StockKlineService.period_to_sina_scale("1h") == "60"

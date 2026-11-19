@@ -6,6 +6,8 @@ import datetime
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -24,13 +26,14 @@ class JobStore:
         self._lock = threading.RLock()
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        with closing(sqlite3.connect(self.db_path, timeout=30)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            yield conn
 
     def _init_schema(self) -> None:
         with self._lock, self._connect() as conn:

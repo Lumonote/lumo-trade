@@ -47,7 +47,7 @@ class StockKlineService:
         code = str(stock_code or '').strip().zfill(6)
         if code.startswith(('43', '83', '87', '92')):
             return f'bj{code}'
-        if code.startswith(('6', '9')):
+        if code.startswith(('5', '6', '9')):
             return f'sh{code}'
         return f'sz{code}'
 

@@ -136,7 +136,7 @@
     if(participant==="national")labels=["股票 / 行业","披露股东","持股数量（股）","持股占总股本","披露持股变化（股）","报告期","公告日期"];
     if(participant==="quant")labels=["股票 / 行业","疑似活跃刻度","方向代理","偏多行为数","偏空行为数","观测日期","资金金额"];
     $("mpStocks").innerHTML=table(labels,rows.slice((s.page-1)*50,s.page*50).map((r,i)=>{
-      const first=`<td><button type="button" class="mc-row-btn" data-mp-row="${(s.page-1)*50+i}">${esc(r.name)}</button><small>${esc(r.code)} / ${esc(r.sector)}</small></td>`;
+      const first=`<td><button type="button" class="mc-row-btn" data-mp-row="${(s.page-1)*50+i}">${esc(r.name)}</button> ${stockButton(r)}<small>${esc(r.code)} / ${esc(r.sector)}</small></td>`;
       let cells=`<td class="${tone(r.net)}">${money(r.net)}</td>${[r.elg,r.lg,r.md,r.sm].map(v=>`<td class="${tone(v)}">${money(v)}</td>`).join("")}<td>${r.positive_days} / ${r.days}<small>${r.complete?"窗口完整":`已取得${r.days}/${r.expected_days}日`}</small></td><td>${esc(r.as_of)}</td>`;
       if(participant==="institution")cells=`<td>${money(r.buy)}</td><td>${money(r.sell)}</td><td class="${tone(r.net)}">${money(r.net)}</td><td>${r.days}日</td><td>${esc(r.as_of)}</td>`;
       if(participant==="etf")cells=`<td class="${tone(r.net)}">${money(r.net)}</td><td>${num(r.share_change,0)}</td><td>${num(r.shares,0)}</td><td>${money(r.size)}</td><td>${num(r.nav,4)}</td><td>${r.days}/${r.expected_days}<small>${r.complete?"完整相邻日":"窗口不完整"}</small></td><td>${esc(r.as_of)}</td>`;

@@ -1,9 +1,13 @@
 from copy import deepcopy
 import datetime as dt
+import sqlite3
+import time
 
 import pytest
 
 from webui.services import market_capital_service as service
+from webui.services.background_jobs import BackgroundJobService
+from webui.services.job_store import JobStore
 
 
 @pytest.fixture
@@ -47,7 +51,8 @@ def test_collection_rejects_incomplete_market_without_overwriting_success(store,
     assert store["financing"]["as_of"] == "2026-10-29"
 
 
-def test_refresh_reuses_running_job_and_failure_preserves_cache(store, monkeypatch):
+@pytest.mark.parametrize("error_type,expected", [(RuntimeError, "网络"), (sqlite3.OperationalError, "本地数据库")])
+def test_refresh_reuses_running_job_and_failure_preserves_cache(store, monkeypatch, error_type, expected):
     class Jobs:
         def __init__(self): self.job = None; self.worker = None
         def get(self, job_id): return self.job
@@ -61,11 +66,38 @@ def test_refresh_reuses_running_job_and_failure_preserves_cache(store, monkeypat
     jobs = Jobs()
     first = service.start_refresh("financing", jobs)
     assert service.start_refresh("financing", jobs) == first
-    monkeypatch.setattr(service, "collect", lambda *args: (_ for _ in ()).throw(RuntimeError("secret response body")))
+    monkeypatch.setattr(service, "collect", lambda *args: (_ for _ in ()).throw(error_type("secret response body")))
     jobs.worker("job1", {})
     assert jobs.job["status"] == "failed"
+    assert expected in jobs.job["error"]
     assert "secret" not in jobs.job["error"]
     assert store["financing"]["as_of"] == "2026-10-29"
+
+
+def test_financing_refresh_finishes_after_progress_write_failure(store, tmp_path, monkeypatch):
+    jobs = BackgroundJobService(JobStore(tmp_path / "jobs.sqlite"))
+    store["financing"] = {"as_of": "2026-09-30"}
+    calendar = [{"cal_date": f"202610{d:02d}", "is_open": 1} for d in range(1, 23)]
+    stock = {"ts_code": "600000.SH", "name": "样本"}
+    monkeypatch.setattr(service, "_records", lambda method, **kw: calendar if method == "trade_cal" else [stock])
+    def day(method, date, fields):
+        if method == "margin":
+            return [{"trade_date": date, "exchange_id": ex, "rzye": 1} for ex in ("SSE", "SZSE")]
+        return [{**stock, "trade_date": date}]
+    monkeypatch.setattr(service, "_day", day)
+    append = jobs.append_log
+    def append_log(job_id, message):
+        if message == "margin：1/22个交易日":
+            raise sqlite3.OperationalError("unable to open database file")
+        return append(job_id, message)
+    monkeypatch.setattr(jobs, "append_log", append_log)
+    job = service.start_refresh("financing", jobs)
+    deadline = time.monotonic() + 10
+    while (job := jobs.get(job["id"]))["status"] in ("queued", "running") and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert job["status"] == "finished" and job["progress"] == 100
+    assert job["result"]["as_of"] == store["financing"]["as_of"] == "2026-10-22"
+    assert "daily_basic" in job["logs"][-1]
 
 
 def test_etf_fallback_uses_whitelist_same_day_nav_and_disclosure_date(store, monkeypatch):
