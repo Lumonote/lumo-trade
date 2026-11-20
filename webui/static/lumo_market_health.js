@@ -3,6 +3,7 @@
   "use strict";
   const root = document.getElementById("marketHealthRoot");
   if (!root) return;
+  const chartDate = window.LumoMarketChartDate;
   const $ = id => document.getElementById(id);
   const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const num = (v, d = 1) => v == null || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("zh-CN", {minimumFractionDigits:d, maximumFractionDigits:d});
@@ -164,13 +165,15 @@
     lo -= span*.1; hi += span*.1; span = hi-lo;
     const x = i => left+i*(width-left-right)/(valid.length-1), y = v => top+(hi-v)*(height-top-bottom)/span;
     const grid = Array.from({length:5}, (_,i) => { const v = lo+span*i/4; return `<line class="mh-chart-grid" x1="${left}" x2="${width-right}" y1="${y(v)}" y2="${y(v)}"/><text x="${left-10}" y="${y(v)+4}" text-anchor="end">${num(v,Math.abs(v)>100 ? 0 : 1)}</text>`; }).join("");
-    const ticks = Array.from({length:5}, (_,i) => { const at = Math.round(i*(valid.length-1)/4); return `<text x="${x(at)}" y="${height-10}" text-anchor="middle">${esc(valid[at].date)}</text>`; }).join("");
+    const ticks = Array.from({length:5}, (_,i) => { const at = Math.round(i*(valid.length-1)/4); return `<text class="mh-date-tick" x="${x(at)}" y="${height-10}" text-anchor="middle">${esc(valid[at].date)}</text>`; }).join("");
     const lines = keys.map((key, n) => {
       let started = false;
       const path = valid.map((r,i) => { if (r[key] == null) { started=false; return ""; } const point=`${started?"L":"M"}${x(i).toFixed(1)},${y(r[key]).toFixed(1)}`;started=true;return point; }).join(" ");
       return `<path class="${["mh-chart-line","mh-chart-ma","mh-chart-long"][n] || "mh-chart-line"}" d="${path}"/>`;
     }).join("");
-    return `<svg class="mh-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(title)}"><title>${esc(title)}</title>${grid}${ticks}${lines}</svg>`;
+    const layout = {width,height,left,right:width-right,top,bottom:height-bottom};
+    const hits = chartDate.hits(valid.map((r,i) => ({x:x(i),date:r.date})),layout);
+    return chartDate.render("mh-chart",title,layout,grid+ticks+lines+hits);
   }
   function renderIndices() {
     const r = currentIndex(symbol);

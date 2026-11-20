@@ -58,15 +58,26 @@ with sync_playwright() as p:
         assert response.value.ok, (response.value.status, response.value.url)
         expect(page.locator('#mmQueryButton')).to_be_enabled()
         assert page.locator('#mmError').is_hidden(), page.locator('#mmError').text_content()
+        return response.value.json()
 
     # 联动双轴保留；独立指标 K 线不丢弃单点、平值，也不把无报价区间补成数据。
     page.locator('#mmFactor').select_option('lpr5y')
-    analyze_factor('lpr5y')
+    lpr = analyze_factor('lpr5y')
     expect(page.locator('#mmTrend h3')).to_have_text('沪深300 × 5年期LPR')
     expect(page.locator('#mmTrend .mm-legend')).to_contain_text('左轴')
     expect(page.locator('#mmTrend .mm-legend')).to_contain_text('右轴')
     expect(page.locator('#mmFactorHistoryTitle')).to_contain_text('5年期LPR')
     assert page.locator('#mmCandlePlot svg').count() == 1
+    # 双轴按真实观测日命中：指数有交易但 LPR 无新报价，不借用另一日期的值。
+    asset_dates = [row['date'] for row in lpr['chart']['asset']]
+    factor_dates = {row['date'] for row in lpr['chart']['factor'] if asset_dates[0] <= row['date'] <= asset_dates[-1]}
+    index_only = next(date for date in asset_dates[len(asset_dates)//2:] if date not in factor_dates)
+    trend = page.locator('#mmTrend .mh-date-chart')
+    expect(trend.locator('[data-mh-chart-date]')).to_have_count(len(set(asset_dates) | factor_dates))
+    trend_hit = trend.locator(f'[data-mh-chart-date="{index_only}"]')
+    trend_hit.hover()
+    expect(trend.locator('.mh-date-label')).to_have_text(index_only)
+    assert '5年期LPR' not in trend_hit.locator('title').text_content()
 
     def candle_range(start, end):
         page.locator('#mmCandleStart').fill(start)
@@ -80,11 +91,48 @@ with sync_playwright() as p:
     candle_range('2026-07-20', '2026-08-20')
     expect(page.locator('[data-mm-candle]')).to_have_count(2)
     expect(page.locator('#mmCandleDetail')).to_contain_text('收 3.50')
+    candle_plot = page.locator('#mmCandlePlot')
+    candle_label = candle_plot.locator('.mh-date-label')
+    guide = candle_plot.locator('.mh-date-guide')
+    for i, date in enumerate(('2026-07-20', '2026-08-20')):
+        mark = candle_plot.locator('[data-mm-candle]').nth(i)
+        mark.locator('rect').last.hover()
+        expect(candle_label).to_be_visible()
+        expect(candle_label).to_have_text(date)
+        expect(guide).to_have_css('visibility', 'visible')
+        expect(guide).to_have_attribute('x1', mark.get_attribute('data-mh-chart-x'))
+        expect(page.locator('#mmCandleDetail')).to_contain_text(date)
+    candle_plot.screenshot(path=str(OUT / 'macro_candle_hover.png'))
+    page.locator('#mmCandleStart').hover()
+    expect(candle_label).to_be_hidden()
+    expect(guide).to_have_css('visibility', 'hidden')
+
+    page.locator('#mmCandleBucket').select_option('quarter')
+    candle_range('2026-07-20', '2026-08-20')
+    expect(candle_plot.locator('[data-mm-candle]')).to_have_count(1)
+    page.set_viewport_size({'width':390, 'height':844})
+    page.wait_for_function("""() => {
+      const plot = document.querySelector('#mmCandlePlot');
+      return plot.querySelector('svg')?.viewBox.baseVal.width === plot.clientWidth;
+    }""")
+    candle_plot.locator('[data-mm-candle] rect').last.hover()
+    expect(candle_label).to_be_visible()
+    expect(candle_label).to_have_text('2026-07-20 至 2026-08-20')
+    assert candle_label.evaluate('''label => {
+      const box = label.getBoundingClientRect(), plot = label.parentElement.getBoundingClientRect();
+      return box.left >= Math.max(0, plot.left) && box.right <= Math.min(innerWidth, plot.right)
+        && box.top >= plot.top && box.bottom <= plot.bottom;
+    }''')
+    candle_plot.screenshot(path=str(OUT / 'macro_candle_hover_mobile.png'))
     candle_range('2026-07-21', '2026-08-19')
     expect(page.locator('#mmCandlePlot')).to_contain_text('所选区间没有实际观测')
     assert page.locator('#mmCandlePlot svg').count() == 0
+    expect(candle_label).to_have_count(0)
+    page.locator('#mmCandleBucket').select_option('month')
+    candle_range('2026-07-20', '2026-08-20')
     page.locator('#mmCandleReset').click()
     expect(page.locator('#mmCandlePlot svg')).to_have_count(1)
+    page.set_viewport_size({'width':1440, 'height':1000})
 
     page.locator('#mmFactor').select_option('equity_bond_spread')
     analyze_factor('equity_bond_spread')

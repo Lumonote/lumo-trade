@@ -10,7 +10,7 @@ from playwright.sync_api import sync_playwright, expect, Error
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from analysis.market_capital import capital_report, etf_rows, participant_history
+from analysis.market_capital import capital_report, etf_rows, margin_report, participant_history
 
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7098"
 OUT = ROOT / "results/market_capital_preview"
@@ -20,6 +20,9 @@ snapshot = json.load(opener.open(URL + "/api/market-health", timeout=30))
 snapshot.update(source="browser_read_only")
 snapshot["fusion"]["updated_at"] = snapshot["as_of"]
 DATES = ["2026-11-16", "2026-11-17", "2026-11-18"]
+finance = margin_report({"as_of": DATES[-1], "calendar": DATES})
+finance.update(history=[{"date": d, "rzye": 1e11 + i*1e8, "net_buy": 1e8} for i, d in enumerate(DATES)],
+               disclosure="独立测试夹具")
 fixture = {"calendar": DATES, "as_of": DATES[-1], "etf_previous_date": "2026-11-13",
            "sources": [{"key": "etf", "as_of": DATES[-1], "rows": 6, "status": "独立测试夹具"}],
            "etf_meta": [{"ts_code": "158000.SZ", "extname": "零申赎样本ETF", "index_name": "测试指数"},
@@ -51,6 +54,7 @@ with sync_playwright() as p:
     page.on("request", lambda request: prices.append(request.url) if "/api/stock-kline/" in request.url else None)
     page.route("**/api/market-health?*", lambda route: route.fulfill(json=snapshot))
     page.route("**/api/market-health/refresh", lambda route: route.fulfill(json={"job": {"status": "failed"}}))
+    page.route("**/api/market-health/financing?*", lambda route: route.fulfill(json=finance))
 
     def participants(route):
         q = {k: v[0] for k, v in parse_qs(urlsplit(route.request.url).query).items()}
@@ -142,14 +146,37 @@ with sync_playwright() as p:
     expect(page.locator("#mpHistoryMeta")).to_contain_text("158001.SZ")
     expect(page.locator("#mpHistoryRows tbody tr").last).to_contain_text("缺当日有效净值")
     expect(page.locator("#mpHistoryChart [data-candle]")).to_have_count(2)
+    candle_chart = page.locator("#mpHistoryChart .mh-date-chart").first
+    date_label = candle_chart.locator(".mh-date-label")
+    date_guide = candle_chart.locator(".mh-date-guide")
+    point_detail = page.locator("#mpHistoryPoint")
+    for date in DATES[:2]:
+        candle = candle_chart.locator(f'[data-candle="{date}"]')
+        candle.hover()
+        expect(date_label).to_be_visible()
+        expect(date_label).to_have_text(date)
+        expect(date_guide).to_have_css("visibility", "visible")
+        expect(point_detail).to_contain_text(f"交易日：{date}")
+        expect(point_detail).to_contain_text("净申购估算：+10.00万")
+        expect(point_detail).to_contain_text("净赎回估算：0.00元")
     page.locator("#mpHistoryModal").screenshot(path=str(OUT / "history_etf_partial.png"))
+    page.locator("#mpHistoryTitle").hover()
+    expect(date_label).to_be_hidden()
+    expect(date_guide).to_have_css("visibility", "hidden")
     page.set_viewport_size({"width": 800, "height": 900})
     assert page.locator("#mpHistoryModal").evaluate("el=>el.scrollWidth<=el.clientWidth+1")
+    keyboard_point = candle_chart.locator(f'[data-mh-chart-date="{DATES[0]}"]')
+    keyboard_point.focus()
+    expect(keyboard_point).to_be_focused()
+    expect(date_label).to_be_visible()
+    expect(date_label).to_have_text(DATES[0])
+    expect(point_detail).to_contain_text(f"交易日：{DATES[0]}")
     page.locator("#mpHistoryStart").fill("2026-11-14")
     page.locator("#mpHistoryEnd").fill("2026-11-14")
     page.locator("#mpHistoryQuery button").click()
     expect(page.locator("#mpHistoryStatus")).to_contain_text("查询已完成")
     expect(page.locator("#mpHistoryPoint")).to_contain_text("当前区间没有记录")
+    expect(date_label).to_have_count(0)
     page.locator("#mpHistoryClose").click()
 
     # 榜单查询与历史区间搜索保持只读；未点查询的新日期直接用于 ETF 刷新。
@@ -164,6 +191,17 @@ with sync_playwright() as p:
     expect(page.locator("#mpMeta")).to_contain_text(f"查询 {REFRESH_START} 至 {REFRESH_END}")
     expect(partial_row.locator("td").nth(1)).to_contain_text("+25.00万")
     assert refresh_requests == [refresh_params] and all(q == refresh_params for q in refresh_polls)
+    # 趋势图复用逐日命中；融资历史使用隔离夹具，不需要实际采集。
+    page.set_viewport_size({"width": 1440, "height": 1000})
+    page.locator("#mhTab-financing").click()
+    finance_chart = page.locator("#mfTrend .mh-date-chart")
+    finance_chart.locator(f'[data-mh-chart-date="{DATES[1]}"]').hover()
+    expect(finance_chart.locator(".mh-date-label")).to_have_text(DATES[1])
+    page.locator("#mhTab-indices").click()
+    index_chart = page.locator("#mhView-indices .mh-date-chart")
+    index_date = next(row for row in snapshot["indices"] if row["symbol"] == "sh000001")["series"][-2]["date"]
+    index_chart.locator(f'[data-mh-chart-date="{index_date}"]').hover()
+    expect(index_chart.locator(".mh-date-label")).to_have_text(index_date)
     assert not errors and not prices, (errors, prices)
-    print(json.dumps({"checks": "real zero, missing day, missing NAV, partial totals, sorting, independent range, stale response, empty range, 800px layout, read-only queries, 26-day range refresh", "errors": errors}, ensure_ascii=False))
+    print(json.dumps({"checks": "real zero, missing day, missing NAV, partial totals, sorting, independent range, stale response, empty range, 800px layout, read-only queries, 26-day range refresh, candle dates and amounts, keyboard focus, financing/index hover", "errors": errors}, ensure_ascii=False))
     browser.close()

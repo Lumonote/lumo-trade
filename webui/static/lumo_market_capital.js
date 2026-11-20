@@ -2,6 +2,7 @@
 (() => {
   "use strict";
   if (!document.getElementById("mhView-financing")) return;
+  const chartDate=window.LumoMarketChartDate;
   const $=id=>document.getElementById(id);
   const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const num=(v,d=1)=>v==null||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -71,7 +72,12 @@
     if(valid.length<2)return empty("至少需要两个有效交易日；缺失数据不画成零。");
     const values=valid.flatMap(r=>series.map(s=>r[s.key])).filter(v=>v!=null),lo=Math.min(...values),hi=Math.max(...values),span=hi-lo||1;
     const x=i=>48+i*602/(valid.length-1),y=v=>168-(v-lo)/span*136;
-    return `<div class="mc-legend">${series.map(s=>`<span>${esc(s.label)}</span>`).join("")}</div><svg class="mh-chart" viewBox="0 0 690 210" role="img" aria-label="${esc(label)}">${[0,.5,1].map(f=>`<line class="mh-chart-grid" x1="48" x2="650" y1="${32+136*f}" y2="${32+136*f}"/><text x="0" y="${36+136*f}">${num((hi-f*span)/1e8,0)}亿</text>`).join("")}${series.map((s,j)=>{let path="",previous=false;valid.forEach((r,i)=>{if(r[s.key]==null){previous=false;return;}path+=`${previous?"L":"M"}${x(i)},${y(r[s.key])} `;previous=true;});return `<path d="${path}" fill="none" stroke="${["#14766d","#b88951","#8a9cab"][j]}" stroke-width="2"><title>${esc(s.label)}</title></path>`;}).join("")}<text x="48" y="197">${esc(valid[0].date)}</text><text x="650" y="197" text-anchor="end">${esc(valid.at(-1).date)}</text></svg>`;
+    const layout={width:690,height:210,left:48,right:650,top:32,bottom:168};
+    const grid=[0,.5,1].map(f=>`<line class="mh-chart-grid" x1="48" x2="650" y1="${32+136*f}" y2="${32+136*f}"/><text x="0" y="${36+136*f}">${num((hi-f*span)/1e8,0)}亿</text>`).join("");
+    const lines=series.map((s,j)=>{let path="",previous=false;valid.forEach((r,i)=>{if(r[s.key]==null){previous=false;return;}path+=`${previous?"L":"M"}${x(i)},${y(r[s.key])} `;previous=true;});return `<path d="${path}" fill="none" stroke="${["#14766d","#b88951","#8a9cab"][j]}" stroke-width="2"/>`;}).join("");
+    const ticks=`<text class="mh-date-tick" x="48" y="197">${esc(valid[0].date)}</text><text class="mh-date-tick" x="650" y="197" text-anchor="end">${esc(valid.at(-1).date)}</text>`;
+    const hits=chartDate.hits(valid.map((r,i)=>({x:x(i),date:r.date})),layout);
+    return `<div class="mc-legend">${series.map(s=>`<span>${esc(s.label)}</span>`).join("")}</div>`+chartDate.render("mh-chart",label,layout,grid+lines+ticks+hits);
   }
   function bars(rows,key,label,attribute="") {const max=Math.max(1,...rows.map(r=>Math.abs(r[key]||0)));return rows.map(r=>`<div class="mc-bar"${attribute?` ${attribute}="${esc(r.name)}"`:""}>${attribute?`<button type="button" ${attribute}="${esc(r.name)}">${esc(r.name)}</button>`:`<span>${esc(r.name||r.label)}</span>`}<div><i style="width:${Math.abs(r[key]||0)/max*100}%;background:${(r[key]||0)<0?"#4e9377":"#bc7464"}"></i></div><b class="${tone(r[key])}">${esc(label(r))}</b></div>`).join("")||empty("尚无有效记录");}
   const state={financing:{data:null,page:1,started:false,poll:null,id:0},participants:{data:null,page:1,started:false,poll:null,id:0}};
@@ -204,10 +210,11 @@
       let mark="";
       if(candles&&r.open!=null){const color=r.net>=0?"#b55e4a":"#328067";mark=`<rect data-candle="${esc(r.date)}" x="${x(i)-width/2}" y="${Math.min(y(r.open),y(r.close))- (r.net===0?1:0)}" width="${width}" height="${Math.max(2,Math.abs(y(r.open)-y(r.close)))}" fill="${color}"/>`;}
       else if(!candles)mark=series.map((s,j)=>{const v=r[s.key];if(v==null)return "";const xx=x(i)+(j-(series.length-1)/2)*width/series.length;return points?`<circle cx="${xx}" cy="${y(v)}" r="4" fill="${s.color}"/>`:`<rect x="${xx-width/series.length/2}" y="${Math.min(y(0),y(v))-(v===0?1:0)}" width="${Math.max(1,width/series.length)}" height="${Math.max(2,Math.abs(y(0)-y(v)))}" fill="${s.color}"/>`;}).join("");
-      return `<g tabindex="0" data-mp-point="${i}" aria-label="${esc(historyPoint(r,data.participant))}"><title>${esc(historyPoint(r,data.participant))}</title><rect class="mc-hit" x="${left+i*step}" y="${top}" width="${step}" height="${bottom-top}"/>${mark}</g>`;
+      return `<g tabindex="0" data-mp-point="${i}" ${chartDate.marker(x(i),r.date)} aria-label="${esc(historyPoint(r,data.participant))}"><title>${esc(historyPoint(r,data.participant))}</title><rect class="mc-hit" x="${left+i*step}" y="${top}" width="${step}" height="${bottom-top}"/>${mark}</g>`;
     }).join("");
     const legend=candles?`<span><i style="background:#b55e4a"></i>净流入</span><span><i style="background:#328067"></i>净流出</span>`:series.map(s=>`<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join("");
-    return `<div class="mc-history-legend"><strong>${esc(label)}</strong>${legend}</div><svg class="mc-history-chart" viewBox="0 0 920 245" role="img" aria-label="${esc(label)}">${grid}${marks}<text x="${left}" y="232">${esc(rows[0]?.date)}</text><text x="${right}" y="232" text-anchor="end">${esc(rows.at(-1)?.date)}</text></svg>`;
+    const ticks=`<text class="mh-date-tick" x="${left}" y="232">${esc(rows[0]?.date)}</text><text class="mh-date-tick" x="${right}" y="232" text-anchor="end">${esc(rows.at(-1)?.date)}</text>`;
+    return `<div class="mc-history-legend"><strong>${esc(label)}</strong>${legend}</div>`+chartDate.render("mc-history-chart",label,{width:920,height:245,top,bottom},grid+marks+ticks);
   }
   function renderHistory(data) {
     const kind=data.participant,identity=["national","quant"].includes(kind),t=data.totals,c=data.coverage;

@@ -2,6 +2,7 @@
 (() => {
   "use strict";
   const root=document.getElementById("mhView-macro");if(!root)return;
+  const chartDate=window.LumoMarketChartDate;
   const $=id=>document.getElementById(id),esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const num=(v,d=2)=>v==null||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d});
   const pct=v=>v==null?"—":`${v>0?"+":""}${num(v)}%`,tone=v=>v>0?"mh-positive":v<0?"mh-negative":"mh-neutral";
@@ -22,18 +23,25 @@
   function lineChart(groups,{dual=false,normalized=false}={}){
     const valid=groups.filter(s=>s.rows.length>1);if(!valid.length)return empty("历史观测不足，尚不能绘图。");
     const dates=valid.flatMap(s=>s.rows.map(r=>Date.parse(r.date))),first=Math.min(...dates),last=Math.max(...dates);
-    const colors=["#397b64","#bb9153","#8a98a7"],x=d=>58+(Date.parse(d)-first)/(last-first||1)*550;
+    const layout={width:680,height:258,left:58,right:608,top:30,bottom:213};
+    const colors=["#397b64","#bb9153","#8a98a7"],x=d=>layout.left+(Date.parse(d)-first)/(last-first||1)*(layout.right-layout.left);
     const transformed=valid.map(s=>({...s,rows:s.rows.map(r=>({...r,value:normalized?r.value/s.rows[0].value*100:r.value}))}));
-    const all=transformed.flatMap(s=>s.rows.map(r=>r.value));
-    let svg=`<svg class="mm-chart" viewBox="0 0 680 258" role="img" aria-label="${esc(valid.map(s=>s.name).join('与'))}历史走势">`;
+    const all=transformed.flatMap(s=>s.rows.map(r=>r.value)),byDate=new Map();
+    let svg="";
     for(let i=0;i<4;i++)svg+=`<line class="grid" x1="58" x2="608" y1="${30+i*61}" y2="${30+i*61}"/>`;
     transformed.forEach((s,j)=>{const values=dual?s.rows.map(r=>r.value):all;const lo=Math.min(...values),hi=Math.max(...values),span=hi-lo||1,y=v=>213-(v-lo)/span*183;
       if(j===0||dual)for(let i=0;i<4;i++)svg+=`<text x="${j===0?50:616}" y="${34+i*61}" text-anchor="${j===0?"end":"start"}">${num(hi-i*span/3,Math.abs(hi)>100?0:2)}</text>`;
       svg+=`<path d="${s.rows.map((r,i)=>`${i?"L":"M"}${x(r.date)},${y(r.value)}`).join(" ")}" fill="none" stroke="${colors[j]}" stroke-width="2"/>`;
-      const stride=Math.max(1,Math.floor(s.rows.length/100));svg+=s.rows.filter((r,i)=>i%stride===0||i===s.rows.length-1).map(r=>`<circle cx="${x(r.date)}" cy="${y(r.value)}" r="3" fill="${colors[j]}" opacity="0.2"><title>${esc(s.name)} ${esc(r.date)}：${num(r.value)}</title></circle>`).join("");
+      const stride=Math.max(1,Math.floor(s.rows.length/100));svg+=s.rows.filter((r,i)=>i%stride===0||i===s.rows.length-1).map(r=>`<circle cx="${x(r.date)}" cy="${y(r.value)}" r="3" fill="${colors[j]}" opacity="0.2"/>`).join("");
+      for(const {date,value} of s.rows){
+        if(!byDate.has(date))byDate.set(date,[]);
+        byDate.get(date).push(`${s.name}：${num(value)}`);
+      }
     });
-    svg+=`<text x="58" y="245">${new Date(first).toISOString().slice(0,10)}</text><text x="608" y="245" text-anchor="end">${new Date(last).toISOString().slice(0,10)}</text></svg>`;
-    return `<div class="mm-legend">${valid.map((s,i)=>`<span><i style="background:${colors[i]}"></i>${esc(s.name)}${dual?i===0?" · 左轴":" · 右轴":""}${normalized?" · 起点100":""}</span>`).join("")}</div>${svg}`;
+    svg+=`<text class="mh-date-tick" x="58" y="245">${new Date(first).toISOString().slice(0,10)}</text><text class="mh-date-tick" x="608" y="245" text-anchor="end">${new Date(last).toISOString().slice(0,10)}</text>`;
+    const points=[...byDate].map(([date,values])=>({x:x(date),date,title:[date,...values].join(" · ")})).sort((a,b)=>a.x-b.x);
+    return `<div class="mm-legend">${valid.map((s,i)=>`<span><i style="background:${colors[i]}"></i>${esc(s.name)}${dual?i===0?" · 左轴":" · 右轴":""}${normalized?" · 起点100":""}</span>`).join("")}</div>`+
+      chartDate.render("mm-chart",`${valid.map(s=>s.name).join("与")}历史走势`,layout,svg+chartDate.hits(points,layout));
   }
   function scatter(r){if(!r.pairs.length)return empty(r.status);const xvals=r.pairs.map(p=>p.x),yvals=r.pairs.map(p=>p.y),xmin=Math.min(...xvals),xspan=Math.max(...xvals)-xmin||1,ymin=Math.min(...yvals),yspan=Math.max(...yvals)-ymin||1;
     return `<svg class="mm-chart" viewBox="0 0 680 258" role="img" aria-label="宏观因子变化与指数收益散点图">${[0,1,2,3].map(i=>`<line class="grid" x1="58" x2="608" y1="${30+i*58}" y2="${30+i*58}"/><text x="50" y="${34+i*58}" text-anchor="end">${num(ymin+yspan-i*yspan/3)}</text>`).join("")}${r.pairs.map(p=>`<circle cx="${58+(p.x-xmin)/xspan*550}" cy="${204-(p.y-ymin)/yspan*174}" r="3" fill="#397b64" opacity=".45"><title>${p.date}；因子日${p.factor_date}；X ${num(p.x)}；Y ${num(p.y)}</title></circle>`).join("")}<text x="58" y="225">${num(xmin)}</text><text x="608" y="225" text-anchor="end">${num(xmin+xspan)}</text><text x="333" y="250" text-anchor="middle">X：${esc(r.x_unit)} / Y：${esc(r.y_unit)}</text></svg>`;
@@ -67,9 +75,11 @@
     }
     return bars;
   }
-  function candleDescription({start,end,open,high,low,close,n}){
+  const candleDate=({start,end})=>start===end?start:`${start} 至 ${end}`;
+  function candleDescription(bar){
+    const {open,high,low,close,n}=bar;
     const d=state.data.factor==="usdcny"?4:2;
-    return `${start}${end===start?"":` 至 ${end}`} · 开 ${num(open,d)}　高 ${num(high,d)}　低 ${num(low,d)}　收 ${num(close,d)} · ${n} 条观测`;
+    return `${candleDate(bar)} · 开 ${num(open,d)}　高 ${num(high,d)}　低 ${num(low,d)}　收 ${num(close,d)} · ${n} 条观测`;
   }
   function renderCandlePlot(){
     const box=$("mmCandlePlot"),bars=state.candles;
@@ -82,10 +92,10 @@
     const grid=Array.from({length:4},(_,i)=>{const at=top+i*(bottom-top)/3;return `<line class="grid" x1="${left}" x2="${right}" y1="${at}" y2="${at}"/><text x="${left-7}" y="${at+4}" text-anchor="end">${num(max-i*span/3,digits)}</text>`;}).join("");
     const marks=bars.map((b,i)=>{
       const x=left+(i+.5)*slot,up=b.close>b.open,flat=b.close===b.open,color=flat?"#64748b":up?"#ad4f50":"#397b64";
-      return `<g data-mm-candle="${i}"><title>${esc(candleDescription(b))}</title><rect x="${x-slot/2}" y="${top}" width="${slot}" height="${bottom-top}" fill="transparent"/><line x1="${x}" x2="${x}" y1="${y(b.high)}" y2="${y(b.low)}" stroke="${color}"/><rect x="${x-w/2}" y="${Math.min(y(b.open),y(b.close))}" width="${w}" height="${Math.max(2,Math.abs(y(b.open)-y(b.close)))}" fill="${color}"/></g>`;
+      return `<g data-mm-candle="${i}" ${chartDate.marker(x,candleDate(b))}><title>${esc(candleDescription(b))}</title><rect x="${left+i*slot}" y="${top}" width="${slot}" height="${bottom-top}" fill="transparent"/><line x1="${x}" x2="${x}" y1="${y(b.high)}" y2="${y(b.low)}" stroke="${color}"/><rect x="${x-w/2}" y="${Math.min(y(b.open),y(b.close))}" width="${w}" height="${Math.max(2,Math.abs(y(b.open)-y(b.close)))}" fill="${color}"/></g>`;
     }).join("");
-    const first=bars[0].start,last=bars.at(-1).end,dates=first===last?`<text x="${(left+right)/2}" y="209" text-anchor="middle">${first}</text>`:`<text x="${left}" y="209">${first}</text><text x="${right}" y="209" text-anchor="end">${last}</text>`;
-    box.innerHTML=`<svg class="mm-candle-chart" viewBox="0 0 ${width} 220" role="img" aria-label="${esc($("mmFactorHistoryTitle").textContent)}：${bars.length} 根">${grid}${marks}${dates}</svg>`;
+    const first=bars[0].start,last=bars.at(-1).end,dates=first===last?`<text class="mh-date-tick" x="${(left+right)/2}" y="209" text-anchor="middle">${first}</text>`:`<text class="mh-date-tick" x="${left}" y="209">${first}</text><text class="mh-date-tick" x="${right}" y="209" text-anchor="end">${last}</text>`;
+    box.innerHTML=chartDate.render("mm-candle-chart",`${$("mmFactorHistoryTitle").textContent}：${bars.length} 根`,{width,height:220,top,bottom},grid+marks+dates);
   }
   function filterFactorHistory(){
     const c=state.candle,rows=state.data.chart.factor_history;

@@ -25,8 +25,9 @@ def test_desktop_page_and_packaged_assets(runtime):
         response=client.get("/desktop/market_health")
         assert response.status_code==200
         assert 'id="marketHealthRoot"' in response.text and "跨市场研判" in response.text
-        assert "lumo_market_health.js" in response.text
-        for url in ("/static/lumo_market_health.js","/static/lumo_market_health.css","/static/research/ashare_bottom_20261022.html"):
+        for script in ("lumo_market_health.js", "lumo_market_capital.js", "lumo_market_macro.js"):
+            assert response.text.index("lumo_market_chart_date.js") < response.text.index(script)
+        for url in ("/static/lumo_market_chart_date.js","/static/lumo_market_health.js","/static/lumo_market_health.css","/static/research/ashare_bottom_20261022.html"):
             assert client.get(url).status_code==200
         assert "/desktop/market_health" in client.get("/desktop/features").text
 
