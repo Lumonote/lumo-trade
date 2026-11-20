@@ -1394,6 +1394,8 @@
             .pattern-analysis-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
     </style>
+    <link rel="stylesheet" href="/static/lumo_price_chart.css?v={{ asset_v('lumo_price_chart.css') }}">
+    <script src="/static/lumo_price_chart.js?v={{ asset_v('lumo_price_chart.js') }}"></script>
     <script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
 </head>
 
@@ -1599,6 +1601,9 @@
                             <select id="klinePeriod">
                                 <option value="daily">日线</option>
                                 <option value="5m">5分钟</option>
+                                <option value="15m">15分钟</option>
+                                <option value="30m">30分钟</option>
+                                <option value="60m">60分钟</option>
                             </select>
                             <button id="reloadKlineBtn" class="soft-button" type="button">重载</button>
                         </div>
@@ -1696,7 +1701,7 @@
 
         let dashboardState = null;
         let selectedStock = null;
-        let selectedKline = null;
+        let klineRevision = 0;
 
         function escapeHtml(value) {
             return String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -1898,25 +1903,22 @@
             renderSelectedModels(item);
             $$('.stock-row').forEach((row) => row.classList.toggle('active', row.dataset.code === item.code));
             $('#chartTitle').textContent = `${item.name} ${item.code} K线`;
-            loadKline(item.code).catch((error) => {
-                selectedKline = null;
-                renderKlineEmpty(error.message);
-            });
+            void loadKline(item.code);
         }
 
         async function loadKline(code) {
+            const revision = ++klineRevision;
             const period = $('#klinePeriod').value;
-            $('#klineChart').className = 'chart-empty';
-            $('#klineChart').textContent = 'K线加载中';
-            $('#chartStats').innerHTML = '';
-            const data = await requestJson(`/api/stock-kline/${encodeURIComponent(code)}?period=${encodeURIComponent(period)}&limit=120`);
-            selectedKline = data.data;
-            if (!selectedKline.available || !(selectedKline.records || []).length) {
-                renderKlineEmpty(selectedKline.message || '暂无K线数据');
-                return;
+            renderKlineEmpty('K线加载中');
+            try {
+                const {data} = await requestJson(`/api/stock-kline/${encodeURIComponent(code)}?period=${encodeURIComponent(period)}&limit=all`);
+                if (revision !== klineRevision) return;
+                const host = $('#klineChart');
+                host.className = '';
+                LumoPriceChart.mount(host, data, {onRange:(rows, _state, stats) => renderChartStats(data, rows, stats)});
+            } catch (error) {
+                if (revision === klineRevision) renderKlineEmpty(error.message);
             }
-            drawKline(selectedKline.records || []);
-            renderChartStats(selectedKline);
         }
 
         function renderKlineEmpty(message) {
@@ -1943,237 +1945,17 @@
             return Math.round(number).toLocaleString();
         }
 
-        function movingAverage(records, windowSize) {
-            const values = records.map((item) => Number(item.close));
-            return values.map((_, index) => {
-                if (index + 1 < windowSize) return null;
-                const slice = values.slice(index + 1 - windowSize, index + 1);
-                return slice.reduce((sum, value) => sum + value, 0) / windowSize;
-            });
-        }
-
-        function buildLinePath(values, xForIndex, yForPrice) {
-            let started = false;
-            return values.map((value, index) => {
-                if (!Number.isFinite(value)) {
-                    started = false;
-                    return '';
-                }
-                const command = started ? 'L' : 'M';
-                started = true;
-                return `${command}${xForIndex(index).toFixed(1)},${yForPrice(value).toFixed(1)}`;
-            }).filter(Boolean).join(' ');
-        }
-
-        function normalizeKlineRecords(records) {
-            return (records || []).map((item) => {
-                const open = Number(item.open);
-                const close = Number(item.close);
-                const rawHigh = Number(item.high);
-                const rawLow = Number(item.low);
-                if (![open, close, rawHigh, rawLow].every(Number.isFinite)) return null;
-                return {
-                    date: String(item.date || ''),
-                    open,
-                    close,
-                    high: Math.max(rawHigh, open, close),
-                    low: Math.min(rawLow, open, close),
-                    volume: Number.isFinite(Number(item.volume)) ? Number(item.volume) : 0,
-                    pct_chg: Number.isFinite(Number(item.pct_chg)) ? Number(item.pct_chg) : ((close - open) / open * 100 || 0),
-                };
-            }).filter(Boolean);
-        }
-
-        function drawKline(records) {
-            const host = $('#klineChart');
-            const cleanRecords = normalizeKlineRecords(records);
-            if (!cleanRecords.length) {
-                renderKlineEmpty('暂无K线数据');
-                return;
-            }
-
-            const width = Math.max(560, host.clientWidth || 720);
-            const height = 360;
-            const margin = { top: 26, right: 64, bottom: 26, left: 56 };
-            const mainHeight = 226;
-            const volumeGap = 18;
-            const volumeHeight = 62;
-            const mainBottom = margin.top + mainHeight;
-            const volumeTop = mainBottom + volumeGap;
-            const volumeBottom = volumeTop + volumeHeight;
-            const plotWidth = width - margin.left - margin.right;
-            const slotWidth = plotWidth / cleanRecords.length;
-            const candleWidth = Math.max(3, Math.min(12, slotWidth * 0.58));
-            const xForIndex = (index) => margin.left + index * slotWidth + slotWidth / 2;
-
-            const ma5 = movingAverage(cleanRecords, 5);
-            const ma10 = movingAverage(cleanRecords, 10);
-            const ma20 = movingAverage(cleanRecords, 20);
-            const pricePool = [
-                ...cleanRecords.map((item) => item.high),
-                ...cleanRecords.map((item) => item.low),
-                ...ma5,
-                ...ma10,
-                ...ma20,
-            ].filter(Number.isFinite);
-            let priceMin = Math.min(...pricePool);
-            let priceMax = Math.max(...pricePool);
-            if (priceMax === priceMin) {
-                const pad = priceMax ? Math.abs(priceMax) * 0.03 : 1;
-                priceMin -= pad;
-                priceMax += pad;
-            } else {
-                const pad = (priceMax - priceMin) * 0.06;
-                priceMin -= pad;
-                priceMax += pad;
-            }
-            const yForPrice = (value) => margin.top + (priceMax - value) / (priceMax - priceMin) * mainHeight;
-            const volMax = Math.max(1, ...cleanRecords.map((item) => item.volume || 0));
-            const yForVolume = (value) => volumeBottom - (value || 0) / volMax * volumeHeight;
-
-            const priceGrid = Array.from({ length: 5 }, (_, index) => {
-                const value = priceMax - index * ((priceMax - priceMin) / 4);
-                const y = yForPrice(value);
-                return `<g>
-                    <line x1="${margin.left}" y1="${y.toFixed(1)}" x2="${width - margin.right}" y2="${y.toFixed(1)}" stroke="#e2e8f0" stroke-width="1"/>
-                    <text x="${width - 10}" y="${(y + 4).toFixed(1)}" text-anchor="end" fill="#64748b" font-size="11">${formatPrice(value)}</text>
-                </g>`;
-            }).join('');
-
-            const dateTickIndexes = Array.from(new Set([
-                0,
-                Math.floor((cleanRecords.length - 1) * 0.25),
-                Math.floor((cleanRecords.length - 1) * 0.5),
-                Math.floor((cleanRecords.length - 1) * 0.75),
-                cleanRecords.length - 1,
-            ])).filter((index) => index >= 0);
-            const dateTicks = dateTickIndexes.map((index) => {
-                const x = xForIndex(index);
-                const date = cleanRecords[index].date.replace(/^\d{4}-/, '');
-                return `<g>
-                    <line x1="${x.toFixed(1)}" y1="${volumeTop}" x2="${x.toFixed(1)}" y2="${volumeBottom + 4}" stroke="#e2e8f0" stroke-width="1"/>
-                    <text x="${x.toFixed(1)}" y="${height - 8}" text-anchor="middle" fill="#64748b" font-size="11">${escapeHtml(date)}</text>
-                </g>`;
-            }).join('');
-
-            const candles = cleanRecords.map((item, index) => {
-                const x = xForIndex(index);
-                const yHigh = yForPrice(item.high);
-                const yLow = yForPrice(item.low);
-                const yOpen = yForPrice(item.open);
-                const yClose = yForPrice(item.close);
-                const up = item.close >= item.open;
-                const color = up ? '#dc2626' : '#059669';
-                const fill = up ? '#fff7f7' : '#059669';
-                const bodyY = Math.min(yOpen, yClose);
-                const bodyH = Math.max(2, Math.abs(yClose - yOpen));
-                const volumeY = yForVolume(item.volume);
-                return `<g>
-                    <line x1="${x.toFixed(1)}" y1="${yHigh.toFixed(1)}" x2="${x.toFixed(1)}" y2="${yLow.toFixed(1)}" stroke="${color}" stroke-width="1.2"/>
-                    <rect x="${(x - candleWidth / 2).toFixed(1)}" y="${bodyY.toFixed(1)}" width="${candleWidth.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${fill}" stroke="${color}" stroke-width="1.2" rx="1"/>
-                    <rect x="${(x - candleWidth / 2).toFixed(1)}" y="${volumeY.toFixed(1)}" width="${candleWidth.toFixed(1)}" height="${Math.max(1, volumeBottom - volumeY).toFixed(1)}" fill="${color}" opacity="0.32" rx="1"/>
-                </g>`;
-            }).join('');
-
-            const ma5Path = buildLinePath(ma5, xForIndex, yForPrice);
-            const ma10Path = buildLinePath(ma10, xForIndex, yForPrice);
-            const ma20Path = buildLinePath(ma20, xForIndex, yForPrice);
-            const first = cleanRecords[0];
-            const last = cleanRecords[cleanRecords.length - 1];
-            const lastY = yForPrice(last.close);
-            const ma5Last = ma5.findLast ? ma5.findLast(Number.isFinite) : ma5.filter(Number.isFinite).slice(-1)[0];
-            const ma10Last = ma10.findLast ? ma10.findLast(Number.isFinite) : ma10.filter(Number.isFinite).slice(-1)[0];
-            const ma20Last = ma20.findLast ? ma20.findLast(Number.isFinite) : ma20.filter(Number.isFinite).slice(-1)[0];
-
-            host.className = 'kline-chart-ready';
-            host.innerHTML = `<svg class="kline-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="标准K线图">
-                <rect width="${width}" height="${height}" fill="#ffffff"/>
-                <rect x="${margin.left}" y="${margin.top}" width="${plotWidth}" height="${mainHeight}" fill="#ffffff"/>
-                <rect x="${margin.left}" y="${volumeTop}" width="${plotWidth}" height="${volumeHeight}" fill="#fbfdff"/>
-                ${priceGrid}
-                <line x1="${margin.left}" y1="${mainBottom}" x2="${width - margin.right}" y2="${mainBottom}" stroke="#cbd5e1" stroke-width="1"/>
-                <line x1="${margin.left}" y1="${volumeTop}" x2="${width - margin.right}" y2="${volumeTop}" stroke="#cbd5e1" stroke-width="1"/>
-                ${dateTicks}
-                ${candles}
-                ${ma5Path ? `<path d="${ma5Path}" fill="none" stroke="#f59e0b" stroke-width="1.5"/>` : ''}
-                ${ma10Path ? `<path d="${ma10Path}" fill="none" stroke="#2563eb" stroke-width="1.5"/>` : ''}
-                ${ma20Path ? `<path d="${ma20Path}" fill="none" stroke="#7c3aed" stroke-width="1.5"/>` : ''}
-                <line x1="${margin.left}" y1="${lastY.toFixed(1)}" x2="${width - margin.right}" y2="${lastY.toFixed(1)}" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4 4"/>
-                <rect x="${width - margin.right + 5}" y="${(lastY - 9).toFixed(1)}" width="54" height="18" fill="#f8fafc" stroke="#cbd5e1" rx="4"/>
-                <text x="${width - margin.right + 32}" y="${(lastY + 4).toFixed(1)}" text-anchor="middle" fill="#334155" font-size="11">${formatPrice(last.close)}</text>
-                <text x="${margin.left}" y="17" fill="#475569" font-size="12">${escapeHtml(first.date)} - ${escapeHtml(last.date)}</text>
-                <text x="${margin.left + 190}" y="17" fill="#f59e0b" font-size="12">MA5 ${formatPrice(ma5Last)}</text>
-                <text x="${margin.left + 280}" y="17" fill="#2563eb" font-size="12">MA10 ${formatPrice(ma10Last)}</text>
-                <text x="${margin.left + 378}" y="17" fill="#7c3aed" font-size="12">MA20 ${formatPrice(ma20Last)}</text>
-                <text x="${margin.left}" y="${volumeTop - 6}" fill="#64748b" font-size="11">成交量 ${formatVolume(volMax)}</text>
-                <g id="klineCrosshair" style="display:none">
-                    <line id="klineCrossX" x1="0" y1="${margin.top}" x2="0" y2="${volumeBottom}" stroke="#64748b" stroke-width="1" stroke-dasharray="3 3"/>
-                    <line id="klineCrossY" x1="${margin.left}" y1="0" x2="${width - margin.right}" y2="0" stroke="#64748b" stroke-width="1" stroke-dasharray="3 3"/>
-                    <circle id="klineCrossPoint" cx="0" cy="0" r="3.5" fill="#2563eb" stroke="#fff" stroke-width="1.5"/>
-                </g>
-                <rect x="${margin.left}" y="${margin.top}" width="${plotWidth}" height="${volumeBottom - margin.top}" fill="transparent"/>
-            </svg><div class="kline-tooltip" hidden></div>`;
-
-            const svg = host.querySelector('.kline-svg');
-            const tooltip = host.querySelector('.kline-tooltip');
-            const crosshair = host.querySelector('#klineCrosshair');
-            const crossX = host.querySelector('#klineCrossX');
-            const crossY = host.querySelector('#klineCrossY');
-            const crossPoint = host.querySelector('#klineCrossPoint');
-
-            svg.addEventListener('mousemove', (event) => {
-                const rect = svg.getBoundingClientRect();
-                const viewX = (event.clientX - rect.left) * width / rect.width;
-                const index = clamp(Math.floor((viewX - margin.left) / slotWidth), 0, cleanRecords.length - 1);
-                const item = cleanRecords[index];
-                const x = xForIndex(index);
-                const y = yForPrice(item.close);
-                const up = item.close >= item.open;
-                crosshair.style.display = '';
-                crossX.setAttribute('x1', x.toFixed(1));
-                crossX.setAttribute('x2', x.toFixed(1));
-                crossY.setAttribute('y1', y.toFixed(1));
-                crossY.setAttribute('y2', y.toFixed(1));
-                crossPoint.setAttribute('cx', x.toFixed(1));
-                crossPoint.setAttribute('cy', y.toFixed(1));
-                crossPoint.setAttribute('fill', up ? '#dc2626' : '#059669');
-                tooltip.hidden = false;
-                tooltip.innerHTML = `
-                    <strong>${escapeHtml(item.date)}</strong><br>
-                    开 ${formatPrice(item.open)}　高 ${formatPrice(item.high)}<br>
-                    收 <span class="${up ? 'change-up' : 'change-down'}">${formatPrice(item.close)}</span>　低 ${formatPrice(item.low)}<br>
-                    涨跌 ${formatChange(item.pct_chg)}　量 ${formatVolume(item.volume)}
-                `;
-                const localX = x / width * rect.width;
-                const localY = y / height * rect.height;
-                tooltip.style.left = `${clamp(localX + 12, 8, rect.width - 178)}px`;
-                tooltip.style.top = `${clamp(localY - 42, 8, rect.height - 96)}px`;
-            });
-            svg.addEventListener('mouseleave', () => {
-                crosshair.style.display = 'none';
-                tooltip.hidden = true;
-            });
-        }
-
-        function renderChartStats(payload) {
-            const records = payload?.records || [];
+        function renderChartStats(payload, records, {change,close,high,low,avgVolume}) {
             if (!records.length) {
                 $('#chartStats').innerHTML = '';
                 return;
             }
-            const first = records[0];
-            const last = records[records.length - 1];
-            const change = ((Number(last.close) - Number(first.close)) / Number(first.close) * 100) || 0;
-            const volumes = records.map((item) => Number(item.volume || 0));
-            const avgVolume = volumes.reduce((sum, item) => sum + item, 0) / Math.max(1, volumes.length);
-            const high = Math.max(...records.map((item) => Number(item.high)).filter(Number.isFinite));
-            const low = Math.min(...records.map((item) => Number(item.low)).filter(Number.isFinite));
             $('#chartStats').innerHTML = `
                 <div class="mini-stat"><span>数据源</span><strong>${escapeHtml(payload.source || '-')}</strong></div>
-                <div class="mini-stat"><span>区间涨跌</span><strong class="${changeClass(change)}">${formatChange(change)}</strong></div>
-                <div class="mini-stat"><span>最新收盘</span><strong>${formatPrice(last.close)}</strong></div>
+                <div class="mini-stat"><span>区间涨跌</span><strong class="${changeClass(change)}">${change==null?'—':formatChange(change)}</strong></div>
+                <div class="mini-stat"><span>区间末收盘</span><strong>${formatPrice(close)}</strong></div>
                 <div class="mini-stat"><span>高/低</span><strong>${formatPrice(high)} / ${formatPrice(low)}</strong></div>
-                <div class="mini-stat"><span>均量</span><strong>${formatVolume(avgVolume)}</strong></div>
+                <div class="mini-stat"><span>均量</span><strong>${avgVolume==null?'—':formatVolume(avgVolume)}</strong></div>
             `;
         }
 
@@ -2441,13 +2223,10 @@
             $('#opportunityForm').addEventListener('submit', startDiscovery);
             $('#batchForm').addEventListener('submit', startBatch);
             $('#reloadKlineBtn').addEventListener('click', () => {
-                if (selectedStock) loadKline(selectedStock.code).catch((error) => renderKlineEmpty(error.message));
+                if (selectedStock) void loadKline(selectedStock.code);
             });
             $('#klinePeriod').addEventListener('change', () => {
-                if (selectedStock) loadKline(selectedStock.code).catch((error) => renderKlineEmpty(error.message));
-            });
-            window.addEventListener('resize', () => {
-                if (selectedKline?.records) drawKline(selectedKline.records);
+                if (selectedStock) void loadKline(selectedStock.code);
             });
 
             try {

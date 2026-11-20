@@ -4,6 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>短线作战大屏 · Lumo Trade</title>
   <link rel="stylesheet" href="/static/lumo_short_term_screen.css?v={{ asset_v('lumo_short_term_screen.css') }}">
+  <link rel="stylesheet" href="/static/lumo_price_chart.css?v={{ asset_v('lumo_price_chart.css') }}">
 </head>
 <body data-desktop-mode="{{ '1' if desktop_mode else '0' }}">
   <main id="stScreen" aria-label="短线作战大屏" aria-busy="true" data-scene-v="{{ asset_v('lumo_short_term_scene.js') }}" data-flow-v="{{ asset_v('lumo_short_term_flow.js') }}">
@@ -40,6 +41,7 @@
   </main>
   <dialog id="stDrawer" class="st-drawer" aria-labelledby="stDrawerTitle"><header><div><small id="stDrawerEyebrow"></small><h2 id="stDrawerTitle">完整档案</h2></div><button id="stDrawerClose" type="button" aria-label="关闭明细">关闭 ×</button></header><div id="stDrawerBody"></div></dialog>
   <script src="/static/lumo_short_term_scene_fallback.js?v={{ asset_v('lumo_short_term_scene_fallback.js') }}"></script>
+  <script src="/static/lumo_price_chart.js?v={{ asset_v('lumo_price_chart.js') }}"></script>
   <script type="module" src="/static/lumo_short_term_screen.js?v={{ asset_v('lumo_short_term_screen.js') }}"></script>
 </body>
 </html>

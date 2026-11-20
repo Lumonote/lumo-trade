@@ -1,6 +1,7 @@
 """Standalone browser checks: real Robyn GET handlers, no listener or startup jobs."""
 from contextlib import contextmanager
 from pathlib import Path
+import os
 import sys
 from urllib.parse import parse_qsl, urlsplit
 
@@ -13,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 URL = "http://kronos.test"
 HEALTH = "/api/market-health"
 READS = {HEALTH + suffix for suffix in ("", "/financing", "/participants", "/participants/history",
-                                         "/macro", "/macro/events", "/macro/status")}
+                                         "/macro", "/macro/cycle", "/macro/events", "/macro/status")}
 PAGES = {"/desktop/market_health", "/desktop/workbench"}
 
 
@@ -25,6 +26,7 @@ def _allowed(path):
 def market_page():
     if len(sys.argv) != 1:
         raise SystemExit("Offline checks take no server URL.")
+    channel = os.getenv('KRONOS_BROWSER_CHANNEL') or None
     with offline_market_runtime() as root:
         out = root / "screenshots"
         out.mkdir()
@@ -67,7 +69,7 @@ def market_page():
                                              content_type=response.headers.get("Content-Type"))
                     return route.fulfill(status=404, json={"error": "not a test route"})
 
-                browser = p.chromium.launch()
+                browser = p.chromium.launch(channel=channel)
                 context = browser.new_context(viewport={"width": 1440, "height": 1000}, accept_downloads=True, service_workers="block")
                 context.route("**/*", dispatch)
                 try:

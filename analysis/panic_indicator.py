@@ -101,7 +101,8 @@ def panic_from_bars(bars, *, quote=None, scope="stock", period="daily", change_p
             change, dd = None, None
     result = panic_indicator(change_pct=change, drawdown_pct=dd, volume_ratio=vol_ratio,
                              scope=scope, as_of=last.get("date") or last.get("day") or quote.get("updated_at"),
-                             provisional=bool(last.get("realtime") or quote.get("applied")), change_periods=change_periods)
+                             provisional=bool(last.get("provisional") or last.get("realtime") or quote.get("applied")),
+                             change_periods=change_periods)
     result["period"] = period
     result["change_periods"] = change_periods
     return result

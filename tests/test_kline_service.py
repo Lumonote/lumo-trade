@@ -1,6 +1,12 @@
 import datetime
+from unittest.mock import Mock
 
+import pytest
+
+from data_store import kv_repo, price_bars_repo
 from webui.services.kline_service import StockKlineService
+
+pytestmark = pytest.mark.usefixtures('isolated_kline')
 
 
 class StubKlineService(StockKlineService):
@@ -8,9 +14,6 @@ class StubKlineService(StockKlineService):
         super().__init__("unused")
         self.records = records if records is not None else []
         self.error = error
-
-    def load_local_kline(self, stock_code, period, limit):
-        return [], None
 
     def fetch_sina_kline(self, stock_code, period, limit):
         if self.error:
@@ -54,18 +57,15 @@ def test_get_payload_handles_sina_success_and_failure():
     fail_service = StubKlineService(error=RuntimeError("offline"))
 
     payload, error = service.get_payload("600000", limit="999")
-    failed, failed_error = fail_service.get_payload("600000")
+    failed, failed_error = fail_service.get_payload("600001")
 
     assert error is None
-    assert payload["source"] == "sina"
+    assert payload["source"] == "sqlite:sina"
     assert payload["available"] is True
+    assert price_bars_repo.read('sina', 'sh600000')[0]['close'] == 1
     assert failed_error is None
     assert failed["available"] is False
     assert failed["detail"] == "offline"
-
-
-def _today_str() -> str:
-    return datetime.date.today().strftime("%Y-%m-%d")
 
 
 def test_apply_realtime_quote_updates_today_bar():
@@ -104,8 +104,8 @@ def test_apply_realtime_quote_ignores_zero_price():
     assert StockKlineService._apply_quote_to_records(records, {"price": 0}, "2026-06-03") is False
 
 
-def test_get_payload_attaches_and_applies_realtime_quote():
-    today = _today_str()
+def test_get_payload_attaches_and_applies_realtime_quote(isolated_kline):
+    today = isolated_kline.date().isoformat()
     service = StubKlineService(
         records=[{"date": today, "open": 1.0, "close": 1.0, "high": 1.0, "low": 1.0, "pct_chg": 0.0}]
     )
@@ -121,6 +121,8 @@ def test_get_payload_attaches_and_applies_realtime_quote():
     assert payload["quote"]["applied"] is True
     assert payload["quote_updated_at"]
     assert payload["records"][-1]["close"] == 1.5  # 当日bar被实时价改写
+    assert price_bars_repo.read('sina', 'sh600000', live_day=today)[-1]['close'] == 1
+    assert not price_bars_repo.read('sina', 'sh600000')  # 盘中记录不可用于回放
     assert payload["name"] == "测试股"  # 报价名回填
 
 
@@ -136,6 +138,16 @@ def test_get_payload_attaches_quote_without_applying_when_bar_stale():
     assert payload["quoted"] is True
     assert payload["quote"]["applied"] is False
     assert payload["records"][-1]["close"] == 1.0  # 未改写
+
+
+def test_stale_feed_does_not_replace_current_provisional_bar(isolated_kline):
+    today = isolated_kline.date().isoformat()
+    service = StubKlineService(records=[{'date': today, 'close': 10}])
+    service.set_quote_provider(lambda codes: {'600000': {'price': 9, 'quote_date': '2026-06-02'}})
+    payload, _ = service.get_payload('600000', limit=1)
+    assert payload['records'][-1]['close'] == 10
+    assert payload['quote']['as_of'] == '2026-06-02' and not payload['quote']['applied']
+    assert payload['panic']['provisional'] is True
 
 
 def test_get_payload_survives_quote_provider_failure():
@@ -205,14 +217,13 @@ def test_get_payload_cache_returns_independent_copies():
     assert second["records"][-1]["close"] == 2.0
 
 
-def test_get_payload_cache_expires_after_ttl(monkeypatch):
+def test_get_payload_cache_expires_after_ttl(isolated_price_db):
     service = CountingKlineService(
         records=[{"date": "2026-06-02", "open": 1.0, "close": 2.0, "high": 2.0, "low": 1.0}]
     )
 
     service.get_payload("600000")
-    for key, (stamp, records) in list(service._sina_cache.items()):
-        service._sina_cache[key] = (stamp - service.SINA_CACHE_TTL - 1, records)
+    isolated_price_db.execute("UPDATE kv_cache SET updated_at='2000-01-01T00:00:00' WHERE namespace='kline_fill'")
     service.get_payload("600000")
 
     assert service.fetch_calls == 2
@@ -230,10 +241,49 @@ def test_get_payload_cache_keyed_by_limit_and_period():
     assert service.fetch_calls == 3
 
 
-def test_get_payload_does_not_cache_failures():
+def test_get_payload_throttles_failed_download_and_retries(isolated_price_db):
     service = CountingKlineService(records=[])
 
     service.get_payload("600000")
     service.get_payload("600000")
+    assert service.fetch_calls == 1
+    isolated_price_db.execute("UPDATE kv_cache SET updated_at='2000-01-01T00:00:00' WHERE namespace='kline_fill'")
+    service.get_payload("600000")
 
     assert service.fetch_calls == 2
+
+
+def test_full_history_reads_beyond_single_provider_window(isolated_kline):
+    service = CountingKlineService()
+    end = datetime.date(2026, 6, 2)
+    dates = [(end-datetime.timedelta(days=i)).isoformat() for i in reversed(range(1100))]
+    price_bars_repo.store('tencent', 'sh600000', '1d', [{'date': d, 'close': 3} for d in dates])
+    payload, _ = service.get_payload('600000', limit='all', end=end.isoformat())
+    assert service.fetch_calls == 0
+    assert payload['source'] == 'sqlite:tencent'
+    assert len(payload['records']) == 1100
+
+
+def test_historical_minute_bars_use_only_their_frequency(monkeypatch):
+    target = '2026-05-20'
+    service = StockKlineService('unused')
+    fetch = Mock(return_value=([{'date': target+' 10:30:00', 'close': 10}], ''))
+    monkeypatch.setattr(service, 'fetch_sina_kline', fetch)
+    price_bars_repo.store('sina', 'sh600000', '1d', [{'date': target, 'close': 999}])
+    payload, _ = service.get_payload('600000', '60m', limit=1, end=target)
+    assert payload['records'][0]['date'] == target+' 10:30:00'
+    assert payload['records'][0]['close'] == 10
+    assert payload['records'][0]['volume'] is None
+    assert fetch.call_count == 1
+    assert kv_repo.get('kline_fill', f'sh600000:60m:{target}') is not None
+
+
+def test_offline_fallback_keeps_latest_available_session():
+    price_bars_repo.store('sina', 'sh600000', '1d', [{'date': '2026-06-01', 'close': 10}])
+    price_bars_repo.store('tencent', 'sh600000', '1d', [
+        {'date': '2026-05-27', 'close': 1}, {'date': '2026-05-28', 'close': 2}, {'date': '2026-05-29', 'close': 3},
+    ])
+    payload, _ = StubKlineService(error=RuntimeError('offline')).get_payload('600000', limit=3)
+    assert payload['source'] == 'sqlite:sina'
+    assert [r['date'] for r in payload['records']] == ['2026-06-01']
+    assert '补数未完整' in payload['message']

@@ -1828,7 +1828,8 @@ body.canvas-fullscreen-open {
 
 .modal-kline-body {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto max-content;
+  align-content: start;
   gap: 12px;
   padding: 14px;
 }
@@ -2881,6 +2882,11 @@ body[data-page="market_cloud"] .toolbar a.button.secondary {
     max-height: none;
     overflow: visible;
     padding-right: 0;
+  }
+
+  .modal-kline-workbench {
+    grid-auto-rows: max-content;
+    align-content: start;
   }
 
   .stock-context-summary,

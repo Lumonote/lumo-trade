@@ -1,11 +1,5 @@
-"""v2.1.9 上线验收反例固化测试。
-
-D-001 / D-002 为已证实但尚未修复的缺陷，使用 ``xfail(strict=True)``：
-- 当前运行显示 xfail（已知失败，可追溯）；
-- 一旦缺陷被修复，strict xfail 会转为 XPASS 并报错，提醒及时移除标记，防止标记被遗忘。
-D-003 经核查是“代码正确、文档错误”，这里固化 rqye 的正确累加行为（正常通过）。
-"""
-from pathlib import Path
+"""v2.1.9 上线验收反例固化测试。D-001 仍标为预期失败。"""
+from datetime import timedelta
 
 import pytest
 
@@ -23,40 +17,18 @@ def test_d001_market_snapshot_tolerates_non_dict_element(bad):
 
 
 # ---------------------------------------------------------------- D-002
-def _reset_sqlite(monkeypatch, db_path: Path):
-    """把当前线程的 thread-local 连接切到隔离库，避免污染真实 data/lumo_data.sqlite。"""
-    monkeypatch.setenv("KRONOS_SQLITE_PATH", str(db_path))
-    from data_store import connection
-    monkeypatch.setattr(connection._local, "conn", None, raising=False)
-    # 进程内 schema 标记也重置，确保隔离库独立迁移
-    monkeypatch.setattr(connection, "_schema_applied", False)
-
-
-@pytest.mark.xfail(strict=True,
-                   reason="D-002 P3: _cached_bars 只校验 len>=max(21,min(limit,60))，"
-                          "缓存不足实际 limit 时静默 cached[-limit:] 截断，不重新 fetch")
-def test_d002_get_bars_should_refetch_when_cache_shorter_than_limit(tmp_path, monkeypatch):
-    from data_store import screener_cache_repo
+def test_d002_get_bars_should_refetch_when_cache_shorter_than_limit(isolated_kline, tmp_path, monkeypatch):
+    from data_store import price_bars_repo
     from webui.services.kline_service import StockKlineService
 
-    _reset_sqlite(monkeypatch, tmp_path / "iso.sqlite")
-
-    def bar(i):
-        return {"date": f"2026-08-{i:02d}", "open": 10, "close": 10 + i,
-                "high": 11, "low": 9, "volume": 100}
-
-    screener_cache_repo.put_kline("600000", [bar(i) for i in range(1, 61)])  # 仅 60 根
-
-    svc = StockKlineService(tmp_path)
     wanted = 250
-    # 用受控 stub 替换网络与本地回退，返回足量记录，避免真实网络依赖。
-    monkeypatch.setattr(svc, "_fetch_sina_kline_cached",
-                        lambda code, period, limit: [bar(i % 28 + 1) for i in range(limit)])
-    monkeypatch.setattr(svc, "load_local_kline",
-                        lambda code, period, limit: ([bar(i % 28 + 1) for i in range(limit)], "local"))
-
-    got = svc.get_bars("600000", period="daily", limit=wanted, cache_write=False)
-    assert len(got) == wanted  # 缓存不足时应重新 fetch，而非静默返回 60 根
+    records = [{"date": (isolated_kline.date()-timedelta(days=i)).isoformat(), "close": 10}
+               for i in reversed(range(wanted))]
+    price_bars_repo.store('sina', 'sh600000', '1d', records[-60:])
+    svc = StockKlineService(tmp_path)
+    monkeypatch.setattr(svc, 'fetch_sina_kline', lambda code, period, limit: (records[-limit:], ''))
+    assert len(svc.get_bars('600000', limit=wanted)) == wanted
+    assert len(price_bars_repo.read('sina', 'sh600000', live_day=records[-1]['date'])) == wanted
 
 
 # ---------------------------------------------------------------- D-003

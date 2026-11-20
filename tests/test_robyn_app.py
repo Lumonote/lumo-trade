@@ -88,7 +88,7 @@ def test_robyn_native_json_routes(robyn_module, monkeypatch):
     monkeypatch.setattr(
         robyn_module.webui_core,
         "_get_stock_kline_payload",
-        lambda code, period="daily", limit=120: (
+        lambda code, period="daily", limit=120, end=None: (
             {
                 "code": code,
                 "name": "贵州茅台",
@@ -263,23 +263,47 @@ def test_robyn_native_settings_routes(robyn_module):
     assert tushare_response.json()["settings"]["tushare"]["configured"] is True
 
 
-def test_robyn_native_prediction_validation(robyn_module, tmp_path):
+def test_robyn_native_prediction_validation(robyn_module, tmp_path, monkeypatch):
+    import pandas as pd
     from robyn.testing import TestClient
+    from data_store import connection, price_bars_repo
 
-    data_file = tmp_path / "sample.csv"
-    data_file.write_text(
-        "timestamps,open,high,low,close,volume\n"
-        "2026-01-01,1,2,0.5,1.5,100\n"
-        "2026-01-02,1.5,2.5,1,2,120\n",
-        encoding="utf-8",
-    )
+    monkeypatch.setenv('KRONOS_SQLITE_PATH', str(tmp_path / 'prediction.sqlite'))
+    monkeypatch.setattr(pd, 'read_csv', lambda *_args, **_kwargs: pytest.fail('runtime must not read CSV'))
+    connection.reset_for_testing()
+    source_id = 'sqlite:sina:sh600000:5m'
 
-    with TestClient(robyn_module.app) as client:
-        missing_path_response = client.post("/api/predict", json_data={})
-        not_loaded_response = client.post(
-            "/api/predict",
-            json_data={"file_path": str(data_file), "lookback": 1, "pred_len": 1},
-        )
+    def fill(code, period, *, end):
+        assert (code, period) == ('600000', '5m')
+        rows = [
+            {'date': '2026-01-05 11:30:00', 'open': 1, 'high': 2, 'low': 0.5, 'close': 1.5, 'volume': 0},
+            {'date': '2026-01-05 13:05:00', 'open': 1.5, 'high': 2.5, 'low': 1, 'close': 2},
+            {'date': '2026-01-05 13:10:00', 'open': 2, 'high': 3, 'low': 1.5, 'close': 2.5, 'provisional': True},
+        ]
+        price_bars_repo.store('sina', 'sh600000', period, rows, end=end)
+        return [], 'sqlite:sina', None
+
+    monkeypatch.setattr(robyn_module.webui_core.STOCK_KLINE_SERVICE, 'history', fill)
+
+    try:
+        with TestClient(robyn_module.app) as client:
+            loaded = client.post('/api/load-data', json_data={'file_path': 'sqlite:auto:600000:5m'})
+            datasets = client.get('/api/data-files').json()
+            csv_response = client.post('/api/load-data', json_data={'file_path': str(tmp_path / 'sample.csv')})
+            missing_path_response = client.post('/api/predict', json_data={})
+            not_loaded_response = client.post(
+                '/api/predict', json_data={'file_path': source_id, 'lookback': 1, 'pred_len': 1},
+            )
+    finally:
+        connection.reset_for_testing()
+
+    assert loaded.status_code == 200
+    info = loaded.json()['data_info']
+    assert (info['dataset'], info['timeframe'], info['rows']) == (source_id, '5 分钟', 2)
+    assert info['timestamps'] == ['2026-01-05T11:30:00', '2026-01-05T13:05:00']
+    assert [dataset['path'] for dataset in datasets] == [source_id]
+    assert csv_response.status_code == 400
+    assert 'SQLite' in csv_response.json()['error']
 
     assert missing_path_response.status_code == 400
     assert missing_path_response.json() == {"error": "File path cannot be empty"}

@@ -291,14 +291,24 @@ def test_stale_low_is_historical_only_even_when_report_day_is_closed():
     assert short['comparable'] and short['samples'] == 251 and short['low'] is None
 
 
-def test_older_user_snapshot_only_backfills_bonds_through_its_own_cutoff(monkeypatch):
+def test_older_user_snapshot_only_backfills_bonds_through_its_own_cutoff(tmp_path, monkeypatch):
+    from data_store.connection import reset_for_testing
+
     saved = {"as_of": "2024-01-02", "updated_at": "original", "series": {"gold": series(1)}}
-    monkeypatch.setattr(service.kv_repo, "get_raw", lambda *args: json.dumps(saved).encode())
+    monkeypatch.setenv('KRONOS_SQLITE_PATH', str(tmp_path / 'macro.sqlite'))
     monkeypatch.setattr(service, "baseline", lambda: {"series": {"cn10y": series(3)}})
-    data = service.bundle()
-    assert data["updated_at"] == "original" and data["series"]["gold"] == saved["series"]["gold"]
-    assert data["series"]["cn10y"] == series(2)
-    assert data["sources"][0]["date"] == "2024-01-02" and "cn10y" not in saved["series"]
+    reset_for_testing()
+    try:
+        service.kv_repo.set_(service.NAMESPACE, 'bundle', saved)
+        data = service.bundle()
+        assert data["updated_at"] == "original" and data["series"]["gold"] == saved["series"]["gold"]
+        assert data["series"]["cn10y"] == series(2)
+        assert data["sources"][0]["date"] == "2024-01-02"
+        assert service.kv_repo.get(service.NAMESPACE, service.BOND_BASELINE_KEY)[0]['cn10y'] == series(3)
+        assert service.kv_repo.get(service.NAMESPACE, 'bundle')[0] == saved
+    finally:
+        service._snapshot_for.cache_clear()
+        reset_for_testing()
 
 
 def test_cn10y_history_splits_queries_and_refresh_revises_only_overlap(monkeypatch):

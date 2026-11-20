@@ -182,11 +182,13 @@ def test_cloud_and_dashboard_share_market_panic_while_stock_scopes_remain_indepe
     json.dumps(cloud,allow_nan=False)
 
 
-def test_kline_service_payload_includes_calculated_panic_without_extra_fetch(tmp_path,monkeypatch):
+def test_kline_service_payload_includes_calculated_panic_without_extra_fetch(tmp_path,monkeypatch,isolated_kline):
     from webui.services.kline_service import StockKlineService
     service = StockKlineService(tmp_path)
     calls = []
-    monkeypatch.setattr(service,"fetch_sina_kline",lambda *args: (calls.append(args) or _bars([-1]*25),""))
+    rows = [{**r, 'date': (isolated_kline.date()+timedelta(days=i-24)).isoformat()}
+            for i, r in enumerate(_bars([-1]*25))]
+    monkeypatch.setattr(service,"fetch_sina_kline",lambda *args: (calls.append(args) or rows,""))
     out,error = service.get_payload("600001")
     assert error is None and len(calls) == 1
     assert out["panic"]["available"] and out["panic"]["scope"] == "stock"

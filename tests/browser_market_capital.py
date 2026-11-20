@@ -133,6 +133,8 @@ with market_page() as (page, read, OUT):
         if kind in ("quant", "national"):
             expect(page.locator("#mpHistorySummary")).to_contain_text("不可识别")
             assert page.locator("#mpHistoryChart [data-candle]").count() == 0
+        else:
+            expect(page.locator("#mpHistoryChart [data-candle]")).to_have_count(result["coverage"]["amount_days"])
         dates = [d for d in current["calendar"] if d <= current["as_of"]]
         if dates and kind != "national":
             page.locator("#mpHistoryStart").fill(dates[max(0,len(dates)-5)])

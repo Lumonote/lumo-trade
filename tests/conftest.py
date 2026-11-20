@@ -32,3 +32,29 @@ def _isolate_kronos_env(monkeypatch):
 def tmp_db(tmp_path: Path) -> Path:
     """提供临时 SQLite 数据库路径，测试结束自动清理。"""
     return tmp_path / "test_fingerprints.db"
+
+
+@pytest.fixture
+def isolated_price_db(tmp_path, monkeypatch):
+    from data_store import connection
+
+    monkeypatch.setenv('KRONOS_SQLITE_PATH', str(tmp_path / 'prices.sqlite'))
+    monkeypatch.setattr(connection._local, 'conn', None, raising=False)
+    monkeypatch.setattr(connection, '_schema_applied', False)
+    try:
+        yield connection.get_conn()
+    finally:
+        connection.close_conn()
+
+
+@pytest.fixture
+def isolated_kline(isolated_price_db, monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from webui.services import kline_service
+
+    clock = datetime(2026, 6, 3, 11, 0, tzinfo=ZoneInfo('Asia/Shanghai'))
+    monkeypatch.setattr(kline_service.StockKlineService, '_clock', staticmethod(lambda: clock))
+    monkeypatch.setattr(kline_service, 'fetch_tencent', lambda *args: [])
+    return clock

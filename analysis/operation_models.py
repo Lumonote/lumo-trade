@@ -22,7 +22,7 @@ def numeric(value):
         return None
 
 
-def normalize_bars(records):
+def normalize_bars(records, *, keep_gaps=False):
     rows = {}
     for item in records or []:
         stamp = str(item.get("date") or item.get("day") or "")
@@ -34,6 +34,8 @@ def normalize_bars(records):
         if (any(v is None or v <= 0 for v in values.values())
                 or not values["low"] <= min(values["open"], values["close"])
                 or not max(values["open"], values["close"]) <= values["high"]):
+            if keep_gaps:
+                rows[stamp] = {'date': stamp, 'gap': True}
             continue
         rows[stamp] = {**values, "date": stamp, "volume": numeric(item.get("volume")),
                        "provisional": bool(item.get("provisional"))}
@@ -43,16 +45,38 @@ def normalize_bars(records):
 def confirmed_fractals(rows, radius=2):
     """保留每个已确认局部极值，追加行情不会改写历史确认事件。"""
     points = []
+    segment = 0
     for i in range(radius, len(rows) - radius):
         left, right = rows[i-radius:i], rows[i+1:i+radius+1]
         r = rows[i]
+        if r.get('gap'):
+            segment += 1
+        if any(b.get('provisional') or b.get('high') is None or b.get('low') is None for b in [*left, r, *right]):
+            continue
         for kind, key, compare in (("high", "high", max), ("low", "low", min)):
             values = [v[key] for v in left + right]
             extreme = compare(values)
             if (r[key] > extreme if kind == "high" else r[key] < extreme):
                 points.append({"kind": kind, "date": r["date"], "price": r[key],
-                               "confirmed_at": rows[i+radius]["date"], "index": i})
+                               "confirmed_at": rows[i+radius]["date"], "index": i, "segment": segment})
     return points
+
+
+def impulse_candidates(points):
+    """Conservative, non-truncated impulse candidates; never project an unfinished leg."""
+    waves = []
+    for end in range(5, len(points)):
+        legs = points[end-5:end+1]
+        if legs[0].get('segment') != legs[-1].get('segment'):
+            continue
+        sign = 1 if legs[0]['kind'] == 'low' else -1
+        if any(a['kind'] == b['kind'] or a['date'] >= b['date'] for a, b in zip(legs, legs[1:])):
+            continue
+        p0, p1, p2, p3, p4, p5 = [sign * p['price'] for p in legs]
+        if p0 < p2 < p1 < p4 < p3 < p5 and p3-p2 >= min(p1-p0, p5-p4):
+            waves.append({'direction': 'up' if sign == 1 else 'down', 'confirmed_at': legs[-1]['confirmed_at'],
+                          'points': [{'date': p['date'], 'price': p['price']} for p in legs]})
+    return waves
 
 
 def _weekly(rows):
@@ -73,13 +97,13 @@ def _weekly(rows):
     return result
 
 
-def _stage(rows):
+def _stage(rows, weekly=None):
     if len(rows) < 60:
         return {"key": "unknown", "label": STAGES["unknown"], "basis": "至少60根完整日K"}
-    weekly = _weekly(rows)
+    weekly = _weekly(rows) if weekly is None else weekly
     full = len(weekly) >= 35
     source, window, shift = (weekly, 30, 5) if full else (rows, 60, 10)
-    closes = [r["close"] for r in source]
+    closes = [r["close"] for r in source[-window-shift:]]
     average, previous = mean(closes[-window:]), mean(closes[-window-shift:-shift])
     slope = average / previous - 1
     price = closes[-1]
@@ -90,6 +114,24 @@ def _stage(rows):
     return {"key": key, "label": STAGES[key], "average": round(average, 4),
             "slope_pct": round(slope*100, 2), "weekly_count": len(weekly),
             "basis": "30周均线与5周斜率" if full else "日线60日代理·完整周线不足35根"}
+
+
+def stage_history(closed):
+    # Only a week's last close is used by _stage. Keep the same Friday rule as _weekly.
+    weekly, history, last_week = [], [], None
+    for i, row in enumerate(closed):
+        stamp = date.fromisoformat(row['date'][:10])
+        week = stamp.isocalendar()[:2]
+        if week != last_week:
+            weekly.append(row)
+        else:
+            weekly[-1] = row
+        last_week = week
+        if i >= 59:
+            end = len(weekly) - int(stamp.weekday() < 4)
+            stage = _stage(closed[max(0, i-69):i+1], weekly[max(0, end-35):end])
+            history.append({'date': row['date'], 'key': stage['key'], 'label': stage['label']})
+    return history
 
 
 def _check(key, label, passed, value=None):
@@ -106,16 +148,17 @@ def _model(key, label, theory, checks, levels, provisional):
 
 def analyze_operations(records, *, period="daily", now=None, fundamentals=None):
     now = now or datetime.now(ZoneInfo("Asia/Shanghai"))
-    rows = [r for r in normalize_bars(records) if r["date"][:10] <= now.date().isoformat()]
+    timeline = [r for r in normalize_bars(records, keep_gaps=True) if r['date'][:10] <= now.date().isoformat()]
+    rows = [r for r in timeline if not r.get('gap')]
     daily = period in ("daily", "1d", "day")
     provisional = bool(rows and (rows[-1]["provisional"] or
         (rows[-1]["date"][:10] == now.date().isoformat() and (now.hour, now.minute) < (15, 5))))
     closed = rows[:-1] if provisional else rows
-    points = confirmed_fractals(closed)
+    points = confirmed_fractals([r for r in timeline if not provisional or r['date'] < rows[-1]['date']])
     result = {"version": 1, "available": False, "period": period,
               "as_of": rows[-1]["date"] if rows else None,
               "confirmed_as_of": closed[-1]["date"] if closed else None,
-              "provisional": provisional, "fractals": points,
+              "provisional": provisional, "fractals": points, "waves": impulse_candidates(points),
               "models": [], "events": [], "zones": [], "stage_history": [],
               "stage": _stage(closed) if daily else {"key": "unknown", "label": "分钟波段", "basis": "分钟K不用于周线阶段判定"},
               "theory_note": "经典方法的规则化技术候选；波段分型不等同于缠论笔/线段，条件数不代表胜率。"}
@@ -214,9 +257,7 @@ def analyze_operations(records, *, period="daily", now=None, fundamentals=None):
             result["events"].append({"date": closed[i]["date"], "confirmed_at": closed[i]["date"],
                 "price": closed[i]["high"], "kind": "risk", "label": "支撑破坏"})
     # 收盘阶段带按当时可见数据计算，禁止使用最终阶段回涂整段历史。
-    for i in range(59, len(closed)):
-        stage = _stage(closed[:i+1])
-        result["stage_history"].append({"date": closed[i]["date"], "key": stage["key"], "label": stage["label"]})
+    result["stage_history"] = stage_history(closed)
     result.update(available=True, models=models, selected_model=selected["key"], levels=selected["levels"],
         dow={"key": dow, "label": {"up": "高低点抬升", "down": "高低点下移", "range": "波段待确认"}[dow]},
         metrics={"ma20": round(ma20, 4), "ma60": round(ma60, 4), "atr20": round(atr, 4),

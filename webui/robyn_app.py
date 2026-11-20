@@ -355,6 +355,9 @@ def _model_status_payload() -> dict[str, Any]:
 
 def _dataframe_info(df: Any) -> dict[str, Any]:
     def detect_timeframe() -> str:
+        frequency = df.attrs.get('frequency')
+        if frequency:
+            return '日线' if frequency == '1d' else f'{frequency[:-1]} 分钟'
         if len(df) < 2 or "timestamps" not in df.columns:
             return "Unknown"
 
@@ -365,7 +368,8 @@ def _dataframe_info(df: Any) -> dict[str, Any]:
         if not time_diffs:
             return "Unknown"
 
-        avg_diff = sum(time_diffs, webui_core.pd.Timedelta(0)) / len(time_diffs)
+        # Use the prevailing bar interval, not the mean of trading gaps and bars.
+        avg_diff = webui_core.pd.Series(time_diffs).mode().min()
         if avg_diff < webui_core.pd.Timedelta(minutes=1):
             return f"{avg_diff.total_seconds():.0f} seconds"
         if avg_diff < webui_core.pd.Timedelta(hours=1):
@@ -375,15 +379,19 @@ def _dataframe_info(df: Any) -> dict[str, Any]:
         return f"{avg_diff.days} days"
 
     return {
+        "dataset": df.attrs.get('dataset'),
         "rows": len(df),
         "columns": list(df.columns),
+        "timestamps": [ts.isoformat() for ts in df["timestamps"]],
         "start_date": df["timestamps"].min().isoformat() if "timestamps" in df.columns else "N/A",
         "end_date": df["timestamps"].max().isoformat() if "timestamps" in df.columns else "N/A",
         "price_range": {
             "min": float(df[["open", "high", "low", "close"]].min().min()),
             "max": float(df[["open", "high", "low", "close"]].max().max()),
         },
-        "prediction_columns": ["open", "high", "low", "close"] + (["volume"] if "volume" in df.columns else []),
+        "prediction_columns": ["open", "high", "low", "close"] + [
+            field for field in ('volume', 'amount') if field in df and df[field].notna().any()
+        ],
         "timeframe": detect_timeframe(),
     }
 
@@ -490,7 +498,7 @@ def load_data(request: Request) -> Response:
             {
                 "success": True,
                 "data_info": _dataframe_info(df),
-                "message": f"Successfully loaded data, total {len(df)} rows",
+                "message": f"已从 SQLite 载入 {len(df)} 根行情",
             }
         )
     except Exception as exc:
@@ -584,6 +592,7 @@ def get_stock_kline(request: Request, stock_code=None) -> Response:
         _path_param(request, "stock_code", stock_code),
         period=_query_value(request, "period", "daily"),
         limit=_query_value(request, "limit", 120),
+        end=_query_value(request, "end", None),
     )
     if error:
         return _json_response({"error": error}, status_code=400)
@@ -1048,6 +1057,15 @@ def market_health_macro(request: Request) -> Response:
         return _json_response(market_macro_service.query(webui_core.JOB_SERVICE, **{key: _query_value(request, key, value) for key, value in defaults.items()}))
     except (ValueError, TypeError, OverflowError) as exc:
         return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_get("/api/market-health/macro/cycle")
+def market_health_macro_cycle(request: Request) -> Response:
+    try:
+        return _json_response(market_macro_service.cycle(_query_value(request, 'equity', 'csi300'),
+                                                       _query_value(request, 'cutoff', '')))
+    except (ValueError, TypeError) as exc:
+        return _json_response({'error': str(exc)}, status_code=400)
 
 
 @_native_get("/api/market-health/macro/events")

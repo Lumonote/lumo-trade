@@ -5,8 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lumo Trade Financial Prediction Web UI</title>
-    <script async src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <link rel="stylesheet" href="/static/lumo_desktop.css">
+    <link rel="stylesheet" href="/static/lumo_price_chart.css?v={{ asset_v('lumo_price_chart.css') }}">
 </head>
 
 <body>
@@ -36,7 +36,7 @@
                 <div class="toolbar">
                     <button id="sidebarToggleBtn" class="button secondary shell-button" type="button" title="收起/展开菜单">菜单</button>
                     <button id="workspaceFullscreenBtn" class="button secondary shell-button" type="button" title="全屏显示右侧功能">全屏</button>
-                    <span class="pill">400 + 120 固定窗口</span>
+                    <span class="pill">历史回放</span>
                     <a class="button secondary" href="/desktop/overview">返回总览</a>
                 </div>
             </header>
@@ -69,18 +69,35 @@
                         </div>
 
                         <div class="control-group">
-                            <h3 class="control-group-title">数据</h3>
+                            <h3 class="control-group-title">SQLite 行情</h3>
                             <div class="form-group">
-                                <label for="data-file-select">数据文件</label>
+                                <label for="data-file-select">已入库序列</label>
                                 <select id="data-file-select">
                                     <option value="">加载数据列表中</option>
                                 </select>
+                            </div>
+                            <div class="field-row">
+                                <div class="form-group">
+                                    <label for="data-stock-code">或输入股票代码补库</label>
+                                    <input id="data-stock-code" inputmode="numeric" maxlength="6" placeholder="六位股票代码">
+                                </div>
+                                <div class="form-group">
+                                    <label for="data-trading-period">补库频率</label>
+                                    <select id="data-trading-period">
+                                        <option value="1d">日线</option>
+                                        <option value="5m">5 分钟</option>
+                                        <option value="15m">15 分钟</option>
+                                        <option value="30m">30 分钟</option>
+                                        <option value="60m">60 分钟</option>
+                                    </select>
+                                </div>
                             </div>
                             <div class="actions">
                                 <button id="load-data-btn" class="btn btn-secondary">载入数据</button>
                             </div>
                             <div id="data-info" class="data-info" style="display: none;">
                                 <h3>数据摘要</h3>
+                                <p><strong>序列：</strong><span id="data-source">-</span></p>
                                 <p><strong>行数：</strong><span id="data-rows">-</span></p>
                                 <p><strong>列数：</strong><span id="data-cols">-</span></p>
                                 <p><strong>时间：</strong><span id="data-time-range">-</span></p>
@@ -99,11 +116,7 @@
                                     <span id="window-size">窗口：520</span>
                                 </div>
                                 <div class="time-window-slider">
-                                    <div class="slider-track">
-                                        <div class="slider-handle start-handle" id="start-handle"></div>
-                                        <div class="slider-selection" id="slider-selection"></div>
-                                        <div class="slider-handle end-handle" id="end-handle"></div>
-                                    </div>
+                                    <input type="range" id="window-position" aria-label="回放起始记录" min="0" max="0" value="0" step="1" disabled>
                                     <div class="slider-labels">
                                         <span id="min-label">最早</span>
                                         <span id="max-label">最新</span>
@@ -113,11 +126,11 @@
                             <div class="field-row">
                                 <div class="form-group">
                                     <label for="lookback">回看</label>
-                                    <input type="number" id="lookback" value="400" readonly>
+                                    <input type="number" id="lookback" value="400" min="1" step="1" required>
                                 </div>
                                 <div class="form-group">
                                     <label for="pred-len">预测</label>
-                                    <input type="number" id="pred-len" value="120" readonly>
+                                    <input type="number" id="pred-len" value="120" min="1" step="1" required>
                                 </div>
                             </div>
                         </div>
@@ -155,6 +168,10 @@
                 <div class="chart-container">
                     <h2>预测结果</h2>
                     <div class="prediction-chart-body">
+                        <div id="replayViews" role="group" aria-label="回放路径" hidden>
+                            <button type="button" class="button secondary" data-view="prediction">模型预测</button>
+                            <button type="button" class="button secondary" data-view="actual">同期实测</button>
+                        </div>
                         <div id="chart" class="chart-empty">载入模型和数据后开始预测</div>
                     </div>
 
@@ -212,6 +229,7 @@
 
     <script src="/static/lumo_desktop_shell.js"></script>
     <script src="/static/provider_context_menu.js"></script>
+    <script src="/static/lumo_price_chart.js?v={{ asset_v('lumo_price_chart.js') }}"></script>
     <script>
         // Global variables
         let currentDataFile = null;
@@ -219,6 +237,7 @@
         let availableModels = [];
         let modelLoaded = false;
         let modelRuntimeAvailable = false;
+        let predicting = false;
 
         async function requestJson(url, options = {}) {
             const response = await fetch(url, {
@@ -261,9 +280,6 @@
 
             // Set up event listeners
             setupEventListeners();
-
-            // Initialize time slider
-            initializeTimeSlider();
 
             console.log('✅ Application initialization completed');
         }
@@ -341,7 +357,7 @@
                     modelLoaded = true;
                     showStatus('success', data.message);
                     updateModelStatus();
-                    document.getElementById('predict-btn').disabled = false;
+                    updateWindow();
                     console.log('✅ Model loaded successfully:', data.model_info);
                 } else {
                     showStatus('error', data.error);
@@ -359,6 +375,8 @@
         async function updateModelStatus() {
             try {
                 const status = await requestJson('/api/model-status');
+                modelLoaded = Boolean(status.loaded);
+                updateWindow();
 
                 if (status.loaded) {
                     modelRuntimeAvailable = true;
@@ -383,7 +401,7 @@
                 const dataFiles = await requestJson('/api/data-files');
 
                 const dataFileSelect = document.getElementById('data-file-select');
-                dataFileSelect.innerHTML = '<option value="">请选择数据文件</option>';
+                dataFileSelect.innerHTML = '<option value="">请选择行情序列</option>';
 
                 dataFiles.forEach(file => {
                     const option = document.createElement('option');
@@ -401,18 +419,27 @@
             }
         }
 
-        // Load data file
         async function loadData() {
-            const filePath = document.getElementById('data-file-select').value;
+            const code = document.getElementById('data-stock-code').value.trim();
+            if (code && !/^[0-9]{6}$/.test(code)) {
+                showStatus('error', '请输入六位股票代码');
+                return;
+            }
+            const period = document.getElementById('data-trading-period').value;
+            const filePath = code ? `sqlite:auto:${code}:${period}` : document.getElementById('data-file-select').value;
 
             if (!filePath) {
-                showStatus('error', 'Please select a data file to load');
+                showStatus('error', '请选择行情序列，或输入股票代码补库');
                 return;
             }
 
             try {
                 showLoading(true);
                 document.getElementById('load-data-btn').disabled = true;
+                currentDataFile = null;
+                currentDataInfo = null;
+                document.getElementById('data-info').style.display = 'none';
+                updateWindow();
 
                 const data = await requestJson('/api/load-data', {
                     method: 'POST',
@@ -422,15 +449,10 @@
                 });
 
                 if (data.success) {
-                    currentDataFile = filePath;
+                    currentDataFile = data.data_info.dataset;
                     currentDataInfo = data.data_info;
                     showDataInfo(data.data_info);
                     showStatus('success', data.message);
-
-                    // Update prediction button status
-                    if (modelLoaded) {
-                        document.getElementById('predict-btn').disabled = false;
-                    }
 
                     console.log('✅ Data loaded successfully:', data.data_info);
                 } else {
@@ -438,7 +460,7 @@
                 }
             } catch (error) {
                 console.error('❌ Data loading failed:', error);
-                showStatus('error', `Data loading failed: ${error.message}`);
+                showStatus('error', `行情载入失败：${error.message}`);
             } finally {
                 showLoading(false);
                 document.getElementById('load-data-btn').disabled = false;
@@ -448,6 +470,7 @@
         // Display data information
         function showDataInfo(dataInfo) {
             document.getElementById('data-info').style.display = 'block';
+            document.getElementById('data-source').textContent = dataInfo.dataset;
             document.getElementById('data-rows').textContent = dataInfo.rows;
             document.getElementById('data-cols').textContent = dataInfo.columns.length;
             document.getElementById('data-time-range').textContent = `${dataInfo.start_date} to ${dataInfo.end_date}`;
@@ -455,214 +478,30 @@
             document.getElementById('data-timeframe').textContent = dataInfo.timeframe;
             document.getElementById('data-prediction-cols').textContent = dataInfo.prediction_columns.join(', ');
 
-            // Initialize time window slider
-            initializeTimeWindowSlider(dataInfo);
+            document.getElementById('window-position').value = 0;
+            document.getElementById('min-label').textContent = dataInfo.start_date.replace('T', ' ');
+            document.getElementById('max-label').textContent = dataInfo.end_date.replace('T', ' ');
+            updateWindow();
         }
 
-        // Time window slider related variables
-        let sliderData = null;
-        let isDragging = false;
-        let currentHandle = null;
-
-        // Initialize time window slider
-        function initializeTimeSlider() {
-            // Set up slider event listeners
-            setupSliderEventListeners();
-        }
-
-        // Set up slider event listeners
-        function setupSliderEventListeners() {
-            const startHandle = document.getElementById('start-handle');
-            const endHandle = document.getElementById('end-handle');
-            const track = document.querySelector('.slider-track');
-
-            // Start dragging
-            startHandle.addEventListener('mousedown', (e) => {
-                isDragging = true;
-                currentHandle = 'start';
-                e.preventDefault();
-            });
-
-            endHandle.addEventListener('mousedown', (e) => {
-                isDragging = true;
-                currentHandle = 'end';
-                e.preventDefault();
-            });
-
-            // Dragging
-            document.addEventListener('mousemove', (e) => {
-                if (!isDragging) return;
-
-                const rect = track.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-                const percentage = Math.max(0, Math.min(1, x / rect.width));
-
-                if (currentHandle === 'start') {
-                    updateStartHandle(percentage);
-                } else if (currentHandle === 'end') {
-                    updateEndHandle(percentage);
-                }
-
-                updateSliderFromHandles();
-            });
-
-            // End dragging
-            document.addEventListener('mouseup', () => {
-                isDragging = false;
-                currentHandle = null;
-            });
-
-            // Click track to set position directly
-            track.addEventListener('click', (e) => {
-                const rect = track.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-                const percentage = Math.max(0, Math.min(1, x / rect.width));
-
-                // Determine which handle is closer to the click position
-                const startHandle = document.getElementById('start-handle');
-                const endHandle = document.getElementById('end-handle');
-                const startRect = startHandle.getBoundingClientRect();
-                const endRect = endHandle.getBoundingClientRect();
-
-                if (Math.abs(x - (startRect.left - rect.left)) < Math.abs(x - (endRect.left - rect.left))) {
-                    updateStartHandle(percentage);
-                } else {
-                    updateEndHandle(percentage);
-                }
-
-                updateSliderFromHandles();
-            });
-        }
-
-        // Update start handle position
-        function updateStartHandle(percentage) {
-            const startHandle = document.getElementById('start-handle');
-            const selection = document.getElementById('slider-selection');
-
-            // Fixed window size of 520 data points
-            const windowSize = 520;
-            const totalRows = sliderData ? sliderData.totalRows : 1000;
-            const windowPercentage = windowSize / totalRows;
-
-            // Ensure start handle doesn't cause window to exceed data range
-            if (percentage + windowPercentage > 1) {
-                percentage = 1 - windowPercentage;
-            }
-
-            startHandle.style.left = (percentage * 100) + '%';
-            selection.style.left = (percentage * 100) + '%';
-            selection.style.width = (windowPercentage * 100) + '%';
-
-            // Automatically adjust end handle position to maintain fixed window size
-            const endHandle = document.getElementById('end-handle');
-            endHandle.style.left = ((percentage + windowPercentage) * 100) + '%';
-        }
-
-        // Update end handle position
-        function updateEndHandle(percentage) {
-            const endHandle = document.getElementById('end-handle');
-            const selection = document.getElementById('slider-selection');
-
-            // Fixed window size of 520 data points
-            const windowSize = 520;
-            const totalRows = sliderData ? sliderData.totalRows : 1000;
-            const windowPercentage = windowSize / totalRows;
-
-            // Ensure end handle doesn't cause window to exceed data range
-            if (percentage - windowPercentage < 0) {
-                percentage = windowPercentage;
-            }
-
-            endHandle.style.left = (percentage * 100) + '%';
-            selection.style.left = ((percentage - windowPercentage) * 100) + '%';
-            selection.style.width = (windowPercentage * 100) + '%';
-
-            // Automatically adjust start handle position to maintain fixed window size
-            const startHandle = document.getElementById('start-handle');
-            startHandle.style.left = ((percentage - windowPercentage) * 100) + '%';
-        }
-
-        // Update slider display based on handle positions
-        function updateSliderFromHandles() {
-            const startHandle = document.getElementById('start-handle');
-            const endHandle = document.getElementById('end-handle');
-
-            const startPercentage = parseFloat(startHandle.style.left) / 100;
-            const endPercentage = parseFloat(endHandle.style.left) / 100;
-
-            if (!sliderData) return;
-
-            // Calculate selected time range
-            const totalTime = sliderData.endDate.getTime() - sliderData.startDate.getTime();
-            const startTime = sliderData.startDate.getTime() + (totalTime * startPercentage);
-            const endTime = sliderData.startDate.getTime() + (totalTime * endPercentage);
-
-            const startDate = new Date(startTime);
-            const endDate = new Date(endTime);
-
-            // Update display information
-            document.getElementById('window-start').textContent = `Start: ${startDate.toLocaleDateString()}`;
-            document.getElementById('window-end').textContent = `End: ${endDate.toLocaleDateString()}`;
-
-            // Display fixed window size
-            document.getElementById('window-size').textContent = `Window Size: 400 + 120 = 520 data points (fixed)`;
-
-            // Input field values remain fixed
-            document.getElementById('lookback').value = 400;
-            document.getElementById('pred-len').value = 120;
-        }
-
-        // Update slider based on input fields
-        function updateSliderFromInputs() {
-            if (!sliderData) return;
-
-            // Fixed window size: 400 + 120 = 520 data points
-            const lookback = 400;
-            const predLen = 120;
-            const windowSize = lookback + predLen; // Fixed at 520
-
-            // Calculate slider position
-            const totalRows = sliderData.totalRows;
-
-            if (windowSize > totalRows) {
-                // If window size exceeds total data amount, show error
-                showStatus('error', `Insufficient data, need at least ${windowSize} data points, currently only ${totalRows} available`);
-                return;
-            }
-
-            // Calculate slider position (default select first half of data)
-            const startPercentage = 0.1; // Start from 10%
-            const endPercentage = startPercentage + (windowSize / totalRows);
-
-            // Update handle positions
-            updateStartHandle(startPercentage);
-            updateEndHandle(endPercentage);
-
-            // Update display information
-            updateSliderFromHandles();
-        }
-
-        // Initialize time window slider
-        function initializeTimeWindowSlider(dataInfo) {
-            sliderData = {
-                startDate: new Date(dataInfo.start_date),
-                endDate: new Date(dataInfo.end_date),
-                totalRows: dataInfo.rows,
-                timeframe: dataInfo.timeframe
-            };
-
-            // Set slider labels
-            document.getElementById('min-label').textContent = dataInfo.start_date.split('T')[0];
-            document.getElementById('max-label').textContent = dataInfo.end_date.split('T')[0];
-
-            // Initialize slider position
-            updateSliderFromInputs();
+        function updateWindow() {
+            const stamps=currentDataInfo?.timestamps || [], position=document.getElementById('window-position');
+            const history=document.getElementById('lookback').valueAsNumber, horizon=document.getElementById('pred-len').valueAsNumber;
+            const size=history+horizon, valid=[history,horizon].every(n=>Number.isInteger(n) && n>0) && size<=stamps.length;
+            position.max=valid ? stamps.length-size : 0;
+            position.disabled=!valid || position.max==='0' || predicting;
+            const start=Number(position.value);
+            document.getElementById('window-start').textContent='起点：'+(valid ? stamps[start].replace('T',' ') : '无可用窗口');
+            document.getElementById('window-end').textContent='终点：'+(valid ? stamps[start+size-1].replace('T',' ') : '—');
+            document.getElementById('window-size').textContent=`历史 ${history || 0} 根 + 对照 ${horizon || 0} 根，序列共 ${stamps.length} 根`;
+            document.getElementById('predict-btn').disabled=!valid || !modelLoaded || predicting;
+            return valid ? stamps[start] : null;
         }
 
         // Start prediction
         async function startPrediction() {
             if (!currentDataFile) {
-                showStatus('error', 'Please load data file first');
+                showStatus('error', '请先载入行情序列');
                 return;
             }
 
@@ -671,26 +510,15 @@
                 return;
             }
 
+            const startDate=updateWindow();
+            if (!startDate || predicting) return;
+            predicting=true;
             try {
                 showLoading(true);
                 document.getElementById('predict-btn').disabled = true;
 
                 const lookback = parseInt(document.getElementById('lookback').value);
                 const predLen = parseInt(document.getElementById('pred-len').value);
-
-                // Get selected time range from time window slider
-                const startHandle = document.getElementById('start-handle');
-                const startPercentage = parseFloat(startHandle.style.left) / 100;
-
-                if (!sliderData) {
-                    showStatus('error', 'Time window slider not initialized');
-                    return;
-                }
-
-                // Calculate selected time range
-                const totalTime = sliderData.endDate.getTime() - sliderData.startDate.getTime();
-                const startTime = sliderData.startDate.getTime() + (totalTime * startPercentage);
-                const startDate = new Date(startTime);
 
                 // Get prediction quality parameters
                 const temperature = parseFloat(document.getElementById('temperature').value);
@@ -701,7 +529,7 @@
                     file_path: currentDataFile,
                     lookback: lookback,
                     pred_len: predLen,
-                    start_date: startDate.toISOString().slice(0, 16), // Format as YYYY-MM-DDTHH:MM
+                    start_date: startDate,
                     temperature: temperature,
                     top_p: topP,
                     sample_count: sampleCount
@@ -726,7 +554,8 @@
                 showStatus('error', `Prediction failed: ${error.message}`);
             } finally {
                 showLoading(false);
-                document.getElementById('predict-btn').disabled = false;
+                predicting=false;
+                updateWindow();
             }
         }
 
@@ -735,12 +564,25 @@
             // Display chart
             const chart = document.getElementById('chart');
             chart.classList.remove('chart-empty');
-            const chartData = JSON.parse(result.chart);
-            if (window.Plotly) {
-                Plotly.newPlot('chart', chartData.data, chartData.layout);
-            } else {
-                chart.innerHTML = '<p class="muted">预测已完成。当前桌面包未加载 Plotly 图表库，下面仍可查看误差评估明细。</p>';
+            const {data,layout} = JSON.parse(result.chart), meta=layout.meta;
+            function records(key) {
+                const prices=data.find(t=>t.type==='candlestick' && t.meta===key), volumes=data.find(t=>t.type==='bar' && t.meta===key);
+                return prices.x.map((stamp,i)=>({date:meta.period==='daily' ? stamp.slice(0,10) : stamp.replace('T',' '),
+                    open:prices.open[i], high:prices.high[i], low:prices.low[i], close:prices.close[i], volume:volumes.y[i], amount:prices.customdata[i]}));
             }
+            const history=records('history'), branches={prediction:records('prediction'),actual:records('actual')};
+            const labels={prediction:'模型预测',actual:'同期实测'}, state={};
+            const views=document.getElementById('replayViews'); views.hidden=false;
+            function draw(view) {
+                const other=view==='prediction'?'actual':'prediction', from=branches[view][0].date;
+                for (const button of views.querySelectorAll('button')) button.setAttribute('aria-pressed',String(button.dataset.view===view));
+                LumoPriceChart.mount(chart,{name:labels[view],period:meta.period,records:[...history,...branches[view]],
+                    source:`${history.length} 根历史 + ${branches[view].length} 根${labels[view]}`,operation:meta[view==='actual'?'actual':'history']},
+                    {state,comparison:{from,simulated:view==='prediction',label:labels[view],otherLabel:labels[other],other:new Map(branches[other].map(r=>[r.date,r]))},
+                     note:`${from} 起为${labels[view]}区间。`+(view==='prediction'?'预测量价为模型输出，已确认波段只取输入历史。':'')});
+            }
+            for (const button of views.querySelectorAll('button')) button.onclick=()=>draw(button.dataset.view);
+            draw('prediction');
 
             // Display comparison analysis (if actual data exists)
             if (result.has_comparison) {
@@ -812,7 +654,7 @@
 
                 const row = document.createElement('tr');
                 row.innerHTML = `
-                <td>${new Date(pred.timestamp).toLocaleString()}</td>
+                <td>${pred.timestamp.replace('T', ' ')}</td>
                 <td>${act.open.toFixed(4)}</td>
                 <td>${pred.open.toFixed(4)}</td>
                 <td>${act.high.toFixed(4)}</td>
@@ -833,6 +675,9 @@
 
             // Load data button
             document.getElementById('load-data-btn').addEventListener('click', loadData);
+            document.getElementById('data-file-select').addEventListener('change', () => {
+                document.getElementById('data-stock-code').value = '';
+            });
 
             // Prediction button
             document.getElementById('predict-btn').addEventListener('click', startPrediction);
@@ -847,8 +692,7 @@
             });
 
             // Update slider when lookback window size changes
-            document.getElementById('lookback').addEventListener('input', updateSliderFromInputs);
-            document.getElementById('pred-len').addEventListener('input', updateSliderFromInputs);
+            for (const id of ['lookback','pred-len','window-position']) document.getElementById(id).addEventListener('input', updateWindow);
         }
 
         // Display status information

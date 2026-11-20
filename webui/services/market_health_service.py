@@ -11,9 +11,13 @@ import re
 import threading
 from zoneinfo import ZoneInfo
 
-from analysis.market_health import INDEXES, breadth_history, build_health, build_intraday_health, market_snapshot, normalize_bars, number
+import httpx
+
+from analysis.market_health import (INDEXES, breadth_history, build_health, build_intraday_health, ice_history,
+                                    market_snapshot, merge_ice_history, merge_observations, normalize_bars, number)
 from analysis.market_health_fusion import build_fusion
-from data_store import kv_repo
+from data_store import kv_repo, price_bars_repo
+from webui.services import market_ice_service
 from webui.services.http_client import request_json, request_text
 
 NAMESPACE = "market_health"
@@ -27,11 +31,16 @@ def now():
     return dt.datetime.now(ZoneInfo("Asia/Shanghai"))
 
 
-def read_baseline():
+def _load_baseline():
     try:
         return json.loads(BASELINE.read_text())
     except (OSError, ValueError):
-        return {"bars": {}, "notes": ["尚无快照，请更新公开数据。"], "source": "empty"}
+        return None
+
+
+def read_baseline():
+    raw = kv_repo.seed_raw(NAMESPACE, 'baseline:20261022', _load_baseline)
+    return json.loads(raw) if raw else {"bars": {}, "notes": ["尚无快照，请更新公开数据。"], "source": "empty"}
 
 
 def read_state():
@@ -129,7 +138,18 @@ def live_status(value, closed_date):
 def query(jobs=None, refresh_live=False, force_live=False):
     from webui.services import market_health_cross_service
     state = read_state()
+    # Per-day repairs live outside the refresh snapshot. A concurrent full refresh
+    # must never overwrite the queue's newly committed observations.
+    state = {**state, 'ice_history': merge_ice_history(market_ice_service.history(), state.get('ice_history', []))}
     result = build_health(state)
+    current = now()
+    today = current.date().isoformat()
+    calendar = [r['date'] for r in normalize_bars(state.get('bars', {}).get('sh000001', []))
+                if not r.get('provisional') and (r['date'] < today or (r['date'] == today and current.time() >= dt.time(15, 30)))]
+    # The page opens/polls with live=1; plain GET remains an offline snapshot read.
+    if refresh_live:
+        market_ice_service.ensure(calendar, result['ice_history'], state.get('ice_sample') or state.get('breadth') or {})
+    result['ice_coverage'] = market_ice_service.status(calendar, result['ice_history'])
     result["fusion"] = build_fusion(result, market_health_cross_service.read_cached(result["as_of"]), state.get("bars",{}).get("sh000001",[]))
     result["generated_at"] = now().isoformat()
     result["age_days"] = (now().date()-dt.date.fromisoformat(result["as_of"])).days if result["as_of"] else None
@@ -294,24 +314,44 @@ def fetch_breadth(rows, as_of, progress, sample_symbols=None, calendar=None, int
     by_symbol = {r.get("symbol"): r for r in rows}
     targets = ([by_symbol[s] for s in sample_symbols if s in by_symbol] if sample_symbols else pick_sample(rows))
     symbols = sample_symbols or [r["symbol"] for r in targets]
-    histories, failed = {}, 0
+    dates = sorted({d for d in (calendar or []) if d <= as_of})
+    closed_date = dates[-2] if intraday and len(dates) > 1 and dates[-1] == as_of else as_of
+    histories, ice_inputs, failed = {}, {}, 0
+
+    def fetch(row):
+        from data_store.connection import close_conn
+
+        symbol = row["symbol"]
+        try:
+            end = (dt.date.fromisoformat(as_of)-dt.timedelta(days=1)).isoformat() if intraday else as_of
+            bars = price_bars_repo.read('sina', symbol, end=end, limit=300)
+            if len(bars) < 254 or bars[-1]['date'] < closed_date:
+                try:
+                    data = _fetch_json("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                                       f"CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen=300")
+                    price_bars_repo.store('sina', symbol, '1d', normalize_bars(data), end=end)
+                except (httpx.HTTPError, OSError, ValueError):
+                    pass  # Cached closes remain usable for historical ice observations.
+                bars = price_bars_repo.read('sina', symbol, end=end, limit=300)
+            if intraday and all((number(row.get(k)) or 0) > 0 for k in ('volume', 'open', 'trade')):
+                quote = {'date': as_of, 'close': row['trade'], 'open': row['open'],
+                         'high': row.get('high'), 'low': row.get('low')}
+                price_bars_repo.store('sina_breadth_quote', symbol, '1d', [quote], provisional_day=as_of)
+                bars += price_bars_repo.read('sina_breadth_quote', symbol, start=as_of, end=as_of, live_day=as_of)
+            return symbol, bars
+        finally:
+            close_conn()
+
     # 小批次提交；源不可用时不把400个请求全部排队。
     with ThreadPoolExecutor(max_workers=6) as pool:
         for start in range(0, len(targets), 18):
-            def fetch(row):
-                symbol = row["symbol"]
-                data = _fetch_json("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-                                   f"CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen=300")
-                bars = [r for r in normalize_bars(data) if r["date"] < as_of] if intraday else data
-                if intraday and (number(row.get("volume")) or 0) > 0 and (number(row.get("open")) or 0) > 0:
-                    bars.append({"date":as_of,"close":number(row.get("trade")),
-                                 "open":number(row.get("open")),"high":number(row.get("high")),"low":number(row.get("low")),"volume":None})
-                return symbol, bars
             futures = [pool.submit(fetch, row) for row in targets[start:start+18]]
             for future in as_completed(futures):
                 try:
                     symbol, data = future.result()
                     bars = [r for r in normalize_bars(data) if r["date"] <= as_of]
+                    if len(bars) >= 20:
+                        ice_inputs[symbol] = bars
                     if len(bars) >= 250 and bars[-1]["date"] == as_of:
                         histories[symbol] = bars
                     else:
@@ -319,20 +359,23 @@ def fetch_breadth(rows, as_of, progress, sample_symbols=None, calendar=None, int
                 except Exception:
                     failed += 1
             progress(len(histories)+failed, len(targets))
-            if failed >= 18 and not histories:
+            if failed >= 18 and not ice_inputs:
                 break
-    if len(histories) < 200:
-        raise ValueError(f"同日完整K线仅{len(histories)}只，未达200只；保留原广度及其日期")
-    dates = sorted({d for d in (calendar or []) if d <= as_of})[-5:]
     if not dates:
-        # 无基准指数时不假定自然日是交易日；以最完整个股序列提供候选日。
-        dates = [r["date"] for r in max(histories.values(), key=len)[-5:]]
-    observations = breadth_history(histories, dates)
-    if not observations or observations[-1]["as_of"] != as_of or observations[-1]["sample"] < 200:
-        raise ValueError("连续五日完整同组样本不足200只，保留原广度及其日期")
+        dates = [r['date'] for r in max((histories or ice_inputs).values(), key=len, default=[])]
+    ice = ice_history(ice_inputs, dates, sample_as_of=as_of, calculated_at=now().isoformat(),
+                      method='sina_unadjusted_daily_ma20', intraday=intraday, calendar=dates)
+    for row in ice:
+        row['source'] = '新浪未复权日线与盘中快照 · SQLite' if row['provisional'] else '新浪未复权日线 · SQLite'
+    observations = breadth_history(histories, dates[-5:]) if len(histories) >= 200 and len(dates) >= 5 else []
+    if not observations or observations[-1]['as_of'] != as_of or observations[-1]['sample'] < 200:
+        warning = '连续五日完整同组样本不足200只或窗口不完整，保留原广度及其日期'
+        if ice:
+            return {'ice_history': ice, 'warning': warning}
+        raise ValueError(warning)
     result = dict(observations[-1])
     result.update(requested=len(symbols), failed=failed+len(symbols)-len(targets), sample_symbols=symbols,
-                  observations=observations,
+                  observations=observations, ice_history=ice,
                   note="首次按市值8层、每层最多50只沪深A股抽样，后续保留样本组；用300根真实历史回算最近5个交易日，窗口固定成分和逐指标分母。新浪未复权日线，除权可能影响均线和回撤。")
     return result
 
@@ -346,7 +389,7 @@ def merge_indices(previous, incoming):
         old = normalize_bars(previous.get(symbol, []))
         if len(rows) >= 250 and (not old or rows[-1]["date"] >= old[-1]["date"]):
             merged = {r["date"]: r for r in old+rows}
-            result[symbol] = sorted(merged.values(), key=lambda r: r["date"])[-1023:]
+            result[symbol] = sorted(merged.values(), key=lambda r: r["date"])
             accepted += 1
     return result, accepted
 
@@ -428,12 +471,26 @@ def start_refresh(mode, jobs, index_loader):
                         calendar = [r["date"] for r in normalize_bars(state["bars"].get("sh000001",[])) if r["date"] <= after]
                         if intraday and after not in calendar:
                             calendar.append(after)
-                        breadth = fetch_breadth(rows, after, lambda n, total: jobs.update(job_id, progress=35+round(60*n/max(total, 1))), state.get("breadth", {}).get("sample_symbols"), calendar, intraday=intraday)
+                        sample = state.get('ice_sample') or state.get('breadth') or {}
+                        sample_symbols = sample.get('sample_symbols')
+                        if not sample_symbols:
+                            sample_symbols = [r['symbol'] for r in pick_sample(rows)]
+                        selected_on = sample.get('sample_as_of') or sample.get('as_of') or after
+                        state['ice_sample'] = {'sample_symbols': sample_symbols, 'sample_as_of': selected_on}
+                        breadth = fetch_breadth(rows, after, lambda n, total: jobs.update(job_id, progress=35+round(60*n/max(total, 1))), sample_symbols, calendar, intraday=intraday)
+                        ice = breadth.pop('ice_history', [])
+                        for point in ice:
+                            point['sample_as_of'] = selected_on
+                        state['ice_history'] = merge_ice_history(state.get('ice_history', []), [p for p in ice if not p['provisional']])
+                        if intraday:
+                            live['ice_history'] = [p for p in ice if p['provisional']]
+                            kv_repo.set_(NAMESPACE, 'intraday', live)
+                        if 'warning' in breadth:
+                            raise ValueError(breadth['warning'])
                         breadth.update(captured_at=now().isoformat(),sample_started_at=started,provisional=intraday)
-                        observations = {r["as_of"]: r for r in state.get("observations", [])}
-                        for observation in breadth.pop("observations",[]):
-                            observations[observation["as_of"]] = observation
-                        observations = sorted(observations.values(), key=lambda r: r["as_of"])[-120:]
+                        batch = [{**r, 'provisional': intraday and r['as_of'] == after}
+                                 for r in breadth.pop('observations', [])]
+                        observations = merge_observations(state.get('observations', []), batch)
                         if intraday:
                             live.update(breadth=breadth,observations=observations,captured_at=now().isoformat())
                             kv_repo.set_(NAMESPACE,"intraday",live)

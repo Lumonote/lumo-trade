@@ -17,7 +17,7 @@ from analysis.market_capital import capital_report, etf_predecessors, etf_rows, 
 from analysis.market_health import number
 from analysis.market_health_fusion import iso, margin_metrics
 from data_store import calendar_repo, kv_repo, quant_radar_repo, tushare_client
-from data_store.connection import close_conn
+from data_store.connection import close_conn, get_conn
 from webui.services.market_health_service import now, read_baseline
 
 NAMESPACE = "market_capital"
@@ -26,6 +26,7 @@ BASELINE = Path(__file__).resolve().parents[2] / "config/market_capital_baseline
 _locks = {key: threading.Lock() for key in ("financing", "participants")}
 PARTICIPANTS = {"main", "elg", "lg", "md", "sm", "institution", "etf", "national", "quant"}
 DAILY_SOURCES = {"flows": "moneyflow_dc", "institutions": "top_inst"}
+PARTICIPANTS_SEED = "seed:participants:v1"
 NATIONAL_NAMES = ("中央汇金投资有限责任公司", "中央汇金资产管理有限责任公司", "中国证券金融股份有限公司", "中国国新控股有限责任公司", "中国诚通控股集团有限公司")
 
 
@@ -68,13 +69,6 @@ def _baseline():
         return {}
 
 
-def bundle(kind):
-    saved = _read(kind)
-    if saved:
-        return saved
-    return _baseline().get(kind) or {}
-
-
 def _group_days(rows):
     days = defaultdict(list)
     for row in rows:
@@ -84,14 +78,45 @@ def _group_days(rows):
     return days
 
 
-@lru_cache(maxsize=1)
-def _baseline_days():
-    base = _baseline().get("participants") or {}
-    return {key: _group_days(base.get(key, [])) for key in DAILY_SOURCES}
+def _seed_participants():
+    if _read(PARTICIPANTS_SEED) is not None:
+        return
+    data = _baseline().get("participants")
+    if not data:
+        return
+    # Keep the shipped partitions below both live partitions and old full snapshots.
+    # A failed first install must be retryable without publishing a partial catalog.
+    conn = get_conn()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if _read(PARTICIPANTS_SEED) is not None:
+            return
+        for key, method in DAILY_SOURCES.items():
+            days = _group_days(data.get(key, []))
+            for day in data.get(f"{key}_days", []):
+                if day and iso(day) == day:
+                    days.setdefault(day, [])
+            for day, rows in days.items():
+                kv_repo.set_(NAMESPACE, f"seed:{method}:{day}", rows)
+        partitioned = {*DAILY_SOURCES, *(f"{key}_days" for key in DAILY_SOURCES)}
+        kv_repo.seed_raw(NAMESPACE, "participants", lambda: {k: v for k, v in data.items() if k not in partitioned})
+        kv_repo.set_(NAMESPACE, PARTICIPANTS_SEED, True)
 
 
-def _daily_keys(method):
-    prefix = f"raw:{method}:"
+def bundle(kind, *, include_daily=False):
+    if kind == "participants":
+        _seed_participants()
+    saved = _read(kind)
+    if saved is None and kind == "financing" and (seed := _baseline().get(kind)):
+        raw = kv_repo.seed_raw(NAMESPACE, kind, lambda: seed)
+        saved = json.loads(raw) if raw else None
+    if saved and kind == "participants" and include_daily:
+        return _range_evidence(saved, "0000", "9999", DAILY_SOURCES)
+    return saved or {}
+
+
+def _daily_keys(method, provenance="raw"):
+    prefix = f"{provenance}:{method}:"
     return {key[len(prefix):] for key in kv_repo.range_keys(NAMESPACE, prefix + '0000', prefix + '9999')}
 
 
@@ -115,13 +140,16 @@ def _range_evidence(data, start, end, keys):
     for key in keys:
         method = DAILY_SOURCES[key]
         prefix = f"raw:{method}:"
-        base = _baseline_days()[key]
-        legacy = _group_days(data.get(key, [])) if data is not _baseline().get('participants') else {}
-        known = _daily_keys(method) | base.keys() | legacy.keys()
+        seed_prefix = f"seed:{method}:"
+        base = _daily_keys(method, "seed")
+        legacy = _group_days(data.get(key, []))
+        known = _daily_keys(method) | base | legacy.keys()
         dates.update(known)
         bounds[key] = (min(known, default=None), max(known, default=None))
-        days = {d: legacy.get(d, base.get(d, [])) for d in (base.keys() | legacy.keys()) if start and end and start <= d <= end}
+        days = {}
         if start and end:
+            days.update((k[len(seed_prefix):], rows) for k, rows in kv_repo.range_items(NAMESPACE, seed_prefix + start, seed_prefix + end))
+            days.update((d, rows) for d, rows in legacy.items() if start <= d <= end)
             days.update((k[len(prefix):], rows) for k, rows in kv_repo.range_items(NAMESPACE, prefix + start, prefix + end))
         result[key] = [row for d in sorted(days) for row in days[d]]
         result[key + '_days'] = sorted(days)
@@ -537,7 +565,8 @@ def collect(kind, progress=lambda message: None):
         header = {k: v for k, v in result.items() if k not in DAILY_SOURCES}
         for source in header['sources']:
             if source['key'] in DAILY_SOURCES:
-                source['as_of'] = max(_daily_keys(DAILY_SOURCES[source['key']]), default=source['as_of'])
+                method = DAILY_SOURCES[source['key']]
+                source['as_of'] = max(_daily_keys(method) | _daily_keys(method, "seed"), default=source['as_of'])
                 if source['key'] == 'flows':
                     header['flow_as_of'] = source['as_of']
         kv_repo.set_(NAMESPACE, kind, header)
@@ -569,20 +598,23 @@ def start_refresh(kind, jobs, *, participant="", start="", end=""):
                 raise RefreshConflict("另一个资金研究区间或默认刷新正在执行，请在完成后重试")
             return active
         def worker(job_id, params):
-            jobs.update(job_id, status="running", started_at=now().isoformat(), progress=1)
+            started_at = now().isoformat()
             count = 0
             warned = False
-            def progress(message, *, percent=None):
+            def progress(message=None, *, percent=None):
                 nonlocal count, warned
                 count += 1
                 try:
-                    jobs.update(job_id, progress=min(95, count) if percent is None else percent)
-                    jobs.append_log(job_id, message)
+                    jobs.update(job_id, status="running", started_at=started_at,
+                                progress=min(95, count) if percent is None else percent)
+                    if message is not None:
+                        jobs.append_log(job_id, message)
                 except sqlite3.Error:
                     if not warned:
                         logger.warning("研究任务 %s 未能写入进度，继续采集", job_id, exc_info=True)
                         warned = True
             try:
+                progress()
                 if params:
                     result = collect_etf_range(params["start"], params["end"],
                                                lambda message, done, total: progress(message, percent=1 + 94 * done // total))

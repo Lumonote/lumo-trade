@@ -19,6 +19,19 @@ def get_raw(namespace: str, key: str) -> Optional[bytes]:
     return row[0] if row else None
 
 
+def seed_raw(namespace, key, loader):
+    """Install a bundled, versioned seed on first use. A concurrent writer wins."""
+    raw = get_raw(namespace, key)
+    if raw is None:
+        payload = loader()
+        if payload:
+            get_conn().execute('''INSERT INTO kv_cache(namespace,key,payload,updated_at,ttl_seconds)
+                VALUES(?,?,?,?,0) ON CONFLICT(namespace,key) DO NOTHING''',
+                (namespace, key, json.dumps(payload, ensure_ascii=False), _dt.datetime.now().isoformat(timespec='seconds')))
+            raw = get_raw(namespace, key)
+    return raw
+
+
 def get(namespace: str, key: str) -> Optional[Tuple[Any, float]]:
     row = get_conn().execute(
         "SELECT payload, updated_at FROM kv_cache WHERE namespace=? AND key=?",

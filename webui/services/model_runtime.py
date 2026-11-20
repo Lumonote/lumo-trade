@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import math
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+from analysis.operation_models import analyze_operations
 
 
 @dataclass
@@ -82,6 +86,31 @@ def _load_modelscope_artifact(
     return loader_cls.from_pretrained(str(downloaded_path))
 
 
+def create_prediction_chart(history, predicted, actual):
+    """Plotly-compatible traces; each series keeps its own observed or model clock."""
+    traces = []
+    for key, label, rows in [('history', '输入历史', history), ('prediction', '模型预测', predicted), ('actual', '同期实测', actual)]:
+        stamps = [r['timestamp'] for r in rows]
+        traces.append({'type': 'candlestick', 'meta': key, 'name': f'{label} · {len(rows)} 根', 'x': stamps,
+                       **{field: [r[field] for r in rows] for field in ('open', 'high', 'low', 'close')},
+                       'customdata': [r['amount'] for r in rows]})
+        traces.append({'type': 'bar', 'meta': key, 'name': f'{label}量', 'x': stamps, 'yaxis': 'y2',
+                       'y': [r['volume'] for r in rows]})
+
+    daily = all(r['timestamp'][11:19] == '00:00:00' for r in history + actual)
+    period = 'daily' if daily else 'intraday'
+    def structure(observed):
+        bars = [dict(r, date=r['timestamp'][:10] if daily else r['timestamp'].replace('T', ' ')) for r in observed]
+        return analyze_operations(bars, period=period)
+
+    # No held-out prices, waves or stage labels may enter the model path.
+    layout = {'title': f'历史 {len(history)} 根 · 预测 {len(predicted)} 根 · 实测 {len(actual)} 根',
+              'xaxis': {'type': 'date', 'rangeslider': {'visible': False}}, 'yaxis': {'domain': [.28, 1]},
+              'yaxis2': {'domain': [0, .21], 'title': '量'}, 'barmode': 'group',
+              'meta': {'period': period, 'history': structure(history), 'actual': structure(history + actual)}}
+    return json.dumps({'data': traces, 'layout': layout}, ensure_ascii=False, allow_nan=False)
+
+
 def run_prediction_payload(data: dict[str, Any], context: ModelRuntimeContext) -> tuple[dict[str, Any], int]:
     try:
         pd = context.pandas
@@ -95,6 +124,8 @@ def run_prediction_payload(data: dict[str, Any], context: ModelRuntimeContext) -
 
         if not file_path:
             return {"error": "File path cannot be empty"}, 400
+        if lookback < 1 or pred_len < 1:
+            return {"error": "Lookback and prediction length must be positive"}, 400
 
         df, error = context.load_data_file(file_path)
         if error:
@@ -104,44 +135,30 @@ def run_prediction_payload(data: dict[str, Any], context: ModelRuntimeContext) -
         if not context.model_available() or predictor is None:
             return {"error": "Kronos model not loaded, please load model first"}, 400
 
-        required_cols = ["open", "high", "low", "close"]
-        if "volume" in df.columns:
-            required_cols.append("volume")
-
         start_date = data.get("start_date")
+        window = df
         if start_date:
-            start_dt = pd.to_datetime(start_date)
-            time_range_df = df[df["timestamps"] >= start_dt]
-            if len(time_range_df) < lookback + pred_len:
-                return {
-                    "error": (
-                        f"Insufficient data from start time {start_dt.strftime('%Y-%m-%d %H:%M')}, "
-                        f"need at least {lookback + pred_len} data points, currently only "
-                        f"{len(time_range_df)} available"
-                    )
-                }, 400
+            try:
+                start = pd.Timestamp(start_date)
+                window = df[df['timestamps'] >= start]
+            except (TypeError, ValueError):
+                return {"error": "Invalid prediction start timestamp"}, 400
+            if window.empty or window['timestamps'].iloc[0] != start:
+                return {"error": "所选起点已不在当前行情序列，请重新载入行情"}, 400
+        if len(window) < lookback + pred_len:
+            return {"error": f"Insufficient data: need {lookback + pred_len} rows, have {len(window)}"}, 400
 
-            x_df = time_range_df.iloc[:lookback][required_cols]
-            x_timestamp = time_range_df.iloc[:lookback]["timestamps"]
-            y_timestamp = time_range_df.iloc[lookback:lookback + pred_len]["timestamps"]
-            start_timestamp = time_range_df["timestamps"].iloc[0]
-            end_timestamp = time_range_df["timestamps"].iloc[lookback + pred_len - 1]
-            time_span = end_timestamp - start_timestamp
-            prediction_type = (
-                "Kronos model prediction (within selected window: first "
-                f"{lookback} data points for prediction, last {pred_len} data points "
-                f"for comparison, time span: {time_span})"
-            )
-        else:
-            x_df = df.iloc[:lookback][required_cols]
-            x_timestamp = df.iloc[:lookback]["timestamps"]
-            y_timestamp = df.iloc[lookback:lookback + pred_len]["timestamps"]
-            prediction_type = "Kronos model prediction (latest data)"
-
-        if isinstance(x_timestamp, pd.DatetimeIndex):
-            x_timestamp = pd.Series(x_timestamp, name="timestamps")
-        if isinstance(y_timestamp, pd.DatetimeIndex):
-            y_timestamp = pd.Series(y_timestamp, name="timestamps")
+        history = window.iloc[:lookback]
+        actual = window.iloc[lookback:lookback + pred_len]
+        x_timestamp, y_timestamp = history['timestamps'], actual['timestamps']
+        columns = ['open', 'high', 'low', 'close']
+        has_volume = 'volume' in history and history['volume'].notna().all()
+        if has_volume:
+            columns.append('volume')
+            if 'amount' in history and history['amount'].notna().all():
+                columns.append('amount')
+        x_df = history[columns].copy()
+        prediction_type = f"历史回放：{lookback} 根输入，{pred_len} 根预测与实测对照"
 
         try:
             pred_df = predictor.predict(
@@ -156,86 +173,25 @@ def run_prediction_payload(data: dict[str, Any], context: ModelRuntimeContext) -
         except Exception as exc:
             return {"error": f"Kronos model prediction failed: {exc}"}, 500
 
-        actual_data = []
-        actual_df = None
-        if start_date:
-            start_dt = pd.to_datetime(start_date)
-            time_range_df = df[df["timestamps"] >= start_dt]
-            if len(time_range_df) >= lookback + pred_len:
-                actual_df = time_range_df.iloc[lookback:lookback + pred_len]
-        elif len(df) >= lookback + pred_len:
-            actual_df = df.iloc[lookback:lookback + pred_len]
+        if len(pred_df) != len(y_timestamp):
+            return {"error": "Model output length differs from the prediction window"}, 500
 
-        if actual_df is not None:
-            for _index, row in actual_df.iterrows():
-                actual_data.append(
-                    {
-                        "timestamp": row["timestamps"].isoformat(),
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
-                        "volume": float(row["volume"]) if "volume" in row else 0,
-                        "amount": float(row["amount"]) if "amount" in row else 0,
-                    }
-                )
+        def records(frame, stamps, *, model=False):
+            rows = []
+            for bar, stamp in zip(frame.to_dict('records'), stamps):
+                row = {k: float(bar[k]) for k in ('open', 'high', 'low', 'close')}
+                if not all(math.isfinite(v) for v in row.values()):
+                    raise ValueError('Non-finite OHLC in prediction window')
+                for k in ('volume', 'amount'):
+                    v = bar.get(k)
+                    row[k] = float(v) if (not model or k in columns) and pd.notna(v) and math.isfinite(v) and v >= 0 else None
+                rows.append({'timestamp': stamp.isoformat(), **row})
+            return rows
 
-        if start_date:
-            start_dt = pd.to_datetime(start_date)
-            mask = df["timestamps"] >= start_dt
-            historical_start_idx = df[mask].index[0] if len(df[mask]) > 0 else 0
-        else:
-            historical_start_idx = 0
-
-        chart_json = context.create_prediction_chart(
-            df,
-            pred_df,
-            lookback,
-            pred_len,
-            actual_df,
-            historical_start_idx,
-        )
-
-        if "timestamps" in df.columns:
-            if start_date:
-                start_dt = pd.to_datetime(start_date)
-                time_range_df = df[df["timestamps"] >= start_dt]
-                if len(time_range_df) >= lookback:
-                    last_timestamp = time_range_df["timestamps"].iloc[lookback - 1]
-                    time_diff = df["timestamps"].iloc[1] - df["timestamps"].iloc[0]
-                    future_timestamps = pd.date_range(
-                        start=last_timestamp + time_diff,
-                        periods=pred_len,
-                        freq=time_diff,
-                    )
-                else:
-                    future_timestamps = []
-            else:
-                last_timestamp = df["timestamps"].iloc[-1]
-                time_diff = df["timestamps"].iloc[1] - df["timestamps"].iloc[0]
-                future_timestamps = pd.date_range(
-                    start=last_timestamp + time_diff,
-                    periods=pred_len,
-                    freq=time_diff,
-                )
-        else:
-            future_timestamps = range(len(df), len(df) + pred_len)
-
-        prediction_results = []
-        for index, (_row_index, row) in enumerate(pred_df.iterrows()):
-            prediction_results.append(
-                {
-                    "timestamp": future_timestamps[index].isoformat()
-                    if index < len(future_timestamps)
-                    else f"T{index}",
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row["volume"]) if "volume" in row else 0,
-                    "amount": float(row["amount"]) if "amount" in row else 0,
-                }
-            )
+        actual_data = records(actual, actual['timestamps'])
+        prediction_results = records(pred_df, y_timestamp, model=True)
+        historical_data = records(history, x_timestamp)
+        chart_json = context.create_prediction_chart(historical_data, prediction_results, actual_data)
 
         try:
             context.save_prediction_results(
@@ -244,13 +200,14 @@ def run_prediction_payload(data: dict[str, Any], context: ModelRuntimeContext) -
                 prediction_results=prediction_results,
                 actual_data=actual_data,
                 input_data=x_df,
+                historical_data=historical_data,
                 prediction_params={
                     "lookback": lookback,
                     "pred_len": pred_len,
                     "temperature": temperature,
                     "top_p": top_p,
                     "sample_count": sample_count,
-                    "start_date": start_date if start_date else "latest",
+                    "start_date": x_timestamp.iloc[0].isoformat(),
                 },
             )
         except Exception as exc:

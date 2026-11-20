@@ -5,9 +5,8 @@
   const finite = v => v != null && Number.isFinite(Number(v));
   const fmt = (v, n=2) => finite(v) ? Number(v).toFixed(n) : "—";
   const pct = v => finite(v) ? `${Number(v)>0?"+":""}${fmt(v)}%` : "—";
-  const colors = {advance:"rgba(196,61,54,.06)", decline:"rgba(25,135,84,.07)", base:"rgba(47,111,221,.05)", top:"rgba(168,109,0,.07)"};
   const sectorColors = {leading:"#c43d36", improving:"#2f6fdd", weakening:"#a86d00", lagging:"#198754", unknown:"#96a3b4"};
-  const plans = new Map(), pending = new Map(), charts = new Map();
+  const plans = new Map(), pending = new Map();
   let activeCode = "", pulseSignature = "", selectedSector = "", selectedState = "all";
   const sectorKey = r => `${r.sector_type || ""}:${r.sector}`;
 
@@ -25,85 +24,45 @@
     return promise;
   }
 
-  // 小图/网络库不可用时仍能展示真实OHLC，绝不以涨跌幅合成假K线。
-  function candleSvg(payload, {mini=false, compact=false, levels=null, limit=60}={}) {
-    const rows = (payload.records || []).filter(r => [r.open,r.high,r.low,r.close].every(finite)).slice(-Math.min(limit,compact?45:limit));
-    if (!rows.length) return '<div class="op-error">暂无有效K线</div>';
-    const op = payload.operation || {}, l = levels || op.levels || {};
-    const w=mini?300:compact?480:920, h=mini?120:370, left=mini?3:14, right=mini?8:compact?95:116, top=mini?6:25, bottom=mini?12:55;
-    const prices = rows.flatMap(r => [Number(r.low),Number(r.high)]);
-    if (!mini) [l.stop_loss,l.entry_low,l.entry_high,l.target1].filter(finite).forEach(v=>prices.push(Number(v)));
-    let low=Math.min(...prices), high=Math.max(...prices), gap=(high-low)*.08 || high*.01;
-    low-=gap; high+=gap;
-    const y = v => top+(high-Number(v))/(high-low)*(h-top-bottom), dx=(w-left-right)/rows.length, x=i=>left+(i+.5)*dx;
-    let body="";
-    if (!mini && finite(l.entry_low) && finite(l.entry_high)) body+=`<rect x="${left}" y="${y(l.entry_high)}" width="${w-left-right}" height="${Math.max(1,y(l.entry_low)-y(l.entry_high))}" fill="rgba(47,111,221,.13)"/>`;
-    if (!mini) for(let i=0;i<4;i++){ const value=low+(high-low)*i/3; body+=`<path d="M${left},${y(value)} H${w-right}" stroke="#eef2f6"/><text x="${w-right+8}" y="${y(value)+4}" fill="#96a3b4" font-size="11">${fmt(value)}</text>`; }
-    rows.forEach((r,i)=>{
-      const color=Number(r.close)>=Number(r.open)?"#c43d36":"#198754", yy=Math.min(y(r.open),y(r.close)), height=Math.max(1,Math.abs(y(r.open)-y(r.close)));
-      body+=`<g><title>${esc(r.date)} 开${fmt(r.open)} 高${fmt(r.high)} 低${fmt(r.low)} 收${fmt(r.close)}</title><path d="M${x(i)},${y(r.high)} V${y(r.low)}" stroke="${color}"/><rect x="${x(i)-dx*.3}" y="${yy}" width="${Math.max(.7,dx*.6)}" height="${height}" fill="${color}"/></g>`;
-    });
-    if (!mini) {
-      const dates=new Map(rows.map((r,i)=>[r.date,i]));
-      const points=(op.fractals||[]).filter(p=>dates.has(p.date));
-      if(points.length) body+=`<polyline points="${points.map(p=>`${x(dates.get(p.date))},${y(p.price)}`).join(" ")}" stroke="#6f55d8" stroke-width="1.5" opacity=".6" fill="none"/>`;
-      [[l.entry_high,"触发区上沿","#2f6fdd"],[l.stop_loss,"结构失效","#198754"],[l.target1,"第一目标区","#a86d00"]].forEach(([price,label,color])=>{
-        if(!finite(price))return;
-        body+=`<path d="M${left},${y(price)} H${w-right}" stroke="${color}" stroke-dasharray="5 4"/><text x="${w-right+7}" y="${y(price)-5}" fill="${color}" font-size="12">${label}</text><text x="${w-right+7}" y="${y(price)+10}" fill="${color}" font-size="12">${fmt(price)}</text>`;
-      });
-      (op.events||[]).filter(e=>dates.has(e.date)).slice(-7).forEach(e=>{
-        const xx=x(dates.get(e.date)), yy=y(e.price), color=e.kind==="risk"?"#198754":"#2f6fdd";
-        body+=`<circle cx="${xx}" cy="${yy}" r="3" fill="${color}"/><text x="${xx}" y="${yy+(e.kind==="risk"?-10:18)}" text-anchor="middle" font-size="11" fill="${color}">${esc(e.label)}</text>`;
-      });
-      body+=`<text x="${left}" y="${h-12}" fill="#96a3b4" font-size="11">${esc(rows[0].date)}</text><text x="${w-right}" y="${h-12}" text-anchor="end" fill="#96a3b4" font-size="11">${esc(rows.at(-1).date)}</text>`;
-    }
-    return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(payload.name||payload.code||"行情")} ${mini?"近期K线":"K线、结构触发区与失效线"}">${body}</svg>`;
+  function candleSvg(payload, {limit}) {
+    const rows=(payload.records || []).slice(-limit);
+    const valid=rows.filter(r=>r.low>0 && r.low<=Math.min(r.open,r.close) && r.high>=Math.max(r.open,r.close));
+    if (!valid.length) return '<span class="op-error">暂无完整K线</span>';
+    const lo=Math.min(...valid.map(r=>r.low)), hi=Math.max(...valid.map(r=>r.high));
+    const y=v=>105-(v-lo)/(hi-lo || 1)*92, dx=290/rows.length;
+    return `<svg viewBox="0 0 300 115" role="img" aria-label="${esc(payload.name || payload.code)} 近期K线">${valid.map(r=>{
+      const x=4+(rows.indexOf(r)+.5)*dx, color=r.close>=r.open?'#c43d36':'#198754';
+      return `<g><title>${esc(r.date)} · 开 ${fmt(r.open)} 高 ${fmt(r.high)} 低 ${fmt(r.low)} 收 ${fmt(r.close)} 量 ${fmt(r.volume)}</title><rect x="${x-dx/2}" width="${dx}" height="115" fill="transparent"/><path d="M${x} ${y(r.high)}V${y(r.low)}" stroke="${color}"/><rect x="${x-.3*dx}" y="${y(Math.max(r.open,r.close))}" width="${.6*dx}" height="${Math.max(1,Math.abs(y(r.open)-y(r.close)))}" fill="${color}"/></g>`;
+    }).join('')}</svg>`;
   }
 
-  function drawChart(element, payload, options={}) {
-    if (!element) return;
-    window.LumoPanic?.mount(element.parentElement,payload.panic,{detail:true,title:"恐慌指标"});
-    for (const old of charts.keys()) if (!old.isConnected) { resizeObserver.unobserve(old); charts.delete(old); }
-    const operation=payload.operation||{}, levels=options.levels||operation.levels||{}, all=payload.records||[], rows=all.slice(-(options.limit||120));
-    charts.set(element,{payload,options});
-    if(!rows.length){element.innerHTML='<div class="op-error">暂无K线数据</div>';return;}
-    if(!window.Plotly || !element.getBoundingClientRect().width){element.innerHTML=candleSvg(payload,{levels,compact:element.getBoundingClientRect().width<650,limit:options.limit||120});return;}
-    const traces=buildKlineTraces(rows,options.mode||"modal").filter(t=>!/^MA(5|10)$/.test(t.name));
-    const layout=buildKlineLayout(payload,rows,{mode:options.mode||"modal"});
-    layout.shapes=[]; layout.annotations=[]; layout.margin={l:20,r:116,t:45,b:30};
-    layout.legend={orientation:"h",x:0,y:1.12,font:{size:10,color:"#6b778a"}};
-    layout.modebar={orientation:"h",bgcolor:"rgba(255,255,255,.8)",color:"#6b778a"};
-    layout.xaxis.rangeselector=undefined; layout.xaxis.rangeslider={visible:false};
-    layout.height=options.height||380; layout.uirevision=`${payload.code||payload.name||"chart"}:${options.model||"default"}`;
-    const first=rows[0].date, last=rows.at(-1).date, dates=new Set(rows.map(r=>r.date));
-    const stages=(operation.stage_history||[]).filter(s=>dates.has(s.date));
-    let block=null;
-    for(const s of stages){
-      if(!block||block.key!==s.key){if(block)layout.shapes.push({type:"rect",xref:"x",yref:"paper",x0:block.start,x1:block.end,y0:.28,y1:1,line:{width:0},fillcolor:colors[block.key]||"transparent",layer:"below"});block={key:s.key,start:s.date,end:s.date};}
-      else block.end=s.date;
-    }
-    if(block)layout.shapes.push({type:"rect",xref:"x",yref:"paper",x0:block.start,x1:block.end,y0:.28,y1:1,line:{width:0},fillcolor:colors[block.key]||"transparent",layer:"below"});
-    for(const z of operation.zones||[]) if(z.to>=first && z.from<=last) layout.shapes.push({type:"rect",xref:"x",yref:"y",x0:z.from<first?first:z.from,x1:z.to,y0:z.low,y1:z.high,line:{color:"#96a3b4",width:1,dash:"dot"},fillcolor:"rgba(150,163,180,.04)",layer:"below"});
-    if(finite(levels.entry_low)&&finite(levels.entry_high))layout.shapes.push({type:"rect",xref:"paper",yref:"y",x0:.72,x1:1,y0:levels.entry_low,y1:levels.entry_high,line:{width:0},fillcolor:"rgba(47,111,221,.13)",layer:"below"});
-    [[levels.entry_high,"触发区上沿","#2f6fdd"],[levels.stop_loss,options.locked?"锁定失效线":"结构失效线","#198754"],[levels.target1,"第一目标区","#a86d00"]].forEach(([v,label,color])=>{
-      if(!finite(v))return;
-      layout.shapes.push({type:"line",xref:"paper",yref:"y",x0:.58,x1:1,y0:v,y1:v,line:{color,width:1.5,dash:"dash"}});
-      layout.annotations.push({xref:"paper",yref:"y",x:1.01,y:v,text:`${label}<br><b>${fmt(v)}</b>`,showarrow:false,xanchor:"left",font:{color,size:11},bgcolor:"rgba(255,255,255,.88)"});
-    });
-    const points=(operation.fractals||[]).filter(p=>dates.has(p.date));
-    if(points.length)traces.push({type:"scatter",mode:"lines+markers",x:points.map(p=>p.date),y:points.map(p=>p.price),name:"已确认波段",line:{color:"#6f55d8",width:1.4},marker:{size:4},text:points.map(p=>`${p.kind==="high"?"波段高点":"波段低点"}<br>确认于 ${esc(p.confirmed_at)}`),hovertemplate:"%{x}<br>%{y:.2f}<br>%{text}<extra></extra>"});
-    const events=(operation.events||[]).filter(e=>dates.has(e.date)).slice(-8);
-    for(const kind of ["breakout","risk"]){const subset=events.filter(e=>e.kind===kind);if(subset.length)traces.push({type:"scatter",mode:"markers",x:subset.map(e=>e.date),y:subset.map(e=>e.price),name:kind==="risk"?"支撑破坏":"放量突破",marker:{size:10,symbol:kind==="risk"?"triangle-down":"triangle-up",color:kind==="risk"?"#198754":"#2f6fdd"},text:subset.map(e=>`${e.label} · ${e.confirmed_at} 收盘确认`),hovertemplate:"%{text}<extra></extra>"});}
-    if(operation.provisional)layout.annotations.push({xref:"paper",yref:"paper",x:1,y:1.06,text:"当根K线未收盘 · 信号待确认",showarrow:false,xanchor:"right",font:{size:11,color:"#a86d00"}});
-    const priceExtent=rows.flatMap(r=>[Number(r.low),Number(r.high)]).concat([levels.stop_loss,levels.entry_high,levels.target1].filter(finite).map(Number));
-    const lo=Math.min(...priceExtent), hi=Math.max(...priceExtent), pad=(hi-lo)*.08||hi*.01;
-    layout.yaxis.range=[lo-pad,hi+pad];
-    Plotly.react(element,traces,layout,{responsive:true,displaylogo:false,scrollZoom:true,displayModeBar:options.mode==="modal"?"hover":false,modeBarButtonsToRemove:["lasso2d","select2d"]}).catch(()=>{element.innerHTML=candleSvg(payload,{levels,compact:element.getBoundingClientRect().width<650});});
+  async function planChart(host,plan) {
+    let data=plan.chart || {}, note='';
+    try {
+      const history=await fetchKlineData(plan.code);
+      if (history.records?.length) data=history;
+      else note='完整历史不可用，仅显示计划快照。';
+    } catch { note='完整历史读取失败，仅显示计划快照。'; }
+    if (!host.isConnected || activeCode!==plan.code) return;
+    const sameSource=!!plan.source && plan.source===data.source;
+    if (!sameSource) note+=' 计划与图表的价格来源不一致或未记录，不叠加计划价位。';
+    window.LumoPanic?.mount(host.parentElement,data.panic,{detail:true,title:'恐慌指标'});
+    LumoPriceChart.mount(host,data,{levels:sameSource?plan.levels:{}, locked:!!plan.locked,
+      levelsAt:plan.locked?plan.locked_at:plan.data_as_of,note});
   }
 
-  const resizeObserver=new ResizeObserver(entries=>{for(const entry of entries){const data=charts.get(entry.target);if(data&&entry.contentRect.width>80&&window.Plotly&&entry.target.classList.contains("js-plotly-plot"))Plotly.Plots.resize(entry.target);}});
-  function chartAt(id,payload,options={}){const e=document.getElementById(id);if(e){drawChart(e,payload,options);resizeObserver.observe(e);}}
-  window.renderKlineChart=(id,payload,options={})=>chartAt(id,payload,{...options,height:options.mode==="preview"?320:480});
+  async function indexChart(host,index) {
+    let data=index, note='';
+    try {
+      const health=await fetchJson('/api/market-health');
+      const history=health.indices?.find(r=>r.symbol===index.symbol);
+      if (history?.series?.length && history.series.length>=(index.records || []).length) data=history;
+      else note='显示指数风向已有的同频历史。';
+    } catch { note='大盘历史读取失败，显示指数风向快照。'; }
+    if (!host.isConnected) return;
+    window.LumoPanic?.mount(host.parentElement,index.panic,{detail:true,title:'恐慌指标'});
+    LumoPriceChart.mount(host,data,{note});
+  }
 
   function modelHtml(op, selected) {
     return `<div class="op-models">${(op.models||[]).map(m=>`<div class="op-model ${m.key===selected?"selected":""}"><div class="op-model-title"><b>${esc(m.label)}</b><small>${m.matched}/${m.total} 条件</small></div><div class="op-checks" aria-label="${m.matched}项通过">${m.checks.map(c=>`<i class="${c.passed===true?"pass":""}" title="${esc(c.label)}"></i>`).join("")}</div><div class="op-check-list">${m.checks.map(c=>`<span class="${c.passed===true?"pass":""}">${esc(c.label)}${c.passed==null?" · 数据待补":""}</span>`).join("")}</div></div>`).join("")}</div>`;
@@ -130,7 +89,7 @@
     fetchPlan(code).then(plan=>{
       if(code!==activeCode||!mount.isConnected)return;
       mount.innerHTML=analysisHtml(plan,prefix,risk);mount.dataset.loaded="1";
-      chartAt(`${prefix}Chart`,plan.chart||{}, {levels:plan.levels,locked:plan.locked,height:400});
+      void planChart(mount.querySelector('.op-chart'),plan);
       mount.querySelector("[data-op-risk]")?.addEventListener("click",()=>document.querySelector('[data-suite-tab="risk_control"]')?.click());
       mount.querySelector("[data-op-lock]")?.addEventListener("click",async event=>{
         const button=event.currentTarget;button.disabled=true;
@@ -150,7 +109,6 @@
     const tab=event.target.closest("[data-suite-tab]")?.dataset.suiteTab;
     activeCode=state.currentStockCode||activeCode;
     if(tab==="market_cycle")mountStock("opCycle");if(tab==="risk_control")mountStock("opRisk",true);
-    requestAnimationFrame(()=>{for(const [element,data] of charts)if(element.isConnected&&element.getBoundingClientRect().width>80)drawChart(element,data.payload,data.options);});
   });
 
   let queue=[], workers=0;
@@ -225,7 +183,8 @@
       const index=data.indices[Number(button.dataset.opIndex)], detail=host.querySelector("[data-op-index-detail]");
       detail.hidden=false;
       detail.innerHTML=`<div class="op-head"><b>${esc(index.name)} · ${esc(index.operation?.stage?.label||index.pulse_label)}</b><button class="button secondary compact" type="button" data-op-close-index>收起</button></div><div id="opIndexChart" class="op-chart"></div><p class="op-note">${esc(index.as_of)} · ${esc(index.operation?.stage?.basis||"")} · 指数结构用于环境观察；价位为结构条件与风险情景。</p>`;
-      chartAt("opIndexChart",index,{height:380});
+      const chart=detail.querySelector('#opIndexChart'); chart.textContent='读取指数历史…';
+      void indexChart(chart,index);
       detail.querySelector("[data-op-close-index]").addEventListener("click",()=>{detail.hidden=true;});
     }));
     window.LumoPanic?.mount(host.querySelector("[data-op-market] .panel-header"),data.panic,{title:"大盘恐慌"});

@@ -22,6 +22,30 @@ with market_page() as (page, read, OUT):
         page.locator("#riskDisclaimerAckBtn").click()
     expect(page.locator("#mmMeta")).to_contain_text(report["as_of"], timeout=45000)
     expect(page.locator("#mmQueryButton")).to_be_enabled()
+    # Returning to the snapshot invalidates a pending disclosure replay, even if it succeeds later.
+    held = []
+    page.route('**/macro/cycle?*', lambda route: held.append(route))
+    page.locator('#mmCycleDate').fill('2026-10-26')
+    with page.expect_request(lambda req: '/macro/cycle?' in req.url):
+        page.locator('#mmCycleQuery button[type=submit]').click()
+    page.locator('#mmCycleReset').click()
+    with page.expect_response(lambda resp: '/macro/cycle?' in resp.url):
+        held[0].fulfill(json=read(held[0].request.url))
+    expect(page.locator('#mmCycleDate')).to_have_value(report['as_of'])
+    expect(page.locator('#mmCycle')).to_contain_text('快照 ' + report['as_of'])
+    page.unroute('**/macro/cycle?*')
+    page.locator('#mmCycleStart').fill('2026-09')
+    page.locator('#mmCycleDate').fill('2026-10-26')
+    page.locator('#mmCycleQuery button[type=submit]').click()
+    expect(page.locator('#mmCycle')).to_contain_text('披露日回放 2026-10-26')
+    expect(page.locator('[data-mm-table="cycle-months"] tbody tr')).to_have_count(1)
+    month = page.locator('#mmCyclePlot [data-mh-chart-date="2026-09"]')
+    month.hover()
+    expect(page.locator('#mmCyclePlot .mh-date-label')).to_have_text('2026-09')
+    expect(page.locator('#mmCycleDetail')).to_contain_text('产成品存货同比 待披露')
+    expect(page.locator('#mmCycleDetail')).to_contain_text('披露 2026-09-30')
+    page.locator('#mmCycleReset').click()
+    expect(page.locator('[data-mm-table="cycle-months"] tbody tr')).to_have_count(len(report['cycle']['rows']))
     assert page.locator("#mmMetrics .mm-metric").count() == len(report["metrics"])
     assert page.locator("#mmSectors tbody tr").count() == 31
     assert page.locator("#mmTrend svg").count() == 1

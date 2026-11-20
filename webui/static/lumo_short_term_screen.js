@@ -266,7 +266,18 @@ await import(new URL("./lumo_short_term_scene.js?v="+document.getElementById("st
     }catch(e){$("stLiveState").textContent="盘口连接重试中 · 保留原记录";}
     finally{orderBusy=false;if(!disposed&&!data?.historical)orderTimer=setTimeout(loadOrders,delay);}
   }
-  async function kline(code,buttonElement){buttonElement.disabled=true;const host=$("stKline");host.innerHTML='<p>正在读取实际日K…</p>';try{const value=await api(`/api/stock-kline/${encodeURIComponent(code)}?period=daily&limit=120`);if(drawerState?.kind!=="stock"||drawerState.id!==code)return;const payload=value.data||{},rows=(payload.records||[]).filter(r=>r.close!=null&&(!data.historical||String(r.date||r.day||"").slice(0,10)<=data.today));if(rows.length<2){host.innerHTML='<p>该快照没有足够的可用日线。</p>';return;}const lo=Math.min(...rows.map(r=>Number(r.low||r.close))),hi=Math.max(...rows.map(r=>Number(r.high||r.close))),span=hi-lo||1;host.innerHTML=`<p>来源 ${esc(payload.source||"未给出")} · ${rows.length}根日K · ${esc(rows[0].date||rows[0].day||"")} 至 ${esc(rows.at(-1).date||rows.at(-1).day||"")}</p><svg viewBox="0 0 680 230" role="img" aria-label="${esc(code)}收盘价格走势" style="width:100%;background:#070b11"><path d="${rows.map((r,i)=>`${i?"L":"M"}${20+i*640/(rows.length-1)},${200-(Number(r.close)-lo)/span*180}`).join(" ")}" fill="none" stroke="#a9c6d0" stroke-width="1.6"/><text x="12" y="17" fill="#9aa7b4" font-size="11">${n(hi,2)}</text><text x="12" y="222" fill="#9aa7b4" font-size="11">${n(lo,2)}</text></svg>`;}catch(e){if(drawerState?.id===code)host.innerHTML=`<p class="st-detail-note">${esc(e.message)}</p>`;}finally{buttonElement.disabled=false;}}
+  async function kline(code,buttonElement){
+    const host=$("stKline"), owner=drawerState, end=data.historical ? data.today : null;
+    const current=()=>host.isConnected && drawerState===owner && (!end || end===data.today);
+    const query=new URLSearchParams({period:"daily",limit:"all"});
+    if(end)query.set("end",end);
+    buttonElement.disabled=true;host.textContent="正在读取实际日K…";
+    try{
+      const {data:payload}=await api(`/api/stock-kline/${encodeURIComponent(code)}?${query}`);
+      if(current())window.LumoPriceChart.mount(host,payload);
+    }catch(error){if(current())host.textContent=error.message;}
+    finally{buttonElement.disabled=false;}
+  }
   document.addEventListener("click",event=>{
     const entity=event.target.closest("[data-st-kind],[data-st-copy-kind]");if(entity)open(entity.dataset.stKind||entity.dataset.stCopyKind,entity.dataset.stId||entity.dataset.stCopyId);
     const list=event.target.closest("[data-st-list]");if(list)open("list:"+list.dataset.stList);

@@ -1,13 +1,14 @@
+import pytest
+
 from webui.services.kline_service import StockKlineService
+
+pytestmark = pytest.mark.usefixtures('isolated_kline')
 
 
 class StubKlineService(StockKlineService):
     def __init__(self, records=None):
         super().__init__("unused")
         self.records = records or []
-
-    def load_local_kline(self, stock_code, period, limit):
-        return [], None
 
     def fetch_sina_kline(self, stock_code, period, limit):
         return self.records, ""

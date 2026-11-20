@@ -15,8 +15,10 @@
   const q = new URLSearchParams(location.search);
   const tabs = [...$("mhTabs").querySelectorAll("[data-mh-tab]")].map(b => b.dataset.mhTab);
   let section = tabs.includes(q.get("section")) ? q.get("section") : "overview";
-  let symbol = q.get("index") || "sh000001", windowSize = [60,120,250].includes(Number(q.get("window"))) ? Number(q.get("window")) : 120;
-  let payload = null, envelope = null, pollTimer = null, liveTimer = null, requestId = 0, ruleFilter = "all", ruleSearch = "", horizon = 60, autoStarted = false;
+  let symbol = q.get("index") || "sh000001";
+  const indexWindow = {window:['60','120','250','custom'].includes(q.get('window')) ? q.get('window') : 'all', from:q.get('indexFrom'), to:q.get('indexTo')};
+  const iceWindow = {window:'all'};
+  let payload = null, envelope = null, pollTimer = null, liveTimer = null, requestId = 0, ruleFilter = "all", ruleSearch = "", horizon = 60, autoSession = null;
   let viewMode=q.get("view") === "close" ? "close" : "latest";
 
   function error(message = "") { $("mhError").hidden = !message; $("mhError").textContent = message; }
@@ -24,7 +26,10 @@
     const next = new URL(location.href);
     next.searchParams.set("section", section);
     next.searchParams.set("index", symbol);
-    next.searchParams.set("window", String(windowSize));
+    next.searchParams.set("window", indexWindow.window);
+    for (const [k,v] of [['indexFrom',indexWindow.from],['indexTo',indexWindow.to]]) {
+      if (indexWindow.window==='custom' && v) next.searchParams.set(k,v); else next.searchParams.delete(k);
+    }
     next.searchParams.set("view",viewMode);
     history.replaceState(null, "", next);
   }
@@ -76,6 +81,7 @@
           <div class="mh-scale" style="--position:${t.score ?? 50}%"><i></i><i></i><i></i><i></i><i></i>${t.score == null ? "" : "<b></b>"}</div>
           <div class="mh-scale-labels"><span>极度悲观</span><span>中性</span><span>过热</span></div>
           <small>广度、动量、年线与估值共同计分。缺失权重超过40%时暂不输出温度。</small>
+          <p><button type="button" class="mh-inline-link mh-select-index" data-mh-go="breadth">查看情绪冰点与指数 K 线 →</button></p>
         </article>
         <article class="mh-box"><div class="mh-state-head"><span class="mh-eyebrow">七维综合研判</span>${badge(`证据覆盖 ${num((fusion?.coverage || 0)*100,0)}%`, fusion?.complete ? "" : "warn")}</div>
           <p class="mh-state-title">${esc(fusion?.title || payload.stage)}</p>
@@ -177,24 +183,26 @@
   }
   function renderIndices() {
     const r = currentIndex(symbol);
-    $("mhView-indices").innerHTML = `<div class="mh-controls"><label for="mhIndexSelect">指数</label><select id="mhIndexSelect">${payload.indices.map(i => `<option value="${esc(i.symbol)}">${esc(i.name)}</option>`).join("")}</select><div class="mh-segment" aria-label="趋势窗口">${[60,120,250].map(n => `<button type="button" data-mh-window="${n}" aria-pressed="${windowSize === n}">${n}交易日</button>`).join("")}</div></div>
-      <article class="mh-box mh-space">${boxHead(`${r.name || "指数"} · ${r.provisional ? "最新价与临时均线" : "收盘与均线"}`, `${r.quote_at || r.as_of || "未取得"} · 当前 ${num(r.close,2)} · ${r.trend || "数据不足"}`, badge(`历史 ${num(r.bars,0)} 根`))}
-      <div class="mh-chart-legend"><span><i></i>收盘</span><span><i></i>MA20</span><span><i></i>MA250</span></div>
-      ${chart((r.series || []).slice(-windowSize), ["close","ma20","ma250"], `${r.name}最近${windowSize}交易日走势`)}
-      <p class="mh-note">${(r.series || []).slice(-windowSize)[0]?.date || "—"} 至 ${r.as_of || "—"} · ${r.provisional ? "末点为盘中最新价，其余为收盘" : "收盘口径"}，横轴按交易日等距。</p></article>
+    $("mhView-indices").innerHTML = `<div class="mh-controls"><label for="mhIndexSelect">指数</label><select id="mhIndexSelect">${payload.indices.map(i => `<option value="${esc(i.symbol)}">${esc(i.name)}</option>`).join("")}</select></div>
+      <article class="mh-box mh-space">${boxHead(`${r.name || "指数"} · 量价与波段`, `${r.quote_at || r.as_of || "未取得"} · ${r.provisional ? "盘中" : "收盘"} ${num(r.close,2)} · ${r.trend || "数据不足"}`, badge(`历史 ${num(r.bars,0)} 根`))}<div id="mhIndexChart"></div></article>
       <div class="mh-kpis">${stat("20日涨跌", signed(r.ret20), `60日 ${signed(r.ret60)}`)}${stat("RSI14", num(r.rsi14), "Wilder平滑 · ≤30超卖 / ≥80过热观察")}${stat("20日年化波动率", pct(r.volatility20), "对数日收益样本标准差 × √250")}${stat("当日 / 前5日均量", r.provisional ? "收盘后确认" : `${num(r.volume5,2)}x`, r.provisional ? "全天成交量和均量比仅在收盘后确认" : `当日 / 250日均量 ${num(r.volume250,2)}x`)}</div>
       <article class="mh-box mh-space">${boxHead("指数指标矩阵", "各指数保留自己的数据日期；非同日指标不合入综合评分")}${indexTable(true)}</article>
       <article class="mh-box">${boxHead("波段回撤参考位", "近500个交易日：先低后高的收盘价锚点；仅作价位观察")}
       <div class="mh-kpis">${Object.entries(r.levels || {}).map(([p,v]) => stat(`${num(Number(p)*100)}% 回撤`, num(v,1), `波段低 ${num(r.swing_low,0)} / 高 ${num(r.peak,0)}`)).join("") || '<p class="mh-empty">缺少有效波段锚点</p>'}</div>
       <p class="mh-note">参考位不是预测目标。跌破后能否收回、量价配合与广度变化，比单独触及某个点位更有意义。</p></article>`;
     $("mhIndexSelect").value = symbol;
+    window.LumoPriceChart.mount($("mhIndexChart"),r,{state:indexWindow,onRange:remember});
     $("mhIndexSelect").addEventListener("change", e => { symbol=e.target.value;remember();renderIndices(); });
   }
   function renderBreadth() {
     const b = payload.breadth || {}, m = payload.market?.values || {};
+    const c = payload.ice_coverage;
+    const coverage = !c ? '' : `收盘观测 ${num(c.covered,0)} / ${num(c.total,0)} 个交易日` + (c.missing
+      ? ` · 待补 ${num(c.missing,0)} 日（最早 ${c.first_missing}） · ${c.running ? '正在补采' : c.retry_at ? '下次重试 '+new Date(c.retry_at*1000).toLocaleString('zh-CN') : '等待补采'}` : ' · 无缺口');
     const barSpecs = [["站上MA20",b.above_ma20],["站上MA60",b.above_ma60],["站上MA250",b.above_ma250],["创60日收盘新低",b.newlow60],["创60日收盘新高",b.newhigh60]];
     const details = [["正PB中位数",`${num(m.pb_median,3)} 倍`],["正PE中位数",`${num(m.pe_median,2)} 倍`],["正PB样本破净率",pct(m.below_pb1_ratio)],["换手率中位数",pct(m.turnover_median)],["个股涨跌中位数",signed(m.chg_median)],["市值加权涨跌",signed(m.mv_weighted_chg)],["近涨停 / 近跌停",`${num(m.limit_up,0)} / ${num(m.limit_down,0)}`],["有效正PB / 正PE样本",`${num(m.pb_sample,0)} / ${num(m.pe_sample,0)}`]];
-    $("mhView-breadth").innerHTML = `<div class="mh-grid"><article class="mh-box">${boxHead("价格广度", `分层样本 ${num(b.sample,0)} 只；不同指标分母可能不同`, dateState(b.as_of,b.captured_at,b.provisional))}
+    $("mhView-breadth").innerHTML = `<article class="mh-box mh-space">${boxHead("情绪冰点线 · 上证指数", "冰点代理：站上20日均线的样本占比 ≤20%。虚线为观察阈值，不等同于市场温度或反转确认。")}
+      <p class="mh-note" id="mhIceCoverage" role="status">${esc(coverage)}</p><div id="mhIceChart"></div></article><div class="mh-grid"><article class="mh-box">${boxHead("价格广度", `分层样本 ${num(b.sample,0)} 只；不同指标分母可能不同`, dateState(b.as_of,b.captured_at,b.provisional))}
       <div class="mh-bars">${barSpecs.map(([label,v]) => `<div class="mh-bar-row"><span>${label}</span><div class="mh-bar-track" style="--position:${Math.max(0,Math.min(100,v??0))}%"><i></i></div><strong>${pct(v)}</strong></div>`).join("")}</div>
       <p class="mh-note">个股250日高点回撤中位：${signed(b.dd52_median)}。${esc(b.note || "基于分层抽样，并非全A完整逐股统计。")}</p>
       <p class="mh-note">${Object.entries(b.denominators || {}).map(([k,v]) => `${esc(k)}：${num(v,0)}只`).join(" · ") || "原报告未保存逐指标分母；不推算精确抽样误差。"}</p></article>
@@ -204,6 +212,7 @@
       <article class="mh-box mh-space">${boxHead("广度观测记录", "完整更新回算最近5个交易日；同一窗口固定成分和分母，同日重复更新不增加连续天数")}
       <div class="mh-table-wrap"><table><thead><tr><th>日期</th><th>样本</th><th>MA20上方</th><th>MA250上方</th><th>60日新低 / 新高</th><th>高点回撤中位</th><th>数据口径 / 组号</th></tr></thead><tbody>${[...(payload.observations || [])].reverse().map(r => `<tr><td>${esc(r.as_of)}</td><td>${num(r.sample,0)}</td><td>${pct(r.above_ma20)}</td><td>${pct(r.above_ma250)}</td><td>${pct(r.newlow60)} / ${pct(r.newhigh60)}</td><td>${signed(r.dd52_median)}</td><td>${esc(r.method)}<small>${esc(r.cohort || "")}${r.backfilled ? " · 历史回算" : ""}</small></td></tr>`).join("") || '<tr><td colspan="7">尚无同日观测</td></tr>'}</tbody></table></div></article>
       <div class="mh-notice">观察“指数与个股背离”：比较大盘与小盘20日收益差、指数回撤和个股回撤中位。样本口径不同只能交叉观察，不能直接把差值解释成确定的补跌空间。</div>`;
+    window.LumoPriceChart.mount($("mhIceChart"),currentIndex('sh000001'),{state:iceWindow,observations:payload.ice_history ?? payload.observations ?? []});
   }
   function renderConfirmation() {
     $("mhView-confirmation").innerHTML = `<div class="mh-notice">收盘确认截至 ${esc(payload.confirmation_as_of || payload.as_of)}。盘中预警不改写此区。以下为经验确认条件，至少3项触发后标记“条件满足”；缺失项保留待补，信号仍可能失效。跨日确认仅用已收盘交易日。</div>
@@ -286,7 +295,7 @@
   }
   function scheduleLive() {
     clearTimeout(liveTimer);
-    liveTimer=setTimeout(()=>{if (!document.hidden) load(true);else scheduleLive();},30000);
+    liveTimer=setTimeout(()=>{if (!document.hidden) load(true);else scheduleLive();},section === 'breadth' && payload?.ice_coverage?.running ? 8000 : 30000);
   }
   async function load(poll = false, force = false) {
     const id=++requestId;
@@ -296,10 +305,21 @@
       const old=payload;
       envelope=value;activatePayload();error();
       const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message;
-      if (poll && unchanged) renderJob(value.job); else render();
+      if (poll && unchanged) {
+        if (JSON.stringify(old.ice_coverage)!==JSON.stringify(payload.ice_coverage) ||
+            JSON.stringify(old.ice_history)!==JSON.stringify(payload.ice_history)) renderBreadth();
+        renderJob(value.job);
+      } else render();
       scheduleLive();
-      const needsFull=value.source === "baseline" || !value.fusion?.updated_at || (value.live_status?.available && (value.intraday?.market?.as_of !== value.live_status.as_of || value.intraday?.breadth?.as_of !== value.live_status.as_of));
-      if (!autoStarted && needsFull && (!value.job || ["finished","failed"].includes(value.job.status))) { autoStarted=true;refresh("full"); }
+      const liveDay = value.live_status?.as_of;
+      const session = liveDay || value.as_of || 'initial';
+      const missingPreview = value.live_status?.available && (value.intraday?.market?.as_of !== liveDay || value.intraday?.breadth?.as_of !== liveDay);
+      const missingClose = !value.live_status?.available && liveDay && liveDay > (value.as_of || '');
+      const needsFull = value.source === 'baseline' || !value.as_of || !value.fusion?.updated_at || missingPreview || missingClose;
+      if (autoSession !== session && needsFull && (!value.job || ['finished','failed'].includes(value.job.status))) {
+        autoSession = session;
+        refresh('full');
+      }
     } catch (e) {
       error(`${e.message}。${payload ? "已有快照继续保留显示。" : "请点击顶部刷新重试。"}`);
       $("mhLoading").hidden=true;root.setAttribute("aria-busy","false");
@@ -319,10 +339,9 @@
     selectTab(e.key === "Home" ? tabs[0] : e.key === "End" ? tabs.at(-1) : tabs[(i+(e.key === "ArrowRight" ? 1 : -1)+tabs.length)%tabs.length],true);
   });
   root.addEventListener("click", e => {
-    const go=e.target.closest("[data-mh-go]"), index=e.target.closest("[data-mh-index]"), win=e.target.closest("[data-mh-window]"), h=e.target.closest("[data-mh-horizon]");
+    const go=e.target.closest("[data-mh-go]"), index=e.target.closest("[data-mh-index]"), h=e.target.closest("[data-mh-horizon]");
     if (go) selectTab(go.dataset.mhGo,true);
     if (index) { symbol=index.dataset.mhIndex;renderIndices();selectTab("indices",true); }
-    if (win) { windowSize=Number(win.dataset.mhWindow);remember();renderIndices(); }
     if (h) { horizon=Number(h.dataset.mhHorizon);renderHistory(); }
   });
   $("mhIndexRefresh").addEventListener("click", () => refresh("indices"));

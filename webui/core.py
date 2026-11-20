@@ -15,6 +15,7 @@ import math
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -29,8 +30,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.utils
 
 warnings.filterwarnings("ignore")
 
@@ -62,6 +61,7 @@ from webui.services.kline_service import StockKlineService
 from webui.services.market_intelligence import MarketIntelligenceService
 from webui.services.model_runtime import (
     ModelRuntimeContext,
+    create_prediction_chart,
     load_model_payload,
     loaded_model_info,
     run_prediction_payload,
@@ -80,7 +80,7 @@ from webui.services.db_backup_service import DbBackupService
 from webui.services.command_center_service import CommandCenterService
 from webui.services.market_pulse_service import MarketPulseService
 from webui.services.trading_plan_service import TradingPlanService
-from data_store import opportunity_repo
+from data_store import ohlcv_repo, opportunity_repo, price_bars_repo
 from analysis.panic_indicator import panic_indicator, panic_from_bars, panic_from_quotes
 
 logger = logging.getLogger(__name__)
@@ -766,72 +766,63 @@ def start_market_monitor():
 
 
 def load_data_files():
-    """Scan data directory and return available data files"""
-    data_dir = USER_ROOT / 'data'
-    data_files = []
-
-    if data_dir.exists():
-        for path in data_dir.iterdir():
-            if path.suffix.lower() in ('.csv', '.feather'):
-                file_size = path.stat().st_size
-                data_files.append({
-                    'name': path.name,
-                    'path': str(path),
-                    'size': f"{file_size / 1024:.1f} KB" if file_size < 1024 * 1024 else f"{file_size / (1024 * 1024):.1f} MB"
-                })
-
-    return data_files
+    """List stored, source-specific prediction datasets."""
+    return price_bars_repo.datasets()
 
 
 def load_data_file(file_path):
-    """Load data file"""
+    """Read a SQLite series, filling a symbol request through the quote service first."""
+    match = re.fullmatch(r'sqlite:([a-z_]+):([A-Za-z0-9.]+):(1d|5m|15m|30m|60m)', str(file_path))
+    if not match:
+        return None, '请选择 SQLite 行情序列，或输入股票代码自动补库'
+    source, symbol, frequency = match.groups()
+    end = STOCK_KLINE_SERVICE._clock().date().isoformat()
     try:
-        if file_path.endswith('.csv'):
-            df = pd.read_csv(file_path)
-        elif file_path.endswith('.feather'):
-            df = pd.read_feather(file_path)
+        if source == 'auto':
+            if not re.fullmatch(r'[0-9]{6}', symbol):
+                return None, '请输入六位股票代码'
+            code = symbol
+            _, selected, _ = STOCK_KLINE_SERVICE.history(code, frequency, end=end)
+            source = selected.removeprefix('sqlite:')
+            if source != 'ohlcv':
+                symbol = STOCK_KLINE_SERVICE.sina_symbol_for_code(code)
+                if source == 'market_daily':
+                    symbol = f'{code}.{symbol[:2].upper()}'
+
+        if source == 'ohlcv' and re.fullmatch(r'[0-9]{6}', symbol):
+            df = ohlcv_repo.load_dataframe(symbol, frequency, end=end)
+        elif source == 'market_daily' and frequency == '1d' and re.fullmatch(r'[0-9]{6}\.(SH|SZ|BJ)', symbol):
+            code, exchange = symbol.split('.')
+            df = pd.DataFrame(price_bars_repo.market_history(exchange.lower() + code, end=end))
+        elif source in ('sina', 'tencent') and re.fullmatch(r'(sh|sz|bj)[0-9]{6}', symbol):
+            df = pd.DataFrame(price_bars_repo.read(source, symbol, frequency, end=end))
         else:
-            return None, "Unsupported file format"
+            return None, '找不到指定的 SQLite 行情序列'
 
-        # Check required columns
-        required_cols = ['open', 'high', 'low', 'close']
-        if not all(col in df.columns for col in required_cols):
-            return None, f"Missing required columns: {required_cols}"
+        if df.empty:
+            return None, 'SQLite 中暂时没有该标的、频率的已收盘行情，可稍后重试补库'
 
-        # Process timestamp column
-        if 'timestamps' in df.columns:
-            df['timestamps'] = pd.to_datetime(df['timestamps'])
-        elif 'timestamp' in df.columns:
-            df['timestamps'] = pd.to_datetime(df['timestamp'])
-        elif 'date' in df.columns:
-            # If column name is 'date', rename it to 'timestamps'
-            df['timestamps'] = pd.to_datetime(df['date'])
-        else:
-            # If no timestamp column exists, create one
-            df['timestamps'] = pd.date_range(start='2024-01-01', periods=len(df), freq='1H')
+        columns = ['open', 'high', 'low', 'close', 'volume', 'amount']
+        df = df.rename(columns={'date': 'timestamps'})[['timestamps', *columns]]
+        df['timestamps'] = pd.to_datetime(df['timestamps'], errors='coerce')
+        df[columns] = df[columns].replace([np.inf, -np.inf], np.nan)
+        df[['volume', 'amount']] = df[['volume', 'amount']].where(df[['volume', 'amount']] >= 0)
+        full = ((df['low'] > 0) & (df['low'] <= df[['open', 'close']].min(axis=1, skipna=False))
+                & (df['high'] >= df[['open', 'close']].max(axis=1, skipna=False)))
+        df = df[full & df['timestamps'].notna()].sort_values('timestamps', kind='stable')
+        if df.empty:
+            return None, 'SQLite 中没有同时具备真实时间和完整开高低收的行情'
+        if df['timestamps'].duplicated().any():
+            return None, '行情时间重复，无法建立预测窗口'
 
-        # Ensure numeric columns are numeric type
-        for col in ['open', 'high', 'low', 'close']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # Process volume column (optional)
-        if 'volume' in df.columns:
-            df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
-
-        # Process amount column (optional, but not used for prediction)
-        if 'amount' in df.columns:
-            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
-
-        # Remove rows containing NaN values
-        df = df.dropna()
-
+        df.attrs.update(dataset=f'sqlite:{source}:{symbol}:{frequency}', frequency=frequency)
         return df, None
+    except (OSError, ValueError, sqlite3.Error, pd.errors.DatabaseError) as exc:
+        logger.warning('Prediction SQLite read failed: %s', exc)
+        return None, 'SQLite 行情读取失败，请稍后重试'
 
-    except Exception as e:
-        return None, f"Failed to load file: {str(e)}"
 
-
-def save_prediction_results(file_path, prediction_type, prediction_results, actual_data, input_data, prediction_params):
+def save_prediction_results(file_path, prediction_type, prediction_results, actual_data, input_data, prediction_params, historical_data=None):
     """Save prediction results to file"""
     try:
         # Runtime prediction output must stay outside packaged read-only resources.
@@ -839,7 +830,7 @@ def save_prediction_results(file_path, prediction_type, prediction_results, actu
         results_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate filename
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         filename = f'prediction_{timestamp}.json'
         filepath = results_dir / filename
 
@@ -865,6 +856,7 @@ def save_prediction_results(file_path, prediction_type, prediction_results, actu
                     'close': float(input_data['close'].iloc[-1])
                 }
             },
+            'historical_data': historical_data,
             'prediction_results': prediction_results,
             'actual_data': actual_data,
             'analysis': {}
@@ -914,130 +906,6 @@ def save_prediction_results(file_path, prediction_type, prediction_results, actu
     except Exception as e:
         print(f"Failed to save prediction results: {e}")
         return None
-
-
-def create_prediction_chart(df, pred_df, lookback, pred_len, actual_df=None, historical_start_idx=0):
-    """Create prediction chart"""
-    # Use specified historical data start position, not always from the beginning of df
-    if historical_start_idx + lookback + pred_len <= len(df):
-        # Display lookback historical points + pred_len prediction points starting from specified position
-        historical_df = df.iloc[historical_start_idx:historical_start_idx + lookback]
-        prediction_range = range(historical_start_idx + lookback, historical_start_idx + lookback + pred_len)
-    else:
-        # If data is insufficient, adjust to maximum available range
-        available_lookback = min(lookback, len(df) - historical_start_idx)
-        available_pred_len = min(pred_len, max(0, len(df) - historical_start_idx - available_lookback))
-        historical_df = df.iloc[historical_start_idx:historical_start_idx + available_lookback]
-        prediction_range = range(historical_start_idx + available_lookback,
-                                 historical_start_idx + available_lookback + available_pred_len)
-
-    # Create chart
-    fig = go.Figure()
-
-    # Add historical data (candlestick chart)
-    fig.add_trace(go.Candlestick(
-        x=historical_df['timestamps'] if 'timestamps' in historical_df.columns else historical_df.index,
-        open=historical_df['open'],
-        high=historical_df['high'],
-        low=historical_df['low'],
-        close=historical_df['close'],
-        name='历史数据 (400个数据点)',
-        increasing_line_color='#26A69A',
-        decreasing_line_color='#EF5350'
-    ))
-
-    # Add prediction data (candlestick chart)
-    if pred_df is not None and len(pred_df) > 0:
-        # Calculate prediction data timestamps - ensure continuity with historical data
-        if 'timestamps' in df.columns and len(historical_df) > 0:
-            # Start from the last timestamp of historical data, create prediction timestamps with the same time interval
-            last_timestamp = historical_df['timestamps'].iloc[-1]
-            time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0] if len(df) > 1 else pd.Timedelta(hours=1)
-
-            pred_timestamps = pd.date_range(
-                start=last_timestamp + time_diff,
-                periods=len(pred_df),
-                freq=time_diff
-            )
-        else:
-            # If no timestamps, use index
-            pred_timestamps = range(len(historical_df), len(historical_df) + len(pred_df))
-
-        fig.add_trace(go.Candlestick(
-            x=pred_timestamps,
-            open=pred_df['open'],
-            high=pred_df['high'],
-            low=pred_df['low'],
-            close=pred_df['close'],
-            name='预测数据 (120个数据点)',
-            increasing_line_color='#66BB6A',
-            decreasing_line_color='#FF7043'
-        ))
-
-    # Add actual data for comparison (if exists)
-    if actual_df is not None and len(actual_df) > 0:
-        # Actual data should be in the same time period as prediction data
-        if 'timestamps' in df.columns:
-            # Actual data should use the same timestamps as prediction data to ensure time alignment
-            if 'pred_timestamps' in locals():
-                actual_timestamps = pred_timestamps
-            else:
-                # If no prediction timestamps, calculate from the last timestamp of historical data
-                if len(historical_df) > 0:
-                    last_timestamp = historical_df['timestamps'].iloc[-1]
-                    time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0] if len(df) > 1 else pd.Timedelta(
-                        hours=1)
-                    actual_timestamps = pd.date_range(
-                        start=last_timestamp + time_diff,
-                        periods=len(actual_df),
-                        freq=time_diff
-                    )
-                else:
-                    actual_timestamps = range(len(historical_df), len(historical_df) + len(actual_df))
-        else:
-            actual_timestamps = range(len(historical_df), len(historical_df) + len(actual_df))
-
-        fig.add_trace(go.Candlestick(
-            x=actual_timestamps,
-            open=actual_df['open'],
-            high=actual_df['high'],
-            low=actual_df['low'],
-            close=actual_df['close'],
-            name='实际数据 (120个数据点)',
-            increasing_line_color='#FF9800',
-            decreasing_line_color='#F44336'
-        ))
-
-    # Update layout
-    fig.update_layout(
-        title='Kronos金融预测结果 - 400个历史数据点 + 120个预测数据点 vs 120个实际数据点',
-        xaxis_title='时间',
-        yaxis_title='价格',
-        template='plotly_white',
-        height=600,
-        showlegend=True
-    )
-
-    # Ensure x-axis time continuity
-    if 'timestamps' in historical_df.columns:
-        # Get all timestamps and sort them
-        all_timestamps = []
-        if len(historical_df) > 0:
-            all_timestamps.extend(historical_df['timestamps'])
-        if 'pred_timestamps' in locals():
-            all_timestamps.extend(pred_timestamps)
-        if 'actual_timestamps' in locals():
-            all_timestamps.extend(actual_timestamps)
-
-        if all_timestamps:
-            all_timestamps = sorted(all_timestamps)
-            fig.update_xaxes(
-                range=[all_timestamps[0], all_timestamps[-1]],
-                rangeslider_visible=False,
-                type='date'
-            )
-
-    return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
 
 
 def _safe_int(value, default, minimum=None, maximum=None):
@@ -3948,8 +3816,8 @@ def _market_cloud_payload(force_refresh=False, limit=5000, trade_date=None):
     }
 
 
-def _get_stock_kline_payload(stock_code, period='daily', limit=120):
-    return STOCK_KLINE_SERVICE.get_payload(stock_code, period=period, limit=limit)
+def _get_stock_kline_payload(stock_code, period='daily', limit=120, *, end=None):
+    return STOCK_KLINE_SERVICE.get_payload(stock_code, period=period, limit=limit, end=end)
 
 
 def _load_batch_summary():

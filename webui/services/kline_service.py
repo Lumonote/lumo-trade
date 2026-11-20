@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import datetime
+import math
 import threading
 import time
 import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Optional
+from zoneinfo import ZoneInfo
 
 from analysis.limit_up_patterns import bars_from_records, detect_kline_patterns
 from analysis.operation_models import analyze_operations
 from analysis.panic_indicator import panic_from_bars, panic_indicator
+from data_store import kv_repo, ohlcv_repo, price_bars_repo
+from data_store.connection import get_conn
 from webui.services.analysis_jobs import normalize_stock_codes, safe_int
+from webui.services.daily_history import fetch_tencent
 from webui.services.http_client import request_json
 
 
@@ -20,23 +25,24 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         if value in (None, '', '—', 'N/A'):
             return default
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else default
     except (TypeError, ValueError):
         return default
 
 
 class StockKlineService:
-    # Sina日K短缓存：日K盘中只靠报价叠加更新当根bar，60s内重复请求(点开弹窗、
-    # 30s盘中自刷、列表多处入口)复用同一份记录，避免每次都同步占住后端worker打Sina(超时8s)。
+    SINA_WINDOW = 1023  # Request window of this provider, not a local-history retention limit.
+    FREQUENCIES = {'daily': '1d', 'day': '1d', '1d': '1d', '1h': '60m',
+                   **{p: f'{n}m' for n in (5, 15, 30, 60) for p in (str(n), f'{n}m')}}
     SINA_CACHE_TTL = 60.0
+    _locks = [threading.Lock() for _ in range(128)]
 
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         # 实时报价源（如 WatchlistService.quotes）。日K是隔日/盘中按天一根的快照，
         # 叠加当日最新价后，盘中那根bar与「实时价」徽章可跟随最新成交价。
         self._quote_provider: Optional[Callable[[list], dict]] = None
-        self._sina_cache: dict[tuple[str, str, int], tuple[float, list[dict[str, Any]]]] = {}
-        self._sina_cache_lock = threading.Lock()
 
     def set_quote_provider(self, provider: Optional[Callable[[list], dict]]) -> None:
         """注入/更换实时报价源（如 WatchlistService.quotes）。与自选行情共用同一行情口径。"""
@@ -61,6 +67,7 @@ class StockKlineService:
             '30m': '30',
             '30': '30',
             '60m': '60',
+            '60': '60',
             '1h': '60',
             'daily': '240',
             '1d': '240',
@@ -68,21 +75,8 @@ class StockKlineService:
         }
         return period_map.get(str(period or 'daily'), '240')
 
-    def local_kline_candidates(self, stock_code: str, period: str) -> list[Path]:
-        if not self.data_dir.exists():
-            return []
-        prefixes = []
-        if str(period) in ('5m', '5'):
-            prefixes.extend(['5m', '5min'])
-        prefixes.extend(['1d', 'daily', 'day'])
-        patterns = [f'{prefix}_{stock_code}.*' for prefix in prefixes]
-        candidates = []
-        for pattern in patterns:
-            candidates.extend(self.data_dir.glob(pattern))
-        return [path for path in candidates if path.suffix.lower() in ('.csv', '.feather')]
-
     @staticmethod
-    def frame_to_kline_records(df: Any, limit: int) -> list[dict[str, Any]]:
+    def frame_to_kline_records(df: Any, limit: int | None, period='daily', end=None) -> list[dict[str, Any]]:
         import pandas as pd
 
         if df is None or df.empty:
@@ -90,59 +84,19 @@ class StockKlineService:
 
         work = df.copy()
         timestamp_col = next(
-            (col for col in ['timestamps', 'timestamp', 'date', 'datetime', 'time'] if col in work.columns),
+            (col for col in ['timestamps', 'timestamp', 'date', 'datetime', 'time', 'trade_date'] if col in work.columns),
             None,
         )
-        if timestamp_col:
-            work[timestamp_col] = pd.to_datetime(work[timestamp_col], errors='coerce')
-            work = work.dropna(subset=[timestamp_col])
-            work = work.sort_values(timestamp_col)
-        else:
-            work['_timestamp'] = pd.RangeIndex(start=1, stop=len(work) + 1)
-            timestamp_col = '_timestamp'
-
-        for col in ['open', 'high', 'low', 'close', 'volume', 'amount']:
-            if col in work.columns:
-                work[col] = pd.to_numeric(work[col], errors='coerce')
-        work = work.dropna(subset=[col for col in ['open', 'high', 'low', 'close'] if col in work.columns])
-
-        records = []
-        for _, row in work.tail(limit).iterrows():
-            timestamp = row[timestamp_col]
-            if isinstance(timestamp, pd.Timestamp):
-                date_text = timestamp.strftime('%Y-%m-%d')
-            else:
-                date_text = str(timestamp)
-            open_price = float(row['open'])
-            close_price = float(row['close'])
-            pct_chg = ((close_price - open_price) / open_price * 100) if open_price else 0.0
-            records.append({
-                'date': date_text,
-                'open': open_price,
-                'close': close_price,
-                'high': float(row['high']),
-                'low': float(row['low']),
-                'volume': float(row['volume']) if 'volume' in row and pd.notna(row.get('volume')) else 0.0,
-                'amount': float(row['amount']) if 'amount' in row and pd.notna(row.get('amount')) else 0.0,
-                'pct_chg': round(pct_chg, 2),
-            })
-        return records
-
-    def load_local_kline(self, stock_code: str, period: str, limit: int) -> tuple[list[dict[str, Any]], str | None]:
-        import pandas as pd
-
-        for path in self.local_kline_candidates(stock_code, period):
-            try:
-                if path.suffix.lower() == '.csv':
-                    df = pd.read_csv(path)
-                else:
-                    df = pd.read_feather(path)
-                records = self.frame_to_kline_records(df, limit)
-                if records:
-                    return records, path.name
-            except Exception as exc:
-                print(f"Failed to load local kline {path}: {exc}")
-        return [], None
+        if not timestamp_col:
+            return []
+        stamp = pd.to_datetime(work[timestamp_col].astype(str), errors='coerce')
+        daily = StockKlineService.FREQUENCIES[period] == '1d'
+        work['date'] = stamp.dt.strftime('%Y-%m-%d' if daily else '%Y-%m-%d %H:%M:%S')
+        work = work[stamp.notna() & (True if daily else stamp.ne(stamp.dt.normalize()))]
+        if end:
+            work = work[work['date'].str[:10] <= end]
+        work = work.sort_values('date', kind='stable').drop_duplicates('date', keep='last')
+        return StockKlineService.parse_sina_klines((work.tail(limit) if limit else work).to_dict('records'))
 
     @staticmethod
     def parse_sina_klines(klines: list[Any]) -> list[dict[str, Any]]:
@@ -151,12 +105,12 @@ class StockKlineService:
         for item in klines or []:
             if not isinstance(item, dict):
                 continue
-            open_price = _safe_float(item.get('open'))
+            open_price = _safe_float(item.get('open'), None)
             close_price = _safe_float(item.get('close'))
-            if open_price <= 0 or close_price <= 0:
+            if close_price <= 0:
                 continue
-            high_price = _safe_float(item.get('high'), max(open_price, close_price))
-            low_price = _safe_float(item.get('low'), min(open_price, close_price))
+            high_price = _safe_float(item.get('high'), None)
+            low_price = _safe_float(item.get('low'), None)
             pct_chg = 0.0
             if prev_close and prev_close > 0:
                 pct_chg = (close_price / prev_close - 1) * 100
@@ -166,9 +120,10 @@ class StockKlineService:
                 'close': close_price,
                 'high': high_price,
                 'low': low_price,
-                'volume': _safe_float(item.get('volume')),
-                'amount': _safe_float(item.get('amount')),
+                'volume': _safe_float(item.get('volume'), None),
+                'amount': _safe_float(item.get('amount'), None),
                 'pct_chg': round(pct_chg, 2),
+                **({'provisional': True} if item.get('provisional') else {}),
             })
             prev_close = close_price
         return records
@@ -181,7 +136,7 @@ class StockKlineService:
             'datalen': str(limit),
         }
         url = (
-            'http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/'
+            'https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/'
             'CN_MarketData.getKLineData?' + urllib.parse.urlencode(params)
         )
         payload = request_json(
@@ -194,24 +149,80 @@ class StockKlineService:
                 'Accept': 'application/json,text/plain,*/*',
                 'Referer': 'https://finance.sina.com.cn/',
             },
-            timeout=8,
+            timeout=8, retries=1, trust_env=False,
         )
         records = self.parse_sina_klines(payload if isinstance(payload, list) else [])
         return records, ''
 
-    def _fetch_sina_kline_cached(self, stock_code: str, period: str, limit: int) -> list[dict[str, Any]]:
-        """TTL内复用Sina结果；命中返回逐条浅拷贝(实时叠加会就地改写当日bar)。失败不缓存。"""
-        key = (str(stock_code), self.period_to_sina_scale(period), int(limit))
-        now = time.monotonic()
-        with self._sina_cache_lock:
-            cached = self._sina_cache.get(key)
-            if cached and now - cached[0] < self.SINA_CACHE_TTL:
-                return [dict(record) for record in cached[1]]
-        records, _name = self.fetch_sina_kline(stock_code, period, limit)
-        if records:
-            with self._sina_cache_lock:
-                self._sina_cache[key] = (now, [dict(record) for record in records])
-        return records
+    @staticmethod
+    def _clock():
+        return datetime.datetime.now(ZoneInfo('Asia/Shanghai'))
+
+    def history(self, code, period, limit=None, *, end=None):
+        """Return one SQLite series, optionally filling missing bars before reading it again."""
+        freq, symbol = self.FREQUENCIES[period], self.sina_symbol_for_code(code)
+        now = self._clock()
+        today = now.date().isoformat()
+        stop = min(end or today, today)
+        provisional = today if now.time() < datetime.time(15, 30) else None
+        target = datetime.date.fromisoformat(stop)
+        if target == now.date() and (now.time() < datetime.time(9, 30) or (end and provisional)):
+            target -= datetime.timedelta(days=1)
+        cal = get_conn().execute('SELECT max(cal_date),max(CASE WHEN is_open=1 AND cal_date<=? THEN cal_date END) FROM trade_calendar',
+                                 (target.strftime('%Y%m%d'),)).fetchone()
+        while target.weekday() >= 5:
+            target -= datetime.timedelta(days=1)
+        expected = target.isoformat()
+        if cal[0] and cal[1] and cal[0] >= expected.replace('-', ''):
+            expected = f'{cal[1][:4]}-{cal[1][4:6]}-{cal[1][6:]}'
+        need = limit or self.SINA_WINDOW
+        live_day = provisional if not end else None
+
+        def read():
+            choices = [(price_bars_repo.read(s, symbol, freq, end=stop, limit=limit, live_day=live_day), s)
+                       for s in (('sina', 'tencent') if freq == '1d' else ('sina',))]
+            if freq == '1d':
+                choices.append((price_bars_repo.market_history(symbol, end=stop, limit=limit), 'market_daily'))
+            frame = ohlcv_repo.load_dataframe(code, freq, limit, end=stop)
+            choices.append((self.frame_to_kline_records(frame, limit, period, stop), 'ohlcv'))
+            def rank(item):
+                bars = item[0]
+                last = bars[-1]['date'] if bars else ''
+                recent = last[:10] >= expected
+                return (recent, len(bars) if recent else 0, last, len(bars))
+            return max(choices, key=rank)
+
+        with self._locks[hash((code, freq)) % len(self._locks)]:
+            bars, source = read()
+            recent = bool(bars) and bars[-1]['date'][:10] >= expected
+            updating = not end and provisional and expected == today and now.weekday() < 5
+            key = f'{symbol}:{freq}:{end or "live"}'
+            attempt = kv_repo.get('kline_fill', key)
+            cooling = (attempt and attempt[0].get('need', 0) >= need and attempt[0].get('phase') == (provisional or 'closed')
+                       and time.time()-attempt[1] < self.SINA_CACHE_TTL)
+            detail = attempt[0].get('error') if cooling else None
+            if not cooling and (not recent or len(bars) < need or updating):
+                try:
+                    incoming, _ = self.fetch_sina_kline(code, period, self.SINA_WINDOW if end else min(need, self.SINA_WINDOW))
+                    price_bars_repo.store('sina', symbol, freq, incoming, provisional_day=provisional, end=today)
+                except Exception as exc:
+                    detail = str(exc)
+                bars, source = read()
+                if freq == '1d' and (not bars or bars[-1]['date'][:10] < expected or (end and len(bars) < need)):
+                    start = (target-datetime.timedelta(days=need*2+30)).isoformat()
+                    try:
+                        incoming = fetch_tencent(symbol, start, stop)
+                        price_bars_repo.store('tencent', symbol, freq, incoming, start=start, end=stop, provisional_day=provisional)
+                    except Exception as exc:
+                        detail = detail or str(exc)
+                    bars, source = read()
+                try:
+                    kv_repo.set_('kline_fill', key, {'need': need, 'phase': provisional or 'closed', 'error': detail})
+                except Exception:
+                    pass  # The bars themselves were read back independently.
+            if bars and bars[-1]['date'][:10] < expected:
+                detail = detail or f'截至 {expected} 的交易日行情仍待补充'
+            return self.parse_sina_klines(bars), 'sqlite:'+source, detail
 
     @staticmethod
     def _apply_quote_to_records(records: list[dict[str, Any]], quote: Any, today: str) -> bool:
@@ -229,9 +240,10 @@ class StockKlineService:
         if str(last.get('date') or '') != str(today):
             return False
         last['close'] = price
-        last['high'] = max(_safe_float(last.get('high'), price), price)
-        low_val = _safe_float(last.get('low'), price)
-        last['low'] = min(low_val if low_val > 0 else price, price)
+        if _safe_float(last.get('high')) > 0:
+            last['high'] = max(float(last['high']), price)
+        if _safe_float(last.get('low')) > 0:
+            last['low'] = min(float(last['low']), price)
         change_pct = quote.get('change_pct')
         if change_pct is not None:  # 报价的涨跌幅是对昨收，正是日K当日涨跌口径
             last['pct_chg'] = round(_safe_float(change_pct), 2)
@@ -246,23 +258,32 @@ class StockKlineService:
         if not provider or not records:
             return None
         try:
-            quote_map = provider([code]) or {}
-        except Exception:  # noqa: BLE001 — 行情源不可用时降级，不应阻断K线
+            cached = kv_repo.get('kline_quote', code)
+            if not cached or time.time()-cached[1] >= self.SINA_CACHE_TTL:
+                incoming = (provider([code]) or {}).get(code)
+                if isinstance(incoming, dict) and _safe_float(incoming.get('price')) > 0:
+                    kv_repo.set_('kline_quote', code, incoming)
+                    cached = kv_repo.get('kline_quote', code)
+            if not cached or time.time()-cached[1] >= self.SINA_CACHE_TTL:
+                return None
+            quote = cached[0]
+        except Exception:
             return None
-        quote = quote_map.get(str(code).strip()) if isinstance(quote_map, dict) else None
         if not isinstance(quote, dict):
             return None
         price = _safe_float(quote.get('price'))
         if price <= 0:
             return None
-        today = datetime.date.today().strftime('%Y-%m-%d')
-        applied = self._apply_quote_to_records(records, quote, today)
+        today = self._clock().date().isoformat()
+        quote_day = quote.get('quote_date')
+        applied = (not quote_day or quote_day == today) and bool(records[-1].get('provisional')) and self._apply_quote_to_records(records, quote, today)
         return {
             'name': str(quote.get('name') or '').strip(),
             'price': price,
             'change_pct': round(_safe_float(quote.get('change_pct')), 2),
             'change_amount': _safe_float(quote.get('change_amount')),
-            'updated_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'updated_at': datetime.datetime.fromtimestamp(cached[1]).isoformat(timespec='seconds'),
+            'as_of': quote_day,
             'applied': applied,
         }
 
@@ -289,139 +310,70 @@ class StockKlineService:
         self,
         stock_code: str,
         period: str = 'daily',
-        limit: int | str = 120,
+        limit: int = 120,
+        *,
         use_cache: bool = True,
         cache_write: bool = True,
     ) -> list[dict[str, Any]]:
-        """轻量日K:只返回 records,不叠加实时报价、不跑形态/操作分析。
-
-        选股这类批量场景(几百只)只需要 K 线数组,走 :meth:`get_payload` 会额外
-        发起一次单只实时报价请求并跑两套分析(结果直接丢弃),单只成本约 2–3 倍,
-        300 只叠加起来就是几十秒。这里直达新浪日K(TTL 60s),外层再接一层
-        :mod:`data_store.screener_cache_repo` 的跨进程磁盘缓存。
-        """
+        """与图表共用落库行情，但不叠加盘中报价、不运行形态检测。"""
         codes = normalize_stock_codes([stock_code])
-        if not codes:
+        if not codes or period not in self.FREQUENCIES:
             return []
-        code = codes[0]
-        normalized_limit = safe_int(limit, 120, minimum=30, maximum=500) or 120
-        if use_cache:
-            cached = self._cached_bars(code, period, normalized_limit)
-            if cached:
-                return cached
-        records: list[dict[str, Any]] = []
-        try:
-            records = self._fetch_sina_kline_cached(code, period, normalized_limit)
-        except Exception:  # noqa: BLE001 — 网络不可用时回退本地文件
-            records = []
-        if not records:
-            local_records, _source = self.load_local_kline(code, period, normalized_limit)
-            records = local_records or []
-        if records and period == 'daily' and cache_write:
-            self._write_bars_cache(code, records)
-        return records
-
-    @staticmethod
-    def _cached_bars(code: str, period: str, limit: int) -> list[dict[str, Any]]:
-        if period != 'daily':
-            return []
-        try:
-            from data_store import screener_cache_repo
-
-            cached = screener_cache_repo.get_kline(code)
-        except Exception:  # noqa: BLE001 — 缓存层不可用就当未命中
-            return []
-        if not cached or len(cached) < max(21, min(limit, 60)):
-            return []
-        return cached[-limit:]
-
-    @staticmethod
-    def _write_bars_cache(code: str, records: list[dict[str, Any]]) -> None:
-        try:
-            from data_store import screener_cache_repo
-
-            screener_cache_repo.put_kline(code, records)
-        except Exception:  # noqa: BLE001 — 写缓存失败不影响本次结果
-            pass
+        return self.history(codes[0], period, safe_int(limit, 120, minimum=1, maximum=1023) or 120)[0]
 
     def get_payload(
         self,
         stock_code: str,
         period: str = 'daily',
         limit: int | str = 120,
+        *, end: str | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
         codes = normalize_stock_codes([stock_code])
         if not codes:
             return None, 'Invalid stock code'
         code = codes[0]
-        normalized_limit = safe_int(limit, 120, minimum=30, maximum=500) or 120
+        full = str(limit) == 'all'
+        normalized_limit = None if full else safe_int(limit, 120, minimum=1, maximum=self.SINA_WINDOW) or 120
         normalized_period = str(period or 'daily')
+        if normalized_period not in self.FREQUENCIES:
+            return None, 'Unsupported K-line period'
+        if end:
+            try:
+                if datetime.date.fromisoformat(end).isoformat() != end:
+                    raise ValueError
+            except (ValueError, TypeError):
+                return None, 'Invalid K-line end date (YYYY-MM-DD)'
 
-        sina_records: list[dict[str, Any]] = []
-        sina_error: str | None = None
-        try:
-            sina_records = self._fetch_sina_kline_cached(code, normalized_period, normalized_limit)
-        except Exception as exc:
-            sina_error = str(exc)
-
-        if sina_records:
-            quote_block = self._overlay_realtime(sina_records, code)
+        records, source, detail = self.history(code, normalized_period, normalized_limit, end=end)
+        daily = self.FREQUENCIES[normalized_period] == '1d'
+        if records:
+            message = f'补数未完整，展示已入库的 {len(records)} 根，截至 {records[-1]["date"]}。' if detail or (normalized_limit and len(records)<normalized_limit) else None
+            quote_block = self._overlay_realtime(records, code) if daily and not end and source == 'sqlite:sina' else None
             name = (quote_block or {}).get('name') or ''
             return {
                 'code': code,
                 'name': name,
                 'period': normalized_period,
-                'source': 'sina',
+                'source': source,
                 'available': True,
-                'records': sina_records,
-                'panic': panic_from_bars(sina_records, quote=quote_block, period=normalized_period),
-                'patterns': self._pattern_payload(sina_records, code, name),
-                'operation': analyze_operations(sina_records, period=normalized_period),
+                'records': records,
+                'panic': panic_from_bars(records, quote=quote_block, period=normalized_period),
+                'patterns': self._pattern_payload(records, code, name) if daily else [],
+                'operation': analyze_operations(records, period=normalized_period),
                 'quote': quote_block,
                 'quoted': bool(quote_block),
                 'quote_updated_at': quote_block['updated_at'] if quote_block else None,
-            }, None
-
-        local_records, local_source = self.load_local_kline(code, normalized_period, normalized_limit)
-        if local_records:
-            quote_block = self._overlay_realtime(local_records, code)
-            name = (quote_block or {}).get('name') or ''
-            return {
-                'code': code,
-                'name': name,
-                'period': normalized_period,
-                'source': f'local:{local_source}',
-                'available': True,
-                'records': local_records,
-                'panic': panic_from_bars(local_records, quote=quote_block, period=normalized_period),
-                'patterns': self._pattern_payload(local_records, code, name),
-                'operation': analyze_operations(local_records, period=normalized_period),
-                'quote': quote_block,
-                'quoted': bool(quote_block),
-                'quote_updated_at': quote_block['updated_at'] if quote_block else None,
-                'message': 'Sina 行情接口暂不可用，已使用本地缓存数据（可能不是最新）。' if sina_error else None,
-            }, None
-
-        if sina_error:
-            return {
-                'code': code,
-                'name': '',
-                'period': normalized_period,
-                'source': 'sina',
-                'available': False,
-                'records': [],
-                'panic': panic_indicator(),
-                'message': '暂无K线数据：本地没有该股票数据，Sina 行情接口暂不可用。',
-                'detail': sina_error,
+                'message': message,
             }, None
 
         return {
             'code': code,
             'name': '',
             'period': normalized_period,
-            'source': 'sina',
+            'source': 'sqlite',
             'available': False,
             'records': [],
             'panic': panic_indicator(),
-            'message': '暂无K线数据：本地没有该股票数据，Sina 行情接口未返回记录。',
+            'message': 'SQLite 尚无该区间的同频行情；本次未补到数据，稍后会重试。',
+            'detail': detail,
         }, None

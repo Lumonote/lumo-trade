@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import math
 import datetime as dt
+import hashlib
+from collections import defaultdict, deque
 from statistics import mean, median, stdev
+from itertools import accumulate
+
+from analysis.operation_models import confirmed_fractals, impulse_candidates, normalize_bars as structural_bars
 
 INDEXES = {"sh000001": "上证指数", "sh000300": "沪深300", "sz399001": "深证成指",
            "sz399006": "创业板指", "sh000688": "科创50", "sh000852": "中证1000", "sz399303": "国证2000"}
 VERSION = "market_health_v1"
+ICE_MINIMUM = 200
 
 
 def number(value):
@@ -32,7 +38,8 @@ def normalize_bars(bars):
             continue
         close = number(bar.get("close"))
         if len(day) == 10 and close is not None and close > 0:
-            result[day] = {"date": day, **{k: number(bar.get(k)) for k in ("open", "high", "low", "volume")}, "close": close}
+            result[day] = {"date": day, **{k: number(bar.get(k)) for k in ("open", "high", "low", "volume")}, "close": close,
+                           **({'provisional': True} if bar.get('provisional') else {})}
     return sorted(result.values(), key=lambda b: b["date"])
 
 
@@ -49,7 +56,7 @@ def rsi(closes, periods=14):
     return 50.0 if gain == loss == 0 else 100.0 if loss == 0 else 100-100/(1+gain/loss)
 
 
-def index_metrics(symbol, bars):
+def index_metrics(symbol, bars, *, with_chart=True):
     rows = normalize_bars(bars)
     if not rows:
         return {"symbol": symbol, "name": INDEXES.get(symbol, symbol), "available": False}
@@ -85,10 +92,12 @@ def index_metrics(symbol, bars):
     anchor = min(window[:peak_i+1])
     out["levels"] = {str(p): max(window)-(max(window)-anchor)*p for p in (.382, .5, .618, .786)} if anchor < max(window) else {}
     out["swing_low"] = anchor
-    out["series"] = [{"date": r["date"], "close": r["close"],
-                       "ma20": mean(c[i-19:i+1]) if i >= 19 else None,
-                       "ma250": mean(c[i-249:i+1]) if i >= 249 else None}
-                      for i, r in enumerate(rows) if i >= len(rows)-250]
+    if with_chart:
+        sums = list(accumulate(c, initial=0.0))
+        out['series'] = [{**r, **{f'ma{n}': (sums[i]-sums[i-n])/n if i >= n else None for n in (20, 250)}}
+                         for i, r in enumerate(rows, 1)]
+        pivots = confirmed_fractals(structural_bars(bars, keep_gaps=True))
+        out['operation'] = {'fractals': pivots, 'waves': impulse_candidates(pivots)}
     return out
 
 
@@ -149,7 +158,6 @@ def breadth_history(histories, dates):
     每个成分在窗口每天均需有真实收盘价且最早一天已有250根历史；
     停牌/短历史成分整个窗口排除，避免五日确认的分母漂移。
     """
-    import hashlib
     days = sorted(set(dates))
     if not days:
         return []
@@ -163,6 +171,55 @@ def breadth_history(histories, dates):
     return [{**breadth_snapshot({s:[r for r in rows if r["date"] <= day]
                                 for s,rows in stable.items()}, day),
              "cohort":cohort, "backfilled":True} for day in days]
+
+
+def ice_history(histories, dates, *, sample_as_of, calculated_at, method, intraday=False, minimum=ICE_MINIMUM, calendar=None):
+    """Retrospective MA20 breadth. Eligibility is per stock/day, not the MA250 confirmation cohort."""
+    days = {d for d in dates if d <= sample_as_of}
+    positions = {d: i for i, d in enumerate(sorted(set(calendar or [])))}
+    members, hits = defaultdict(list), defaultdict(int)
+    for symbol in sorted(histories):
+        window = deque(maxlen=20)
+        prior = None
+        for row in normalize_bars(histories[symbol]):
+            day, close = row['date'], row['close']
+            if day > sample_as_of:
+                break
+            if positions:
+                pos = positions.get(day)
+                if pos is None:
+                    continue
+                if prior is not None and pos != prior+1:
+                    window.clear()
+                prior = pos
+            window.append(close)
+            if len(window) == 20 and day in days:
+                members[day].append(symbol)
+                # Subtract the latest close first: a flat decimal series is exactly on its MA.
+                hits[day] += math.fsum(v-close for v in window) < -1e-12 * close
+    return [{'as_of': d, 'above_ma20': 100*hits[d]/len(group), 'above_count': hits[d],
+             'denominators': {'above_ma20': len(group)},
+             'cohort': hashlib.sha256(','.join(group).encode()).hexdigest()[:16], 'method': method,
+             'sample_as_of': sample_as_of, 'calculated_at': calculated_at, 'backfilled': d < sample_as_of,
+             'provisional': intraday and d == sample_as_of}
+            for d, group in sorted(members.items()) if len(group) >= minimum]
+
+
+def merge_ice_history(*batches):
+    """One observation per chart date. A preview cannot supersede an actual close."""
+    by_day = {}
+    for batch in batches:
+        for row in batch:
+            day = row.get('as_of')
+            count = number((row.get('denominators') or {}).get('above_ma20'))
+            value = number(row.get('above_ma20'))
+            if not day or count is None or count < ICE_MINIMUM or value is None or not 0 <= value <= 100:
+                continue
+            old = by_day.get(day)
+            if old and not old.get('provisional') and row.get('provisional'):
+                continue
+            by_day[day] = row
+    return [by_day[d] for d in sorted(by_day)]
 
 
 def _rule(key, label, value, op, threshold, group, note, unit="%"):
@@ -231,7 +288,17 @@ def temperature(indices, market, breadth):
     return {"score": score, "label": label, "coverage": round(coverage, 2), "factors": factors}
 
 
-def confirmation(indices, bars_by_symbol, market, observations, as_of):
+def merge_observations(*batches):
+    """A backfill of a different basket (or an intraday sample) is not a correction."""
+    by_key = {}
+    for batch in batches:
+        for r in batch:
+            key = (r['as_of'], r.get('method') or '', r.get('cohort') or '', bool(r.get('provisional')))
+            by_key[key] = r
+    return sorted(by_key.values(), key=lambda r: r['as_of'])
+
+
+def confirmation(indices, bars_by_symbol, market, observations, as_of, *, breadth=None):
     sh, cy = indices.get("sh000001", {}), indices.get("sz399006", {})
     bars = normalize_bars(bars_by_symbol.get("sh000001", []))
     def reversal(up):
@@ -245,12 +312,13 @@ def confirmation(indices, bars_by_symbol, market, observations, as_of):
         return (change >= 2 if up else change <= -2) and event["volume"] >= mean(volumes)*1.3 and (last["close"] >= event["close"] if up else last["close"] <= event["close"])
     def breadth_days(up):
         days = [r["date"] for r in bars[-5:]]
-        observed = {r["as_of"]: r for r in observations}
-        if len(days) < 5 or any(d not in observed or observed[d].get("above_ma250") is None for d in days):
+        if len(days) < 5:
             return None
-        if len({observed[d].get("method") for d in days}) != 1:
-            return None
-        if len({observed[d].get("cohort") for d in days}) != 1 or any(not observed[d].get("cohort") for d in days):
+        final = breadth if breadth and breadth.get('cohort') else next((r for r in reversed(observations)
+                    if r['as_of'] == days[-1] and not r.get('provisional')), {})
+        observed = {r['as_of']: r for r in observations if final.get('cohort') and final.get('method')
+                    and not r.get('provisional') and (r.get('method'), r.get('cohort')) == (final['method'], final['cohort'])}
+        if any(observed.get(d, {}).get('above_ma250') is None for d in days):
             return None
         return all(observed[d]["above_ma250"] >= 25 if up else observed[d]["above_ma250"] < 50 for d in days)
     sh_known = sh.get("dev20") is not None and sh.get("ma20_rising") is not None
@@ -282,7 +350,7 @@ def build_health(state):
     breadth = b if b.get("as_of") == as_of else {}
     signals = signal_cards(same_day, market, breadth)
     temp = temperature(same_day, market, breadth)
-    confirms = confirmation(same_day, state.get("bars", {}), market, state.get("observations", []), as_of)
+    confirms = confirmation(same_day, state.get("bars", {}), market, state.get("observations", []), as_of, breadth=breadth)
     bottom, top = signals["bottom"], signals["top"]
     stage = "数据不足"
     if temp["score"] is not None:
@@ -301,6 +369,7 @@ def build_health(state):
     result = {"version": VERSION, "as_of": as_of, "stage": stage, "temperature": temp, "signals": signals,
             "confirmation": confirms, "indices": list(indices.values()), "market": m, "breadth": b,
             "style_spread": spread, "observations": state.get("observations", []), "notes": state.get("notes", []),
+            "ice_history": merge_ice_history(state.get('observations', []), state.get('ice_history', [])),
             "source": state.get("source", "baseline"), "updated_at": state.get("updated_at"),
             "historical": state.get("historical", {}), "historical_as_of": "2026-10-22",
             "report_url": "/api/market-health/report"}
@@ -320,7 +389,7 @@ def attach_price_extremes(health, bars_by_symbol):
                 continue
             price = bars[-1].get("low" if side == "bottom" else "high")
             if price and price > 0 and (price <= bars[-1]["close"] if side == "bottom" else price >= bars[-1]["close"]):
-                extremal[symbol] = index_metrics(symbol,bars[:-1]+[{**bars[-1],"close":price}])
+                extremal[symbol] = index_metrics(symbol,bars[:-1]+[{**bars[-1],"close":price}], with_chart=False)
                 prices[symbol] = price
         extreme_rules = {r["key"]:r for r in signal_cards(extremal,{}, {})[side]["rules"]}
         rules = health["signals"][side]["rules"]
@@ -351,13 +420,14 @@ def build_intraday_health(state, live):
         if (not bars or len(bars) < 249 or quote.get("as_of") != date or not price or price <= 0
             or previous is None or abs(previous-bars[-1]["close"]) > max(.02,previous*.00005)):
             continue
-        temporary["bars"][symbol] = bars+[{"date":date,"close":price,"open":quote.get("open"),
+        temporary["bars"][symbol] = bars+[{"date":date,"close":price,"open":quote.get("open"),"provisional":True,
                                           "high":quote.get("high"),"low":quote.get("low"),"volume":None}]
         accepted[symbol] = quote
     if "sh000001" not in accepted:
         return None
     temporary["market"] = live.get("market") or state.get("market",{})
     temporary["breadth"] = live.get("breadth") or state.get("breadth",{})
+    temporary['ice_history'] = merge_ice_history(state.get('ice_history', []), live.get('observations', []), live.get('ice_history', []))
     result = build_health(temporary)
     result.update(provisional=True,quote_at=accepted["sh000001"]["quote_at"],
                   source="intraday",confirmation=closed["confirmation"],confirmation_as_of=closed["as_of"],

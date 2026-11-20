@@ -281,6 +281,7 @@
     if(span&&data.participant==="etf"&&job.status==="finished"&&result?.processed_days!=null){
       return `${span}已处理 ${result.processed_days} 个交易日，其中 ${result.amount_days} 日有可估算净额${notes?` · ${notes}`:""}`;
     }
+    if(job?.status==="finished")return `更新完成${result?.as_of?` · 数据截至 ${result.as_of}`:""}${notes?` · ${notes}`:""}`;
     return notes;
   }
   async function load(kind) {
@@ -291,6 +292,8 @@
       const busy=data.job&&["queued","running"].includes(data.job.status);$(prefix+"Refresh").disabled=Boolean(busy||s.refreshing);$(prefix+"Export").disabled=!data.as_of;
       if(!s.refreshing)$(prefix+"Status").textContent=refreshStatus(data,busy);
       if(busy)s.poll=setTimeout(()=>load(kind),2500);
+      const missing=kind==="financing"?!data.coverage?.stocks:!data.data_as_of;
+      if(missing&&!data.job&&!s.refreshing&&!s.autoFillAttempted){s.autoFillAttempted=true;void refresh(kind);}
       return true;
     }catch(e){if(id!==s.id)return false;error(prefix,`${e.message}。已显示的研究保留原日期。`);$(prefix+"Refresh").disabled=Boolean(s.refreshing);return false;}
   }

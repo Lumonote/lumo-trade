@@ -15,6 +15,16 @@
   <div id="mmInsights" class="mh-box mh-space"></div>
   <div class="mm-grid mh-space"><div id="mmTrend" class="mh-box"></div><div id="mmScatter" class="mh-box"></div></div>
   <div id="mmValuationComparison" class="mh-box mh-space"></div>
+  <section class="mh-box mh-space" aria-labelledby="mmCycleTitle">
+    <div class="mh-box-head"><div><h3 id="mmCycleTitle">库存周期与估值交叉验证</h3><p>制造业新订单与产成品存货同比的逐月变化。按披露日回放，不计入估值或压力评分。</p></div></div>
+    <form id="mmCycleQuery" class="mm-candle-filters">
+      <label>统计起始月<input id="mmCycleStart" type="month"></label>
+      <label>披露截止日<input id="mmCycleDate" type="date" required></label>
+      <button class="button secondary" type="submit">回放周期</button>
+      <button id="mmCycleReset" class="button secondary" type="button">返回快照</button>
+    </form>
+    <p id="mmCycleError" role="alert" class="mh-error" hidden></p><div id="mmCycle" aria-live="polite"></div>
+  </section>
   <section id="mmFactorHistory" class="mh-box mh-space" aria-labelledby="mmFactorHistoryTitle" hidden>
     <div class="mh-box-head"><div><h3 id="mmFactorHistoryTitle">指标 K 线</h3><p id="mmFactorCoverage"></p></div></div>
     <form id="mmCandleQuery" class="mm-candle-filters">
@@ -22,6 +32,7 @@
       <label>结束日期<input id="mmCandleEnd" type="date" required></label>
       <label>聚合周期<select id="mmCandleBucket"><option value="week">周</option><option value="month">月</option><option value="quarter">季</option></select></label>
       <button class="button secondary" type="submit">查询区间</button>
+      <button class="button secondary" id="mmCandleAll" type="button">全部历史</button>
       <button class="button secondary" id="mmCandleReset" type="button">最近一年</button>
     </form>
     <p class="mh-note" id="mmCandleDetail"></p>

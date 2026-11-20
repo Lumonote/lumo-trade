@@ -1,0 +1,216 @@
+{
+  "new_orders": [
+    {
+      "date": "2025-07-31",
+      "period": "2025-07",
+      "value": 49.4,
+      "published_on": "2025-07-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202507/t20250731_1960551.html"
+    },
+    {
+      "date": "2025-08-31",
+      "period": "2025-08",
+      "value": 49.5,
+      "published_on": "2025-08-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202508/t20250831_1960937.html"
+    },
+    {
+      "date": "2025-09-30",
+      "period": "2025-09",
+      "value": 49.7,
+      "published_on": "2025-09-30",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202509/t20250930_1961438.html"
+    },
+    {
+      "date": "2025-10-31",
+      "period": "2025-10",
+      "value": 48.8,
+      "published_on": "2025-10-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202510/t20251031_1961740.html"
+    },
+    {
+      "date": "2025-11-30",
+      "period": "2025-11",
+      "value": 49.2,
+      "published_on": "2025-11-30",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202511/t20251130_1961945.html"
+    },
+    {
+      "date": "2025-12-31",
+      "period": "2025-12",
+      "value": 50.8,
+      "published_on": "2025-12-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202512/t20251231_1962218.html"
+    },
+    {
+      "date": "2026-01-31",
+      "period": "2026-01",
+      "value": 49.2,
+      "published_on": "2026-01-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202601/t20260131_1962416.html"
+    },
+    {
+      "date": "2026-02-28",
+      "period": "2026-02",
+      "value": 48.6,
+      "published_on": "2026-03-04",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202603/t20260304_1962699.html"
+    },
+    {
+      "date": "2026-03-31",
+      "period": "2026-03",
+      "value": 51.6,
+      "published_on": "2026-03-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202603/t20260331_1962889.html"
+    },
+    {
+      "date": "2026-04-30",
+      "period": "2026-04",
+      "value": 50.6,
+      "published_on": "2026-04-30",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202604/t20260430_1963473.html"
+    },
+    {
+      "date": "2026-05-31",
+      "period": "2026-05",
+      "value": 49.9,
+      "published_on": "2026-05-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202605/t20260531_1963824.html"
+    },
+    {
+      "date": "2026-06-30",
+      "period": "2026-06",
+      "value": 51.2,
+      "published_on": "2026-06-30",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202606/t20260630_1964032.html"
+    },
+    {
+      "date": "2026-07-31",
+      "period": "2026-07",
+      "value": 48.5,
+      "published_on": "2026-07-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202607/t20260731_1964253.html"
+    },
+    {
+      "date": "2026-08-31",
+      "period": "2026-08",
+      "value": 50.6,
+      "published_on": "2026-08-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202608/t20260831_1965154.html"
+    },
+    {
+      "date": "2026-09-30",
+      "period": "2026-09",
+      "value": 50.5,
+      "published_on": "2026-09-30",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202609/t20260930_1965449.html"
+    },
+    {
+      "date": "2026-10-31",
+      "period": "2026-10",
+      "value": 49.4,
+      "published_on": "2026-10-31",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202610/t20261031_1965718.html"
+    }
+  ],
+  "finished_inventory": [
+    {
+      "date": "2025-06-30",
+      "period": "2025-06",
+      "value": 3.1,
+      "published_on": "2025-07-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202507/t20250727_1960504.html"
+    },
+    {
+      "date": "2025-07-31",
+      "period": "2025-07",
+      "value": 2.4,
+      "published_on": "2025-08-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202508/t20250827_1960884.html"
+    },
+    {
+      "date": "2025-09-30",
+      "period": "2025-09",
+      "value": 2.8,
+      "published_on": "2025-10-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202510/t20251027_1961695.html"
+    },
+    {
+      "date": "2025-10-31",
+      "period": "2025-10",
+      "value": 3.7,
+      "published_on": "2025-11-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202511/t20251127_1961933.html"
+    },
+    {
+      "date": "2025-11-30",
+      "period": "2025-11",
+      "value": 4.6,
+      "published_on": "2025-12-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202512/t20251227_1962158.html"
+    },
+    {
+      "date": "2025-12-31",
+      "period": "2025-12",
+      "value": 3.9,
+      "published_on": "2026-01-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202601/t20260127_1962382.html"
+    },
+    {
+      "date": "2026-02-28",
+      "period": "2026-02",
+      "value": 6.6,
+      "published_on": "2026-03-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202603/t20260327_1962868.html"
+    },
+    {
+      "date": "2026-03-31",
+      "period": "2026-03",
+      "value": 5.2,
+      "published_on": "2026-04-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202604/t20260427_1963403.html"
+    },
+    {
+      "date": "2026-04-30",
+      "period": "2026-04",
+      "value": 6.7,
+      "published_on": "2026-05-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202605/t20260527_1963808.html"
+    },
+    {
+      "date": "2026-05-31",
+      "period": "2026-05",
+      "value": 8.8,
+      "published_on": "2026-06-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202606/t20260627_1964019.html"
+    },
+    {
+      "date": "2026-06-30",
+      "period": "2026-06",
+      "value": 9.5,
+      "published_on": "2026-07-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202607/t20260727_1964194.html"
+    },
+    {
+      "date": "2026-07-31",
+      "period": "2026-07",
+      "value": 10.8,
+      "published_on": "2026-08-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202608/t20260827_1965126.html"
+    },
+    {
+      "date": "2026-08-31",
+      "period": "2026-08",
+      "value": 11.0,
+      "published_on": "2026-09-28",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202609/t20260928_1965425.html"
+    },
+    {
+      "date": "2026-09-30",
+      "period": "2026-09",
+      "value": 11.6,
+      "published_on": "2026-10-27",
+      "url": "https://www.stats.gov.cn/sj/zxfb/202610/t20261027_1965697.html"
+    }
+  ]
+}

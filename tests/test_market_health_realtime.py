@@ -9,6 +9,8 @@ import pytest
 from analysis.market_health import INDEXES, build_health, build_intraday_health
 from webui.services import market_health_service as service, market_health_cross_service as cross
 
+pytestmark = pytest.mark.usefixtures('isolated_price_db')
+
 
 def state():
     return json.loads((Path(__file__).resolve().parents[1]/"config/market_health_baseline.json").read_text())

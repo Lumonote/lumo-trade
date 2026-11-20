@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lumo Trade Market Particles</title>
+    <link rel="stylesheet" href="/static/lumo_price_chart.css">
     <style>
         body,
         html {
@@ -280,14 +281,11 @@
             color: #ccc;
         }
 
-        .kline-chart {
-            width: 100%;
-            height: 60px;
-            margin-top: 10px;
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 4px;
-            position: relative;
-        }
+        #particlePicker {position:fixed; z-index:1001; right:12px; bottom:45px; max-width:calc(100vw - 24px); padding:6px; color:#eee; background:#181e21; border:1px solid #454f53; border-radius:6px; font-size:13px}
+        #particlePicker select {max-width:43vw}
+        #particleDialog {box-sizing:border-box; width:min(900px,96vw); max-height:90vh; overflow:auto; border:1px solid #637179; border-radius:8px; padding:14px; color:#26374a}
+        #particleDialog::backdrop {background:#0009}
+        #particleDialog header {display:flex; justify-content:space-between; align-items:center; margin-bottom:8px}
 
         /* Loader */
         #loader {
@@ -397,6 +395,10 @@
         </div>
     </div>
     <div id="root"></div>
+    <form id="particlePicker"><label>监测股票 <select id="particleStocks"><option>读取中</option></select></label> <button disabled>查看 K 线</button></form>
+    <dialog id="particleDialog" aria-labelledby="particleTitle"><header><strong id="particleTitle"></strong><form method="dialog"><button>关闭</button></form></header><div id="particleChart"></div></dialog>
+    <script src="/static/lumo_price_chart.js"></script>
+    <script src="/static/lumo_particle_kline.js"></script>
 
     <script>
         window.setTimeout(() => {
@@ -405,7 +407,7 @@
             if (!loader || loader.style.display === 'none') return;
             loader.classList.add('fallback');
             if (detail) {
-                detail.textContent = '市场粒子是旧版 3D 实验视图，依赖外部 React/Three 图形库。当前环境未能完成加载，请使用桌面市场总览。';
+                detail.textContent = '3D 图形库未就绪。监测股票列表和 K 线可独立使用。';
             }
         }, 6000);
     </script>
@@ -569,7 +571,12 @@
             };
 
             return (
-                <points ref={pointsRef} onPointerOver={handlePointerMove} onPointerOut={() => onHover(null)}>
+                <points ref={pointsRef} onPointerOver={handlePointerMove} onPointerOut={() => onHover(null)} onClick={e => {
+                    const stock = stocks[e.index];
+                    if (e.delta <= 3 && stock && (selectedSectorId === null || stock.sectorId === selectedSectorId)) {
+                        window.LumoParticleKline.open(stock.real_api_code);
+                    }
+                }}>
                     <bufferGeometry>
                         <bufferAttribute attach="attributes-position" count={positions.length / 3} array={positions} itemSize={3} />
                         <bufferAttribute attach="attributes-customColor" count={colors.length / 3} array={colors} itemSize={3} />
@@ -644,7 +651,6 @@
                             // Set Target
                             inactiveMeteor.targetPos.set(...targetStock.position);
                             const targetName = targetStock.name;
-                            const amount = (Math.random() * 5 + 0.5).toFixed(1);
 
                             // Start Position (Random point on a large sphere)
                             const theta = Math.random() * Math.PI * 2;
@@ -664,7 +670,7 @@
 
                             // Log event (occasionally)
                             if (Math.random() < 0.4 && setHudMessage && targetName !== "未知") {
-                                setHudMessage(`⚡ Major Capital Inflow [${targetName}]: ${amount}B`);
+                                setHudMessage(`粒子动画 · ${targetName}`);
                             }
                         }
                     }
@@ -771,32 +777,6 @@
 
         // --- 4. UI Components ---
 
-        // Mini Chart Component (SVG)
-        const MiniKLine = ({ change }) => {
-            const isUp = change > 0;
-            const color = isUp ? '#ff3333' : '#00ff88';
-
-            // Generate fake data path
-            const points = [];
-            let y = 30;
-            for (let i = 0; i < 50; i++) {
-                y += (Math.random() - 0.5) * 10 + (isUp ? 0.5 : -0.5);
-                y = Math.max(5, Math.min(55, y)); // clamp
-                points.push(`${i * (220 / 50)},${60 - y}`);
-            }
-            const pathD = `M ${points.join(' L ')}`;
-
-            return (
-                <div className="kline-chart">
-                    <svg width="100%" height="100%">
-                        <path d={pathD} fill="none" stroke={color} strokeWidth="2" />
-                        {/* Area fill */}
-                        <path d={`${pathD} L 220,60 L 0,60 Z`} fill={color} fillOpacity="0.2" stroke="none" />
-                    </svg>
-                </div>
-            );
-        }
-
         const HUD = ({ hoveredStock, mousePos, selectedSectorId, setSelectedSectorId, hudMessage, marketData }) => {
             const popupRef = useRef();
 
@@ -892,9 +872,9 @@
                             <>
                                 <div className="popup-header">
                                     <div className="popup-title">{hoveredStock.name}</div>
-                                    <div className="popup-code">{hoveredStock.code}</div>
+                                    <div className="popup-code">{hoveredStock.real_api_code ? hoveredStock.code : '背景粒子'}</div>
                                 </div>
-                                <div className="popup-body">
+                                {hoveredStock.real_api_code && <div className="popup-body">
                                     <div className="popup-price-row">
                                         <div className="popup-price" style={{ color: hoveredStock.change > 0 ? '#ff3333' : '#00ff88' }}>
                                             {hoveredStock.price}
@@ -904,15 +884,13 @@
                                         </div>
                                     </div>
 
-                                    <MiniKLine change={hoveredStock.change} />
-
                                     <div className="popup-tags">
                                         {hoveredStock.tags.map((tag, i) => (
                                             tag && <span key={i} className="popup-tag">{tag}</span>
                                         ))}
                                         <span className="popup-tag">Vol: {Math.floor(hoveredStock.volume)}</span>
                                     </div>
-                                </div>
+                                </div>}
                             </>
                         )}
                     </div>
@@ -934,6 +912,7 @@
                         const res = await fetch('/api/snapshot');
                         const data = await res.json();
                         if (data && data.stocks) {
+                            window.LumoParticleKline.update(data.stocks);
                             setMarketData(data);
                         }
                     } catch (e) {

@@ -12,10 +12,13 @@ sys.path.insert(0, str(ROOT))
 from tests.market_test_sandbox import offline_market_runtime
 
 UNIT = ("market_capital", "market_capital_service", "market_macro", "market_health_routes",
+        "market_cycle", "market_ice_service", "market_health_realtime", "kline_service", "kline_patterns_payload",
+        "model_runtime",
         "ohlcv_repo", "opportunity_pattern_backtest", "pattern_backtest", "paper_trading_engine",
         "paper_trading_service", "paper_auto_follow")
-BROWSER = ("market_capital", "market_capital_history", "market_macro", "opportunity_backtest")
-JS = ("desktop_app", "market_capital", "market_macro", "opportunity_backtest")
+BROWSER = ("market_capital", "market_capital_history", "market_macro", "market_ice", "price_charts", "opportunity_backtest")
+JS = ("desktop_app", "desktop_kline", "particle_kline", "price_chart", "market_health", "market_capital",
+      "market_macro", "opportunity_backtest")
 
 
 def benchmark():

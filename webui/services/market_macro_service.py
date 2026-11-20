@@ -20,14 +20,21 @@ from bs4 import BeautifulSoup
 import httpx
 
 from analysis.market_health import number
+from analysis.market_cycle import cycle_report, flow_concentration
 from analysis.market_health_fusion import iso
 from analysis.market_macro import CN10Y_SOURCE, FRED, INDEXES, SPECS, SPREAD, build_events, build_research, clean_series, scenario
 from data_store import kv_repo, tushare_client
 from data_store.connection import close_conn
 from webui.services.market_health_service import now
+from webui.services.market_cycle_sources import AXES, fetch_releases
 
 NAMESPACE = "market_macro"
 BASELINE = Path(__file__).resolve().parents[2] / "config/market_macro_baseline.json.gz"
+CYCLE_BASELINE = BASELINE.with_name('market_cycle_releases.json')
+# Seed keys are versioned to let a new distribution import its updated archive.
+BASELINE_KEY = 'baseline:20261031'
+CYCLE_BASELINE_KEY = 'cycle-releases:20261031'
+BOND_BASELINE_KEY = 'cn10y:20261031'
 FISCAL_URL = SPECS["spending"]["url"]
 DEBT_URL = SPECS["local_new"]["url"]
 FED_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
@@ -68,15 +75,32 @@ def baseline():
     return _load_baseline(_baseline_stamp())
 
 
+def _load_cycle_baseline():
+    try:
+        return json.loads(CYCLE_BASELINE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+
+
+def _stored_json(raw):
+    try:
+        data = json.loads(raw) if raw else None
+    except (ValueError, UnicodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _with_bond_history(saved):
     if not saved:
-        return baseline()
+        return saved
     series = saved.get("series") or {}
     end = iso(saved.get("as_of"))
     if series.get("cn10y") or not end:
         return saved
     # 老版本用户的其他通道可能比分发包更新，只补国债且不越过用户快照截止日。
-    rows = clean_series(baseline().get("series", {}).get("cn10y"), end)
+    raw = kv_repo.seed_raw(NAMESPACE, BOND_BASELINE_KEY,
+                           lambda: {'cn10y': baseline().get('series', {}).get('cn10y', [])})
+    rows = clean_series(_stored_json(raw).get('cn10y'), end)
     if not rows:
         return saved
     sources = [s for s in saved.get("sources", []) if s.get("name") != CN10Y_SOURCE["name"]]
@@ -84,15 +108,26 @@ def _with_bond_history(saved):
         **CN10Y_SOURCE, "rows": len(rows), "date": rows[-1]["date"], "status": "分发基线"}]}
 
 
+def _with_cycle_history(data, archive):
+    cutoff = data.get('as_of') or ''
+    releases = {}
+    for key in AXES:
+        merged = {(r['period'], r['published_on'], r['url']): r for source in (archive, data.get('cycle_releases') or {})
+                  for r in source.get(key, []) if r.get('published_on') and r['published_on'] <= cutoff}
+        releases[key] = [merged[k] for k in sorted(merged)]
+    return {**data, 'cycle_releases': releases} if data else data
+
+
 class _Snapshot:
-    def __init__(self, raw, baseline_stamp):
-        try:
-            saved = json.loads(raw) if raw else None
-        except (ValueError, UnicodeError):
-            saved = None
-        self.data = _with_bond_history(saved)
-        self.version = f"{baseline_stamp}:{hashlib.sha256(raw).hexdigest() if raw else 'baseline'}"
+    def __init__(self, raw, archive_raw):
+        saved = _stored_json(raw)
+        if not saved and raw:
+            raw = kv_repo.seed_raw(NAMESPACE, BASELINE_KEY, baseline)
+            saved = _stored_json(raw)
+        self.data = _with_cycle_history(_with_bond_history(saved), _stored_json(archive_raw))
+        self.version = f'{hashlib.sha256(raw or b"").hexdigest()}:{hashlib.sha256(archive_raw or b"").hexdigest()}'
         self.research = lru_cache(maxsize=8)(partial(build_research, self.data))
+        self.cycle = lru_cache(maxsize=12)(partial(cycle_report, self.data))
 
     def events(self, equity, category, keyword, limit=1000, offset=0):
         return build_events(self.data, equity=equity, category=category, keyword=str(keyword or "")[:100],
@@ -105,7 +140,11 @@ _snapshot_for = lru_cache(maxsize=1)(_Snapshot)
 
 
 def _snapshot():
-    return _snapshot_for(kv_repo.get_raw(NAMESPACE, "bundle"), _baseline_stamp())
+    raw = kv_repo.get_raw(NAMESPACE, "bundle")
+    if raw is None:
+        raw = kv_repo.seed_raw(NAMESPACE, BASELINE_KEY, baseline)
+    archive = kv_repo.seed_raw(NAMESPACE, CYCLE_BASELINE_KEY, _load_cycle_baseline)
+    return _snapshot_for(raw, archive)
 
 
 def bundle():
@@ -123,13 +162,20 @@ def events(*, equity="csi300", category="all", keyword="", limit=1000, offset=0)
             "events": snap.events(equity, category, keyword, limit, offset)}
 
 
+def cycle(equity, cutoff):
+    if equity not in INDEXES or not cutoff:
+        raise ValueError('请选择研究指数和回放截止日')
+    snap = _snapshot()
+    return {**deepcopy(snap.cycle(equity, cutoff)), 'snapshot_version': snap.version}
+
+
 def query(jobs=None, *, equity="csi300", factor="real10y", window=252, lag=0, frequency="daily",
           category="all", keyword="", earnings=0, pe=0, discount_bp=-25, duration=10):
     assumptions = scenario(float(earnings), float(pe), float(discount_bp), float(duration))
     snap = _snapshot()
     event_data = snap.events(equity, category, keyword)
     research = snap.research(equity=equity, factor=factor, window=int(window), lag=int(lag), frequency=frequency)
-    return {**deepcopy(research), **status(jobs), "events": event_data, "scenario": assumptions,
+    return {**deepcopy(research), **status(jobs), "events": event_data, "scenario": assumptions, "cycle": deepcopy(snap.cycle(equity)),
             "snapshot_version": snap.version, "today": now().date().isoformat(), "available": bool(snap.data),
             "indexes": [{"key": k, "code": v[0], "name": v[1]} for k, v in INDEXES.items()],
             "factors": [{"key": k, **v} for k, v in SPECS.items()]}
@@ -333,7 +379,8 @@ def collect(progress=lambda message: None, old=None):
     result = {"as_of": end, "series": dict(old.get("series") or {}), "equities": dict(old.get("equities") or {}),
               "valuations": dict(old.get("valuations") or {}), "sectors": dict(old.get("sectors") or {}),
               "fiscal": old.get("fiscal", []), "debt": old.get("debt", []), "calendar": old.get("calendar", []),
-              "events": POLICIES, "errors": [], "sources": []}
+              "events": POLICIES, "errors": [], "sources": [], "cycle_flows": list(old.get('cycle_flows') or []),
+              "cycle_releases": old.get('cycle_releases') or {}}
     tasks = {}
     start, compact_end = "20140101", end.replace("-", "")
     for key, (code, *_) in FRED.items():
@@ -356,6 +403,7 @@ def collect(progress=lambda message: None, old=None):
     tasks[("raw", "industries")] = lambda: _records("index_classify", level="L1", src="SW2021")
     tasks[("raw", "fiscal_list")] = lambda: listing(FISCAL_URL, pages=3)
     tasks[("raw", "debt_list")] = lambda: listing(DEBT_URL, pages=3)
+    tasks[('raw', 'nbs')] = lambda: fetch_releases(_text, end, result['cycle_releases'])
     raw, fresh = {}, set()
     def run(task_map):
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -384,6 +432,31 @@ def collect(progress=lambda message: None, old=None):
                     result["errors"].append(f"{group}/{key}读取未完成（{type(exc).__name__}），保留原日期与原快照")
         close_conn()
     run(tasks)
+    if 'nbs' in raw:
+        result['cycle_releases'], failures = raw['nbs']
+        if failures:
+            result['errors'].append(f'库存周期有{failures}页未能读取或解析，保留归档披露')
+        if not any(result['cycle_releases'].values()) or result['cycle_releases'] == old.get('cycle_releases'):
+            fresh.discard(('raw', 'nbs'))
+    # Classify a single observed cross-section, not overlapping sector leaderboards.
+    prices = result['equities'].get('shcomp') or []
+    if prices and ('equities', 'shcomp') in fresh:
+        day = prices[-1]['date'].replace('-', '')
+        try:
+            point = flow_concentration(_records('daily', trade_date=day, fields='ts_code,trade_date,amount'),
+                                       _records('stock_basic', list_status='L', fields='ts_code,industry'),
+                                       _records('moneyflow', trade_date=day,
+                                                fields='ts_code,trade_date,buy_lg_amount,buy_elg_amount,sell_lg_amount,sell_elg_amount'), day)
+            if point['universe']:
+                point['captured_on'] = end
+                # Keep older vintages available to point-in-time replay.
+                points = {(r['date'], r.get('captured_on')): r for r in result['cycle_flows']}
+                key = point['date'], end
+                if key not in points or points[key].get('value') is None or point['value'] is not None:
+                    points[key] = point
+                result['cycle_flows'] = list(points.values())
+        except Exception:
+            result['errors'].append('大单行业集中度未能读取，未推算数值')
     def assign_series(key, rows):
         existing = result["series"].get(key, [])
         if not rows or existing and rows[-1]["date"] < existing[-1]["date"]:

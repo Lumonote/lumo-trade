@@ -7,6 +7,7 @@
     <script async src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
     <link rel="stylesheet" href="/static/lumo_desktop.css?v={{ asset_v('lumo_desktop.css') }}" />
     <link rel="stylesheet" href="/static/lumo_operations.css?v={{ asset_v('lumo_operations.css') }}" />
+    <link rel="stylesheet" href="/static/lumo_price_chart.css?v={{ asset_v('lumo_price_chart.css') }}" />
     <link rel="stylesheet" href="/static/lumo_panic.css?v={{ asset_v('lumo_panic.css') }}" />
     {% if active_page == 'market_health' %}
     <link rel="stylesheet" href="/static/lumo_market_health.css?v={{ asset_v('lumo_market_health.css') }}" />
@@ -743,7 +744,7 @@
                       <button id="openKlineModalBtn" class="button secondary compact" type="button" disabled>大图</button>
                     </div>
                   </div>
-                  <div id="klineChart" class="panel-body chart trading-kline-preview" role="button" tabindex="0" title="大图K线"></div>
+                  <div id="klineChart" class="panel-body chart trading-kline-preview"></div>
                 </div>
                 <div class="panel">
                   <div class="panel-header">
@@ -1505,12 +1506,6 @@
               <span id="klineModalVolume" class="pill">--</span>
               <span id="klineInsightStatus" class="pill warn">股票分析读取中</span>
             </div>
-            <div class="modal-kline-actions">
-              <button class="button secondary compact" type="button" data-kline-range="60">60日</button>
-              <button class="button secondary compact" type="button" data-kline-range="120">120日</button>
-              <button class="button secondary compact" type="button" data-kline-range="240">240日</button>
-              <button class="button secondary compact" type="button" data-kline-range="500">全部</button>
-            </div>
           </div>
           <div class="modal-kline-workbench">
             <div id="klineModalChart" class="modal-kline-chart"></div>
@@ -1766,6 +1761,8 @@
     <script src="/static/provider_context_menu.js"></script>
     <script src="/static/lumo_open_external.js?v={{ asset_v('lumo_open_external.js') }}"></script>
     <script src="/static/lumo_opportunity_backtest.js?v={{ asset_v('lumo_opportunity_backtest.js') }}"></script>
+    <script src="/static/lumo_price_chart.js?v={{ asset_v('lumo_price_chart.js') }}"></script>
+    <script src="/static/lumo_desktop_kline.js?v={{ asset_v('lumo_desktop_kline.js') }}"></script>
     <script src="/static/lumo_desktop_app.js?v={{ asset_v('lumo_desktop_app.js') }}"></script>
     {% if active_page == 'screener' %}
     <script src="/static/lumo_screener.js?v={{ asset_v('lumo_screener.js') }}"></script>

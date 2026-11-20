@@ -723,6 +723,14 @@ _MIGRATIONS: List[Tuple[int, str]] = [
           ON sector_turning_signal(trade_date, state);
         """,
     ),
+    (22, """
+        CREATE TABLE IF NOT EXISTS provider_bar (
+          source TEXT NOT NULL, symbol TEXT NOT NULL, frequency TEXT NOT NULL, ts TEXT NOT NULL,
+          open REAL, high REAL, low REAL, close REAL NOT NULL, volume REAL, amount REAL,
+          provisional INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (source, symbol, frequency, ts)
+        ) WITHOUT ROWID;
+    """),
 ]
 
 

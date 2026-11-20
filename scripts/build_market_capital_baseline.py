@@ -24,7 +24,8 @@ def main():
     results = {}
     try:
         for kind in kinds:
-            results[kind] = service.bundle(kind) if args.from_cache else service.collect(kind, lambda message: print(message, flush=True))
+            results[kind] = (service.bundle(kind, include_daily=True) if args.from_cache
+                             else service.collect(kind, lambda message: print(message, flush=True)))
             if not results[kind]:
                 raise ValueError(f"{kind}尚无可打包的研究缓存")
             print(json.dumps({"kind": kind, "as_of": results[kind]["as_of"], "sources": results[kind]["sources"], "errors": results[kind]["errors"]}, ensure_ascii=False), flush=True)

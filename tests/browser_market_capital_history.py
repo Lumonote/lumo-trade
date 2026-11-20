@@ -35,10 +35,26 @@ with market_page() as (page, read, OUT):
     page.set_default_timeout(15000)
     errors, prices, history_requests = [], [], []
     participant_requests, refresh_requests, refresh_polls = [], [], []
+    financing_refreshes, financing_polls = [], []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("request", lambda request: prices.append(request.url) if "/api/stock-kline/" in request.url else None)
     page.route("**/api/market-health/refresh", lambda route: route.fulfill(json={"job": {"status": "failed"}}))
-    page.route("**/api/market-health/financing?*", lambda route: route.fulfill(json=finance))
+
+    def financing(route):
+        job = None
+        if financing_refreshes:
+            financing_polls.append(len(financing_refreshes))
+            done = financing_polls.count(len(financing_refreshes)) > 1
+            job = {"status": "finished" if done else "running", "progress": 100 if done else 50,
+                   "result": {"as_of": DATES[-1]} if done else None}
+        route.fulfill(json={**finance, "job": job})
+
+    def refresh_financing(route):
+        financing_refreshes.append(route.request.post_data_json)
+        route.fulfill(status=202, json={"job": {"status": "queued"}})
+
+    page.route("**/api/market-health/financing?*", financing)
+    page.route("**/api/market-health/financing/refresh", refresh_financing)
 
     def participants(route):
         q = {k: v[0] for k, v in parse_qs(urlsplit(route.request.url).query).items()}
@@ -189,16 +205,25 @@ with market_page() as (page, read, OUT):
         expect(page.locator("#mpHistorySummary")).to_contain_text(amount)
         assert (history_requests[-1]["start"], history_requests[-1]["end"]) == (start, end)
         page.locator("#mpHistoryClose").click()
-    # 趋势图复用逐日命中；融资历史使用隔离夹具，不需要实际采集。
+    # 两融个股样本为空时首次自动补数，之后仍可手动更新。
     page.set_viewport_size({"width": 1440, "height": 1000})
     page.locator("#mhTab-financing").click()
+    for attempt in (1, 2):
+        if attempt == 2:
+            page.locator("#mfRefresh").click()
+        expect(page.locator("#mfStatus")).to_contain_text("更新中 50%")
+        expect(page.locator("#mfRefresh")).to_be_disabled()
+        expect(page.locator("#mfStatus")).to_contain_text(f"更新完成 · 数据截至 {DATES[-1]}")
+        expect(page.locator("#mfRefresh")).to_be_enabled()
+        assert len(financing_refreshes) == attempt
     finance_chart = page.locator("#mfTrend .mh-date-chart")
     finance_chart.locator(f'[data-mh-chart-date="{DATES[1]}"]').hover()
     expect(finance_chart.locator(".mh-date-label")).to_have_text(DATES[1])
     page.locator("#mhTab-indices").click()
-    index_chart = page.locator("#mhView-indices .mh-date-chart")
+    index_chart = page.locator("#mhIndexChart .lp-frame")
     index_date = next(row for row in snapshot["indices"] if row["symbol"] == "sh000001")["series"][-2]["date"]
-    index_chart.locator(f'[data-mh-chart-date="{index_date}"]').hover()
-    expect(index_chart.locator(".mh-date-label")).to_have_text(index_date)
+    index_chart.locator("svg").press("End")
+    index_chart.locator("svg").press("ArrowLeft")
+    expect(index_chart.locator(".lp-hover-date")).to_have_text(index_date)
     assert not errors and not prices, (errors, prices)
-    print(json.dumps({"checks": "real zero, missing day, missing NAV, partial totals, sorting, independent range, stale response, empty range, 800px layout, read-only queries, 26-day range refresh, candle dates and amounts, keyboard focus, financing/index hover", "errors": errors}, ensure_ascii=False))
+    print(json.dumps({"checks": "real zero, missing day, missing NAV, partial totals, sorting, independent range, stale response, empty range, 800px layout, read-only queries, 26-day range refresh, candle dates and amounts, financing auto-fill and manual refresh, financing hover, index keyboard dates", "errors": errors}, ensure_ascii=False))

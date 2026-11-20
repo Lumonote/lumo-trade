@@ -19,7 +19,6 @@ def store(monkeypatch):
     monkeypatch.setattr(service.kv_repo, "range_items", lambda ns, a, b: [(k, deepcopy(values[k])) for k in sorted(values) if a <= k <= b])
     monkeypatch.setattr(service.calendar_repo, "open_days", lambda: [])
     monkeypatch.setattr(service, "_baseline", lambda: {})
-    monkeypatch.setattr(service, "_baseline_days", lambda: {k: {} for k in service.DAILY_SOURCES})
     monkeypatch.setattr(service, "now", lambda: dt.datetime(2026, 10, 31, 10, tzinfo=dt.timezone(dt.timedelta(hours=8))))
     return values
 
@@ -38,6 +37,32 @@ def test_each_participant_uses_actual_source_date(store):
     store["participants"] = {"as_of": "2026-10-30", "flow_as_of": "2026-10-29", "calendar": [], "sources": [{"key": "etf", "as_of": "2026-10-28"}]}
     assert service.participants(participant="etf")["as_of"] == "2026-10-28"
     assert service.participants(participant="main")["as_of"] == "2026-10-29"
+
+
+def test_bundled_data_are_read_back_from_sqlite(tmp_path, monkeypatch):
+    from data_store.connection import reset_for_testing
+
+    reset_for_testing()
+    monkeypatch.setenv("KRONOS_SQLITE_PATH", str(tmp_path / "capital.sqlite"))
+    date = "2026-10-29"
+    finance = {"as_of": date, "margin": [{"trade_date": date, "exchange_id": "SSE"}]}
+    flow = {"ts_code": "600000.SH", "trade_date": date, "net_amount": 7}
+    participants = {"as_of": date, "calendar": [date], "flows": [flow], "institutions_days": [date]}
+    monkeypatch.setattr(service, "_baseline", lambda: {"financing": finance, "participants": participants})
+    try:
+        assert service.bundle("financing") == service._read("financing") == finance
+        saved = service.bundle("participants")
+        assert saved == service._read("participants") == {"as_of": date, "calendar": [date]}
+        assert service._read(f"seed:moneyflow_dc:{date}") == [flow]
+        assert service._read(f"seed:top_inst:{date}") == []
+        reset_for_testing()
+        monkeypatch.setattr(service, "_baseline", lambda: pytest.fail("SQLite seed already installed"))
+        assert service.bundle("financing") == finance
+        export = service.bundle("participants", include_daily=True)
+        assert export["flows"] == [flow] and export["institutions_days"] == [date]
+        assert service.history(code="600000")["totals"]["net"] == 70000
+    finally:
+        reset_for_testing()
 
 
 def test_no_global_fallback_invented_stock_or_identity_data(store, monkeypatch):
@@ -96,6 +121,12 @@ def test_financing_refresh_finishes_after_progress_write_failure(store, tmp_path
             raise sqlite3.OperationalError("unable to open database file")
         return append(job_id, message)
     monkeypatch.setattr(jobs, "append_log", append_log)
+    update = jobs.update
+    def update_job(job_id, **fields):
+        if fields.get("progress") == 1:
+            raise sqlite3.OperationalError("database temporarily unavailable")
+        return update(job_id, **fields)
+    monkeypatch.setattr(jobs, "update", update_job)
     job = service.start_refresh("financing", jobs)
     deadline = time.monotonic() + 10
     while (job := jobs.get(job["id"]))["status"] in ("queued", "running") and time.monotonic() < deadline:
@@ -281,8 +312,7 @@ def test_historical_ranking_and_candles_survive_refresh(store, monkeypatch):
     stock = {'ts_code': '600000.SH', 'name': '样本'}
     flow = lambda d, n: {**stock, 'trade_date': d, 'net_amount': n}
     # Baseline, old header and partition overlap. The last two copies of day 3 are duplicates.
-    base = {d: [flow(d, 1)] for d in dates}
-    monkeypatch.setattr(service, '_baseline_days', lambda: {'flows': base, 'institutions': {}})
+    store.update({f'seed:moneyflow_dc:{d}': [flow(d, 1)] for d in dates})
     store['participants'] = {'as_of': dates[-1], 'calendar': dates, 'flows': [flow(dates[0], 0), flow(dates[2], 99)]}
     store['raw:moneyflow_dc:' + dates[2]] = [flow(dates[2], 2)] * 2
     def check():
@@ -306,6 +336,24 @@ def test_historical_ranking_and_candles_survive_refresh(store, monkeypatch):
     assert not set(service.DAILY_SOURCES).intersection(store['participants'])
     chart = check()
     assert chart['data_as_of'] == dates[-1] and chart['available_end'] == recent[-1]
+
+
+def test_partial_refresh_keeps_old_seed_as_latest_available_flow(store, monkeypatch):
+    date = "2026-09-30"
+    stock = {"ts_code": "600000.SH", "name": "样本"}
+    flow = {**stock, "trade_date": date, "net_amount": 7}
+    store["seed:moneyflow_dc:" + date] = [flow]
+    store["participants"] = {"as_of": date, "calendar": [date], "stocks": [stock], "etf": [{"trade_date": date}]}
+    recent = [f"2026-10-{n:02}" for n in range(1, 23)]
+    monkeypatch.setattr(service, "_sse_open_days", lambda *_: recent)
+    monkeypatch.setattr(service, "_records", lambda method, **kwargs: [stock] if method == "stock_basic" else [])
+    monkeypatch.setattr(service, "_collect_etf", lambda *args: None)
+    monkeypatch.setattr(service.quant_radar_repo, "list_dates", lambda **kwargs: [])
+    monkeypatch.setattr(service, "read_baseline", lambda: {})
+    service.collect("participants")
+    report = service.participants()
+    assert report["as_of"] == report["data_as_of"] == date
+    assert report["totals"]["net"] == 70000
 
 
 def test_seats_distinguish_observed_empty_and_uncollected(store, monkeypatch):
