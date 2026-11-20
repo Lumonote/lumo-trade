@@ -187,10 +187,11 @@ def flow_rows(bundle):
     result = []
     for raw in indexed(bundle.get("flows", [])).values():
         code, date = raw["ts_code"], iso(raw["trade_date"])
-        if code not in meta:
+        if code not in meta and not is_a_stock(security_code(code)):
             continue
-        row = {"code": code, "date": date, "name": meta[code].get("name") or raw.get("name") or code,
-               "sector": meta[code].get("industry") or "未分类", "pct": number(raw.get("pct_change"))}
+        info = meta.get(code, {})
+        row = {"code": code, "date": date, "name": info.get("name") or raw.get("name") or code,
+               "sector": info.get("industry") or "未分类", "pct": number(raw.get("pct_change"))}
         for key, field in (("main", "net_amount"), ("elg", "buy_elg_amount"), ("lg", "buy_lg_amount"), ("md", "buy_md_amount"), ("sm", "buy_sm_amount")):
             value = number(raw.get(field))
             row[key] = value * 1e4 if value is not None else None
@@ -308,6 +309,8 @@ def participant_history(bundle, *, participant, code, start, end, calendar=None,
                 grouped[r["date"]].append(r)
         daily = {date: {"date": date, **{key: total(items, key) for key in ("buy", "sell", "net")}, "evidence": items}
                  for date, items in grouped.items()}
+        for d in bundle.get('institutions_days', []):
+            daily.setdefault(d, {'date': d, 'status': 'no_public_seat', 'net': None})
     elif participant == "national":
         events = sorted((dict(r, date=r["as_of"], net=None, status="observed") for r in bundle.get("national", [])
                          if security_code(r.get("code")) == code and r.get("as_of")),
@@ -351,8 +354,11 @@ def participant_history(bundle, *, participant, code, start, end, calendar=None,
             note += " 区间含未刷新交易日或交易日历缺口，仅展示已有数据。"
     elif outside:
         note += " 查询范围超出本地交易日历，未覆盖日期不补零。"
+    if participant != 'national' and any(r['status'] == 'unrecorded' for r in rows):
+        note += " 区间内有未采集或未披露的交易日。"
+    actual = [r['date'] for r in rows if r['status'] not in ('unrecorded', 'no_public_seat')]
     return {"participant": participant, "code": code, "name": name, "start": start, "end": end,
-            "data_as_of": all_dates[-1] if all_dates else None, "available_start": all_dates[0] if all_dates else None,
+            "data_as_of": max(actual, default=None), "available_start": min(all_dates, default=None), "available_end": max(all_dates, default=None),
             "rows": rows, "calendar": calendar, "coverage": coverage, "note": note,
             "totals": {key: observed_total(rows, key) for key in ("buy", "sell", "net", "share_change")}}
 
@@ -363,6 +369,8 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
     start = start or end
     expected = sum(1 for d in dates if start and start <= d <= end)
     outside_window = bool(dates and start and (start < dates[0] or end > dates[-1]))
+    day_key = 'institutions_days' if participant == 'institution' else 'flows_days' if participant in ('main', 'elg', 'lg', 'md', 'sm') else None
+    missing_days = bool(day_key in bundle and expected > len(bundle[day_key]))
     if participant == "etf":
         predecessors = etf_predecessors(bundle)
         dates = sorted(predecessors)
@@ -416,7 +424,8 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
     for row in rows:
         if participant not in ("national", "quant"):
             row["expected_days"] = expected
-            row["complete"] = row.get("days", 0) == expected and expected > 0 and not outside_window
+            covered = len(bundle['institutions_days']) if participant == 'institution' and 'institutions_days' in bundle else row.get('days', 0)
+            row["complete"] = covered == expected and expected > 0 and not outside_window
             if participant in ("main", "elg", "lg", "md", "sm", "etf"):
                 row["complete"] = row["complete"] and row["amount_days"] == expected
     selected_codes = {r["code"] for r in rows}
@@ -458,7 +467,8 @@ def capital_report(bundle, *, start=None, end=None, participant="main", keyword=
             "sectors": sorted(sectors, key=lambda r: r["observed_net"] if r["observed_net"] is not None else float("-inf"), reverse=True), "history": history,
             "totals": {**amounts(rows), "count": len(rows), "complete": sum(r.get("complete", False) for r in rows)},
             "matrix": matrix, "range_note": ("查询区间含未刷新交易日或交易日历缺口，仅展示已取得数据" if participant == "etf" else
-                                             "查询区间超出已采集交易日窗口，仅展示已取得数据，不宣称区间完整") if outside_window else "",
+                                             "查询区间超出已采集交易日窗口，仅展示已取得数据，不宣称区间完整") if outside_window else
+                                             "区间内有未采集或未披露的交易日，仅展示有效小计" if missing_days else "",
             "excluded_nonstock": excluded_nonstock,
             "metadata_coverage": {"missing_names": sum(not text(r["name"]) for r in rows), "missing_sectors": sum(not text(r["sector"]) for r in rows)},
             "calendar": dates, "sources": bundle.get("sources", []), "flow_as_of": bundle.get("flow_as_of")}

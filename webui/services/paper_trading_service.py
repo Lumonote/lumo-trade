@@ -15,6 +15,7 @@ BEGIN IMMEDIATE / COMMIT / ROLLBACK 保证原子。
 """
 from __future__ import annotations
 
+import math
 import re
 from contextlib import contextmanager
 from datetime import datetime
@@ -251,9 +252,10 @@ class PaperTradingService:
         ).fetchone()
         return dict(row) if row else None
 
-    def stats(self) -> dict:
+    def stats(self, as_of=None) -> dict:
         rows = get_conn().execute(
             "SELECT realized_pnl FROM paper_trade WHERE side='sell' AND realized_pnl IS NOT NULL"
+            + (" AND trade_date<=?" if as_of else ""), (as_of,) if as_of else (),
         ).fetchall()
         pnls = [float(r["realized_pnl"]) for r in rows]
         wins = [p for p in pnls if p > 0]
@@ -273,12 +275,13 @@ class PaperTradingService:
             "max_win": max(pnls) if pnls else 0.0,
             "max_loss": min(pnls) if pnls else 0.0,
             "total_realized": sum(pnls),
-            "max_drawdown": self._max_drawdown(),
+            "max_drawdown": self._max_drawdown(as_of),
         }
 
-    def _max_drawdown(self) -> float:
+    def _max_drawdown(self, as_of=None) -> float:
         rows = get_conn().execute(
-            "SELECT total_equity FROM paper_equity_curve ORDER BY trade_date"
+            "SELECT total_equity FROM paper_equity_curve" + (" WHERE trade_date<=?" if as_of else "")
+            + " ORDER BY trade_date", (as_of,) if as_of else (),
         ).fetchall()
         equity = [float(r["total_equity"]) for r in rows if r["total_equity"] is not None]
         if not equity:
@@ -658,17 +661,46 @@ class PaperTradingService:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def marked_positions(self, date=None, *, close_provider=None, ohlcv_loader=None) -> list:
+    def _valuation_date(self, date):
+        today = self._trade_date()
+        day = str(date or today)
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or datetime.strptime(day, "%Y-%m-%d").date().isoformat() != day or day > today:
+            raise ValueError("复盘日期必须有效且不能晚于今天")
+        return day
+
+    def _ledger_at(self, day):
+        cash = initial = float(self.ensure_account()["initial_cash"])
+        positions = {}
+        for t in get_conn().execute(
+            "SELECT ts_code, name, side, qty, gross, fee FROM paper_trade WHERE trade_date<=? "
+            "ORDER BY trade_date, traded_at, id", (day,),
+        ):
+            code, qty, gross, fee = t['ts_code'], t['qty'], t['gross'], t['fee']
+            if t['side'] == 'buy':
+                p = positions.setdefault(code, {'ts_code': code, 'qty': 0, 'avg_cost': 0, 'name': t['name']})
+                p['avg_cost'] = (p['avg_cost'] * p['qty'] + gross + fee) / (p['qty'] + qty)
+                p['qty'] += qty
+                p['name'] = t['name'] or p['name']
+                cash -= gross + fee
+            else:
+                if code not in positions or positions[code]['qty'] < qty:
+                    raise ValueError(f"{day} 前的成交流水持仓不足：{code}，未写入复盘")
+                positions[code]['qty'] -= qty
+                if not positions[code]['qty']:
+                    del positions[code]
+                cash += gross - fee
+        return {'cash': cash, 'initial_cash': initial, 'positions': [positions[k] for k in sorted(positions)]}
+
+    def marked_positions(self, date=None, *, close_provider=None, ohlcv_loader=None, ledger=None) -> list:
         """按当日收盘价为持仓定价(与 mark_to_market / 复盘持仓表同源,避免与实时报价打架)。"""
-        date = str(date) if date else self._trade_date()
-        rows = get_conn().execute(
-            "SELECT ts_code, name, qty, avg_cost FROM paper_position WHERE qty > 0 ORDER BY ts_code"
-        ).fetchall()
+        date = self._valuation_date(date)
+        rows = (ledger or self._ledger_at(date))['positions']
         out = []
         for r in rows:
             avg_cost = float(r["avg_cost"])
             close = self._eod_close(r["ts_code"], date, close_provider, ohlcv_loader)
-            close = float(close) if close is not None else avg_cost
+            if close is None:
+                raise ValueError(f"{r['ts_code']} 缺少截至 {date} 的有效收盘价，未写入权益或复盘")
             qty = int(r["qty"])
             market_value = close * qty
             out.append({
@@ -683,41 +715,44 @@ class PaperTradingService:
             })
         return out
 
-    def mark_to_market(self, date=None, *, close_provider=None, ohlcv_loader=None, marked=None) -> dict:
+    def mark_to_market(self, date=None, *, close_provider=None, ohlcv_loader=None, marked=None, ledger=None) -> dict:
         """按当日收盘价为持仓盯市,写入/更新 paper_equity_curve(daily_pnl = 较前一日权益变动)。
 
         可传入预先算好的 marked(marked_positions 结果)避免重复取价。"""
-        date = str(date) if date else self._trade_date()
-        acc = self.ensure_account()
+        date = self._valuation_date(date)
+        acc = ledger or self._ledger_at(date)
         if marked is None:
-            marked = self.marked_positions(date, close_provider=close_provider, ohlcv_loader=ohlcv_loader)
+            marked = self.marked_positions(date, close_provider=close_provider, ohlcv_loader=ohlcv_loader, ledger=acc)
         position_value = sum(float(p["market_value"]) for p in marked)
         cash = float(acc["cash"])
         total_equity = cash + position_value
-        prev = get_conn().execute(
-            "SELECT total_equity FROM paper_equity_curve WHERE trade_date < ? ORDER BY trade_date DESC LIMIT 1",
-            (date,),
-        ).fetchone()
-        prev_eq = (float(prev["total_equity"]) if prev and prev["total_equity"] is not None
-                   else float(acc["initial_cash"]))
-        daily_pnl = total_equity - prev_eq
-        get_conn().execute(
-            "INSERT INTO paper_equity_curve(trade_date, cash, position_value, total_equity, daily_pnl) "
-            "VALUES(?, ?, ?, ?, ?) "
-            "ON CONFLICT(trade_date) DO UPDATE SET cash=excluded.cash, position_value=excluded.position_value, "
-            "total_equity=excluded.total_equity, daily_pnl=excluded.daily_pnl",
-            (date, cash, position_value, total_equity, daily_pnl),
-        )
+        with self._txn() as conn:
+            prev = conn.execute("SELECT total_equity FROM paper_equity_curve WHERE trade_date < ? "
+                                "ORDER BY trade_date DESC LIMIT 1", (date,)).fetchone()
+            daily_pnl = total_equity - (prev['total_equity'] if prev else acc['initial_cash'])
+            conn.execute(
+                "INSERT INTO paper_equity_curve(trade_date, cash, position_value, total_equity, daily_pnl) "
+                "VALUES(?, ?, ?, ?, ?) ON CONFLICT(trade_date) DO UPDATE SET cash=excluded.cash, "
+                "position_value=excluded.position_value, total_equity=excluded.total_equity, daily_pnl=excluded.daily_pnl",
+                (date, cash, position_value, total_equity, daily_pnl),
+            )
+            conn.execute("UPDATE paper_equity_curve SET daily_pnl=total_equity-? WHERE trade_date="
+                         "(SELECT MIN(trade_date) FROM paper_equity_curve WHERE trade_date>?)", (total_equity, date))
         return {"trade_date": date, "cash": cash, "position_value": position_value,
                 "total_equity": total_equity, "daily_pnl": daily_pnl}
 
     def _eod_close(self, code, date, close_provider, ohlcv_loader) -> Optional[float]:
-        if close_provider is not None:
+        def positive(value):
             try:
-                v = close_provider(code)
-                return float(v) if v not in (None, "") else None
-            except Exception:
+                value = float(value)
+                return value if math.isfinite(value) and value > 0 else None
+            except (TypeError, ValueError):
                 return None
+        current = date == self._trade_date()
+        if close_provider is not None and current:
+            v = positive(close_provider(code))
+            if v is not None:
+                return v
         loader = ohlcv_loader or _load_daily
         try:
             df = loader(code)
@@ -729,29 +764,30 @@ class PaperTradingService:
                 sub["_d"] = sub["timestamps"].apply(
                     lambda ts: ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
                 )
-                sub = sub[sub["_d"] <= date]
+                sub = sub[(sub["_d"] <= date) & sub["_d"].str.fullmatch(r"\d{4}-\d{2}-\d{2}")].sort_values("_d")
+                sub = sub[sub['close'].map(positive).notna()]
                 if len(sub) > 0:
                     return float(sub.iloc[-1]["close"])
             except Exception:
                 pass
-        return self._quote_price(code)
+        return positive(self._quote_price(code)) if current else None
 
     # ----------------------------- EOD 当日复盘 -----------------------------
 
     def run_eod(self, date=None, *, ohlcv_loader=None, close_provider=None,
                 market_env_text=None, results_dir=None, write_review=True) -> dict:
         """收盘 EOD:撮合补算 → 盯市 → 当日有持仓/成交则生成复盘 markdown(幂等,已存在不重写)。"""
-        date = str(date) if date else self._trade_date()
-        settle_summary = self.settle(as_of=date, ohlcv_loader=ohlcv_loader)
-        marked = self.marked_positions(date, close_provider=close_provider, ohlcv_loader=ohlcv_loader)
-        mtm = self.mark_to_market(date, marked=marked)
+        date = self._valuation_date(date)
+        historical = date < self._trade_date()
+        settle_summary = ({'filled_count': 0, 'rejected_count': 0} if historical else
+                          self.settle(as_of=date, ohlcv_loader=ohlcv_loader))
+        ledger = self._ledger_at(date)
+        marked = self.marked_positions(date, close_provider=close_provider, ohlcv_loader=ohlcv_loader, ledger=ledger)
+        mtm = self.mark_to_market(date, marked=marked, ledger=ledger)
         day_trades = get_conn().execute(
             "SELECT * FROM paper_trade WHERE trade_date=? ORDER BY id", (date,)
         ).fetchall()
-        has_positions = get_conn().execute(
-            "SELECT 1 FROM paper_position WHERE qty > 0 LIMIT 1"
-        ).fetchone() is not None
-        activity = bool(day_trades) or has_positions
+        activity = bool(day_trades or marked)
         generated, review_path = False, None
         if write_review and activity and results_dir:
             from pathlib import Path
@@ -767,6 +803,7 @@ class PaperTradingService:
                 review_path, generated = str(path), True
         return {
             "date": date,
+            "historical": historical,
             "settled": settle_summary["filled_count"],
             "rejected": settle_summary["rejected_count"],
             "equity": mtm,
@@ -776,11 +813,10 @@ class PaperTradingService:
         }
 
     def _render_review(self, date, day_trades, mtm, market_env_text, positions=None) -> str:
-        summary = self.account_summary()
-        stats = self.stats()
+        stats = self.stats(as_of=date)
         if positions is None:
             positions = self.marked_positions(date)
-        initial = float(summary.get("initial_cash") or 0.0)
+        initial = float(self.ensure_account()['initial_cash'])
         total_return = (mtm["total_equity"] - initial) / initial if initial else 0.0
         lines = [f"# 📓 模拟盘当日复盘 {date}", ""]
         if market_env_text:
@@ -793,7 +829,7 @@ class PaperTradingService:
             f"| 持仓市值 | {mtm['position_value']:,.2f} |",
             f"| 当日盈亏 | {mtm['daily_pnl']:+,.2f} |",
             f"| 累计收益率 | {total_return * 100:+.2f}% |",
-            f"| 已实现盈亏 | {summary['realized_pnl']:+,.2f} |",
+            f"| 已实现盈亏 | {stats['total_realized']:+,.2f} |",
             "",
             f"## 🧾 当日成交({len(day_trades)} 笔)", "",
         ]

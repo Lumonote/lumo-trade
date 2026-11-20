@@ -82,6 +82,83 @@ def test_event_anchor_after_announcement_incomplete_and_overlap():
     assert filtered["summary"][0]["n"] == 1
 
 
+def test_events_search_full_history_and_summarize_before_paging():
+    prices = series(1200, start="2021-01-01")
+    events = [{"id": str(i), "date": row["date"], "title": f"event {i}", "category": "fed"}
+              for i, row in enumerate(prices[:1102])]
+    # The earlier version of this event matched; the correction does not.
+    events.append({**events[0], "title": "corrected", "category": "fiscal"})
+    first = event_study(events, prices, limit=1000)
+    rest = event_study(events, prices, offset=1000)
+    assert first["total"] == rest["total"] == 1102
+    assert len(first["rows"]) == 1000 and len(rest["rows"]) == 102
+    assert rest["rows"][-1]["title"] == "corrected"
+    assert first["summary"] == rest["summary"] and all(r["n"] == 1102 for r in rest["summary"])
+    assert not event_study(events, prices, category="fed", keyword="event 0")["total"]
+    late_match = event_study(events, prices, keyword="corrected")
+    assert late_match["total"] == 1 and not late_match["rows"][0]["overlap"]
+    # Neither of these two windows is visible on the other's page.
+    for offset in (0, 1):
+        page = event_study(events[1:3], prices, offset=offset, limit=1)
+        assert page["total"] == 2 and page["rows"][0]["overlap"]
+
+
+def test_research_cache_uses_snapshot_bytes_and_only_research_parameters(tmp_path, monkeypatch):
+    from data_store.connection import get_conn, reset_for_testing
+    monkeypatch.setenv("KRONOS_USER_DIR", str(tmp_path))
+    monkeypatch.setenv("KRONOS_SQLITE_PATH", str(tmp_path / "macro.sqlite"))
+    reset_for_testing()
+    original, calls = service.build_research, []
+
+    def counted(bundle, **params):
+        calls.append(params)
+        return original(bundle, **params)
+
+    monkeypatch.setattr(service, "build_research", counted)
+    prices = series(30)
+    data = {"as_of": prices[-1]["date"], "series": {"gold": series(2), "cn10y": series(2)},
+            "equities": {"csi300": prices}, "events": [{"date": prices[0]["date"], "title": "policy A", "category": "fed"}]}
+
+    def save():
+        service.kv_repo.set_(service.NAMESPACE, "bundle", data)
+        get_conn().execute("UPDATE kv_cache SET updated_at=? WHERE namespace=? AND key='bundle'",
+                           ("2024-01-30T00:00:00", service.NAMESPACE))
+        return service.kv_repo.get_raw(service.NAMESPACE, "bundle")
+
+    try:
+        raw = save()
+        query = lambda **kw: service.query(factor="gold", **kw)
+        first = query()
+        first["chart"]["factor_history"].clear()
+        second = query(keyword="absent", pe=1)
+        assert second["chart"]["factor_history"][-1]["value"] == 101
+        assert second["events"]["total"] == 0 and second["scenario"]["pe"] == 1
+        assert len(calls) == 1 and service.events(keyword="policy A")["events"]["total"] == 1
+        with monkeypatch.context() as m:
+            m.setattr(service, "_snapshot", lambda: pytest.fail("status must not load the research snapshot"))
+            assert service.status() == {"job": None}
+        query(lag=1)
+        query(lag=1)
+        assert len(calls) == 2
+        for window in (60, 120, 252):
+            for lag in (0, 1, 5, 20):
+                query(window=window, lag=lag)
+        assert service._snapshot().research.cache_info().currsize == 8
+        # Same timestamp, length, and as_of, different values and event title.
+        data["series"]["gold"][-1]["value"] = 109
+        data["events"][0]["title"] = "policy B"
+        assert len(save()) == len(raw)
+        revised = query()
+        assert revised["snapshot_version"] != first["snapshot_version"]
+        assert revised["chart"]["factor_history"][-1]["value"] == 109
+        events = service.events(keyword="policy B")
+        assert events["snapshot_version"] == revised["snapshot_version"] and events["events"]["total"] == 1
+        assert not service.events(keyword="policy A")["events"]["total"]
+    finally:
+        service._snapshot_for.cache_clear()
+        reset_for_testing()
+
+
 def test_valuation_identity_and_no_bridge_across_missing_pe():
     prices = series(300, value=lambda i: 100 * math.exp(i / 1000))
     valuations = [{"date": r["date"], "pe_ttm": 10 * math.exp(i / 2000)} for i, r in enumerate(prices)]
@@ -174,12 +251,15 @@ def test_spread_uses_index_specific_same_day_positive_pe_and_preserves_history()
                                                       {"date": "2024-01-02", "pe_ttm": 0},
                                                       {"date": "2024-01-03", "pe_ttm": 5}]}}, factor=SPREAD)
     assert report["chart"]["factor_history"] == [{"date": "2024-01-01", "value": 8}]
-    assert all(r["low"] is None and r["status"] == "不可判定" for r in report["valuation_comparison"]["rows"])
+    comparison = report["valuation_comparison"]
+    assert comparison["comparison_date"] is None and not comparison["current_low"]
+    assert all(r["low"] is None and not r["comparable"] for r in comparison["rows"])
+    assert next(r for r in comparison["rows"] if r["key"] == "csi300")["date"] == "2024-01-01"
 
 
 def test_valuation_comparison_requires_both_percentiles_and_excludes_current_day():
     bonds = series(253, value=lambda i: 1 if i == 252 else 2)
-    data = {"as_of": bonds[-1]["date"], "series": {"cn10y": bonds}, "valuations": {
+    data = {"as_of": bonds[-1]["date"], "equities": {"csi300": bonds}, "series": {"cn10y": bonds}, "valuations": {
         "csi300": [{"date": r["date"], "pe_ttm": 10 if i == 252 else 20} for i, r in enumerate(bonds)],
         "csi500": [{"date": r["date"], "pe_ttm": 20} for r in bonds],
     }}
@@ -190,9 +270,30 @@ def test_valuation_comparison_requires_both_percentiles_and_excludes_current_day
     assert rows["csi500"]["pe_percentile"] == 50 and rows["csi500"]["spread_percentile"] == 100
 
 
+def test_stale_low_is_historical_only_even_when_report_day_is_closed():
+    older, recent, future = "2025-12-22", "2026-08-24", "2026-09-01"
+    past = series(252, "2025-01-01")
+    dates = ["2019-01-04", *(r['date'] for r in past), older, recent, future]
+    data = {"as_of": "2026-08-30", "calendar": [{"date": "2026-08-28"}],
+            "equities": {"csi300": [{"date": recent, "value": 4000}, {"date": future, "value": 4500}],
+                         "chinext": [{"date": older, "value": 2000}]},
+            "series": {"cn10y": [{"date": d, "value": 2} for d in dates]},
+            "valuations": {k: [{"date": d, "pe_ttm": 10 if d == last else 20} for d in [*dates[:-3], last, future]]
+                           for k, last in [("chinext", older), ("csi300", recent)]}}
+    board = build_report(data)["valuation_comparison"]
+    rows = {r['key']: r for r in board['rows']}
+    assert board['comparison_date'] == recent and board['current_low'] == ['csi300']
+    assert rows['chinext']['historical_low'] and rows['chinext']['low'] is None
+    assert rows['chinext']['date'] == older and rows['chinext']['lag_sessions'] == 1
+    assert rows['csi300']['samples'] == rows['chinext']['samples'] == 252  # 不含五年前那条
+    data['valuations']['csi300'].pop(1)
+    short = next(r for r in build_report(data)['valuation_comparison']['rows'] if r['key'] == 'csi300')
+    assert short['comparable'] and short['samples'] == 251 and short['low'] is None
+
+
 def test_older_user_snapshot_only_backfills_bonds_through_its_own_cutoff(monkeypatch):
     saved = {"as_of": "2024-01-02", "updated_at": "original", "series": {"gold": series(1)}}
-    monkeypatch.setattr(service, "_read", lambda key: saved)
+    monkeypatch.setattr(service.kv_repo, "get_raw", lambda *args: json.dumps(saved).encode())
     monkeypatch.setattr(service, "baseline", lambda: {"series": {"cn10y": series(3)}})
     data = service.bundle()
     assert data["updated_at"] == "original" and data["series"]["gold"] == saved["series"]["gold"]

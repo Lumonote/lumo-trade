@@ -1,24 +1,13 @@
 """独立夹具检查资金历史与 ETF 区间刷新；不采集实盘数据。"""
 import datetime as dt
 import json
-from pathlib import Path
-import sys
-import urllib.request
 from urllib.parse import parse_qs, urlsplit
 
-from playwright.sync_api import sync_playwright, expect, Error
+from playwright.sync_api import expect
+from market_browser_harness import HEALTH, URL, market_page
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 from analysis.market_capital import capital_report, etf_rows, margin_report, participant_history
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7098"
-OUT = ROOT / "results/market_capital_preview"
-OUT.mkdir(parents=True, exist_ok=True)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-snapshot = json.load(opener.open(URL + "/api/market-health", timeout=30))
-snapshot.update(source="browser_read_only")
-snapshot["fusion"]["updated_at"] = snapshot["as_of"]
 DATES = ["2026-11-16", "2026-11-17", "2026-11-18"]
 finance = margin_report({"as_of": DATES[-1], "calendar": DATES})
 finance.update(history=[{"date": d, "rzye": 1e11 + i*1e8, "net_buy": 1e8} for i, d in enumerate(DATES)],
@@ -41,33 +30,30 @@ refresh_result = {"processed_days": len(refresh_days),
                   "amount_days": len({r["date"] for r in etf_rows(refreshed_fixture) if r["net"] is not None})}
 
 
-with sync_playwright() as p:
-    try:
-        browser = p.chromium.launch(headless=True)
-    except Error:
-        browser = p.chromium.launch(headless=True, channel="chrome")
-    page = browser.new_page(viewport={"width": 1440, "height": 1000})
+with market_page() as (page, read, OUT):
+    snapshot = read(HEALTH)
     page.set_default_timeout(15000)
     errors, prices, history_requests = [], [], []
     participant_requests, refresh_requests, refresh_polls = [], [], []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.on("request", lambda request: prices.append(request.url) if "/api/stock-kline/" in request.url else None)
-    page.route("**/api/market-health?*", lambda route: route.fulfill(json=snapshot))
     page.route("**/api/market-health/refresh", lambda route: route.fulfill(json={"job": {"status": "failed"}}))
     page.route("**/api/market-health/financing?*", lambda route: route.fulfill(json=finance))
 
     def participants(route):
         q = {k: v[0] for k, v in parse_qs(urlsplit(route.request.url).query).items()}
         participant_requests.append(q)
-        bundle, job = fixture, None
+        global published
+        job = None
         if refresh_requests:
-            refresh_polls.append(q)
+            if published is fixture:
+                refresh_polls.append(q)
             job = {"id": "test-etf-range", "params": refresh_params, "status": "running", "progress": 50}
             if len(refresh_polls) > 1:
-                bundle = refreshed_fixture
+                published = refreshed_fixture
                 job.update(status="finished", progress=100, result=refresh_result)
-        result = capital_report(bundle, participant=q.get("participant", "main"), start=q.get("start"), end=q.get("end"))
-        route.fulfill(json={**result, "job": job, "data_as_of": bundle["as_of"], "today": REFRESH_END, "disclosure": "独立测试夹具"})
+        result = capital_report(published, participant=q.get("participant", "main"), start=q.get("start"), end=q.get("end"))
+        route.fulfill(json={**result, "job": job, "data_as_of": published["as_of"], "today": REFRESH_END, "disclosure": "独立测试夹具"})
 
     def refresh(route):
         refresh_requests.append(route.request.post_data_json)
@@ -76,8 +62,9 @@ with sync_playwright() as p:
     def history(route):
         q = {k: v[0] for k, v in parse_qs(urlsplit(route.request.url).query).items()}
         history_requests.append(q)
-        route.fulfill(json=participant_history(fixture, **q))
+        route.fulfill(json=participant_history(published, **q))
 
+    published = fixture
     page.route("**/api/market-health/participants?*", participants)
     page.route("**/api/market-health/participants/refresh", refresh)
     page.route("**/api/market-health/participants/history?*", history)
@@ -191,6 +178,17 @@ with sync_playwright() as p:
     expect(page.locator("#mpMeta")).to_contain_text(f"查询 {REFRESH_START} 至 {REFRESH_END}")
     expect(partial_row.locator("td").nth(1)).to_contain_text("+25.00万")
     assert refresh_requests == [refresh_params] and all(q == refresh_params for q in refresh_polls)
+    for start, end, amount in ((REFRESH_START, REFRESH_END, "+25.00万"), (DATES[0], DATES[-1], "+20.00万")):
+        if start != REFRESH_START:
+            page.locator("#mpStart").fill(start)
+            page.locator("#mpEnd").fill(end)
+            page.locator("#mpQuery button[type=submit]").click()
+        expect(partial_row.locator("td").nth(1)).to_contain_text(amount)
+        partial_row.locator("[data-mp-history]").click()
+        expect(page.locator("#mpHistoryStatus")).to_contain_text("查询已完成")
+        expect(page.locator("#mpHistorySummary")).to_contain_text(amount)
+        assert (history_requests[-1]["start"], history_requests[-1]["end"]) == (start, end)
+        page.locator("#mpHistoryClose").click()
     # 趋势图复用逐日命中；融资历史使用隔离夹具，不需要实际采集。
     page.set_viewport_size({"width": 1440, "height": 1000})
     page.locator("#mhTab-financing").click()
@@ -204,4 +202,3 @@ with sync_playwright() as p:
     expect(index_chart.locator(".mh-date-label")).to_have_text(index_date)
     assert not errors and not prices, (errors, prices)
     print(json.dumps({"checks": "real zero, missing day, missing NAV, partial totals, sorting, independent range, stale response, empty range, 800px layout, read-only queries, 26-day range refresh, candle dates and amounts, keyboard focus, financing/index hover", "errors": errors}, ensure_ascii=False))
-    browser.close()

@@ -4531,9 +4531,11 @@ def run_paper_eod(date=None):
     ② 当日有持仓/成交时把「复盘完成 + 盈亏/胜率摘要」写入应用内通知事件。"""
     result = PAPER_TRADING_SERVICE.run_eod(
         date=date,
-        market_env_text=_paper_eod_market_env(),
+        market_env_text=_paper_eod_market_env() if not date or str(date) == PAPER_TRADING_SERVICE._trade_date() else None,
         results_dir=str(RESULTS_DIR),
     )
+    if result.get('historical'):
+        return result
     try:
         result['auto_follow'] = AUTO_FOLLOW_SERVICE.process_eod(result.get('date'))
     except Exception as exc:  # noqa: BLE001 — 跟单收尾失败不影响复盘本身
@@ -4820,12 +4822,53 @@ def _opportunity_stock_scores(code, name='', window_days=30, fetch_klines=None,
     return result
 
 
+def _opportunity_dated_closes(rows, cutoff, limit):
+    from analysis.market_health_fusion import iso
+
+    by_date = {}
+    for row in rows:
+        if isinstance(row, dict):
+            day = iso(row.get('timestamps') or row.get('day') or row.get('date') or row.get('trade_date'))
+            value = row.get('close')
+        else:
+            fields = row.split(',') if isinstance(row, str) else row
+            if not isinstance(fields, (list, tuple)) or len(fields) < 3:
+                continue
+            day, value = iso(fields[0]), fields[2]
+        close = _safe_float(value, None)
+        if day and day <= cutoff and close is not None and math.isfinite(close) and close > 0:
+            by_date[day] = close
+    return sorted(by_date.items())[-limit:]
+
+
+def _opportunity_bars_until(code, cutoff, limit=250):
+    from data_store import ohlcv_fetch, ohlcv_repo
+
+    end = datetime.date.fromisoformat(cutoff)
+    cached = ohlcv_repo.load_dataframe(code, '1d', limit=limit, end=cutoff)
+    bars = _opportunity_dated_closes(cached.to_dict('records'), cutoff, limit)
+    if len(bars) == limit and bars[-1][0] == cutoff:
+        return bars
+    # 旧批次按原日期回补；不拼接不同来源的复权价格。停牌/休市保留实际末日。
+    start = end - datetime.timedelta(days=limit * 2)
+    try:
+        frame = ohlcv_fetch.fetch_daily(code, start.strftime('%Y%m%d'), end.strftime('%Y%m%d'))
+        fetched = _opportunity_dated_closes(frame.to_dict('records'), cutoff, limit)
+    except Exception:
+        if not bars:
+            raise
+        return bars
+    return max((bars, fetched), key=lambda seq: (seq[-1][0], len(seq)) if seq else ('', 0))
+
+
 def _opportunity_pattern_backtest(params, log_cb=None, fetch_klines=None):
     """对某次机会挖掘 run 的 Top-N 股票做「形态自回测」:用每只票最近 window_days
     的形态在自身历史里扫描相似片段,统计前向 5/10/20 日胜率与平均收益 → 形态评分。
     """
-    from analysis.pattern_backtest import scan_series, parse_close_series, _summarise_horizon
+    from analysis.market_health_fusion import iso
+    from analysis.pattern_backtest import scan_series, _summarise_horizon
     from data_store import opportunity_repo
+    from webui.services.market_health_service import now
 
     run_id = params.get('run_id')
     date = params.get('date')
@@ -4846,15 +4889,15 @@ def _opportunity_pattern_backtest(params, log_cb=None, fetch_klines=None):
     if not items:
         return {'ok': False, 'error': '该 run 无入库股票明细'}
 
-    if fetch_klines is None:
-        try:
-            from scripts.build_pattern_fingerprints import fetch_recent_klines as fetch_klines
-        except Exception as exc:  # noqa: BLE001
-            return {'ok': False, 'error': f'K线取数模块不可用: {exc}'}
-
-    def _sina(code):
-        digits = ''.join(ch for ch in str(code or '') if ch.isdigit())
-        return ('sh' if digits.startswith('6') else 'sz') + digits
+    mode = params.get('mode', 'run_date')
+    if mode not in ('run_date', 'latest'):
+        return {'ok': False, 'error': '未知回测模式'}
+    run_date = iso(run.get('run_date') or run.get('run_at'))
+    cutoff = now().date().isoformat() if mode == 'latest' else run_date
+    if not cutoff:
+        return {'ok': False, 'error': '批次日期缺失，不能按历史日期回测'}
+    if log_cb:
+        log_cb(f"{'最新行情重评' if mode == 'latest' else '批次日回测'} · 行情不晚于 {cutoff}")
 
     rows = []
     scanned = 0
@@ -4864,14 +4907,19 @@ def _opportunity_pattern_backtest(params, log_cb=None, fetch_klines=None):
         name = it.get('name') or code
         if log_cb:
             log_cb(f"[{idx}/{len(items)}] 形态回测 {name} {code}")
+        row = {'code': code, 'name': name, 'rating': it.get('rating'), 'total_score': it.get('total_score'),
+               'mode': mode, 'cutoff': cutoff, 'data_as_of': None, 'bar_count': 0,
+               'pattern_score': None, 'win_rate': None, 'avg_return': None, 'sample_count': 0}
+        rows.append(row)
         try:
-            _name, klines = fetch_klines(_sina(code), 250)
-            closes = parse_close_series(klines)
+            if fetch_klines is None:
+                bars = _opportunity_bars_until(code, cutoff)
+            else:
+                bars = _opportunity_dated_closes(fetch_klines(code, cutoff, 250), cutoff, 250)
+            closes = [value for _, value in bars]
+            row.update(data_as_of=bars[-1][0] if bars else None, bar_count=len(bars))
             if len(closes) < need:
-                rows.append({'code': code, 'name': name, 'rating': it.get('rating'),
-                             'total_score': it.get('total_score'), 'pattern_score': None,
-                             'win_rate': None, 'avg_return': None, 'sample_count': 0,
-                             'note': '历史数据不足'})
+                row['note'] = f'截至 {cutoff} 历史数据不足（{len(closes)}/{need} 根有效日线）'
                 continue
             query = closes[-window_days:]
             samples = scan_series(closes, query, window_days=window_days, horizons=horizons)
@@ -4884,23 +4932,22 @@ def _opportunity_pattern_backtest(params, log_cb=None, fetch_klines=None):
             count = primary['count'] if primary else 0
             wr = primary['win_rate'] if (primary and count) else None
             ar = primary['avg_return'] if (primary and count) else None
-            rows.append({
-                'code': code, 'name': name, 'rating': it.get('rating'),
-                'total_score': it.get('total_score'),
+            row.update({
                 'pattern_score': round(wr * 100, 1) if wr is not None else None,
                 'win_rate': wr, 'avg_return': ar, 'sample_count': count,
                 'horizons': per_h,
             })
-        except Exception as exc:  # noqa: BLE001 — 单票失败不影响整体
-            rows.append({'code': code, 'name': name, 'pattern_score': None,
-                         'win_rate': None, 'avg_return': None, 'sample_count': 0,
-                         'note': str(exc)[:80]})
+            if not count:
+                row['note'] = '没有可计算10日收益的相似样本'
+        except Exception as exc:  # 单票失败不影响整体
+            row['note'] = f'截至 {cutoff} 行情或回测不可用（{type(exc).__name__}）'
     rows.sort(key=lambda r: (r.get('pattern_score') is None, -(r.get('pattern_score') or 0)))
     return {
-        'ok': True, 'rows': rows, 'horizons': horizons,
+        'ok': True, 'rows': rows, 'horizons': horizons, 'mode': mode, 'cutoff': cutoff,
+        'data_as_of': max((r['data_as_of'] for r in rows if r['data_as_of']), default=None),
         'window_days': window_days, 'scanned': scanned, 'total': len(items),
         'run': {'id': run['id'], 'run_at': run.get('run_at'),
-                'date': str(run.get('run_date') or run.get('run_at') or '')[:10]},
+                'date': run_date},
     }
 
 
@@ -4920,9 +4967,9 @@ def _run_opportunity_pattern_backtest_job(job_id, params):
                     finished_at=datetime.datetime.now().isoformat(), error=str(exc))
 
 
-def start_opportunity_pattern_backtest(run_id=None, date=None, top_n=20):
+def start_opportunity_pattern_backtest(run_id=None, date=None, top_n=20, mode='run_date'):
     """启动机会挖掘形态回测后台 job,返回 job 快照。"""
-    params = {'run_id': run_id, 'date': date, 'top_n': top_n}
+    params = {'run_id': run_id, 'date': date, 'top_n': top_n, 'mode': mode}
     job = JOB_SERVICE.start('opportunity_pattern_backtest', params, _run_opportunity_pattern_backtest_job)
     return {'success': True, 'job_id': job['id'], 'job': _get_job_snapshot(job['id'])}
 

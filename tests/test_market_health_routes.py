@@ -174,6 +174,41 @@ def test_macro_native_query_refresh_and_packaged_assets(runtime, monkeypatch):
             assert name in page and client.get("/static/" + name).status_code == 200
 
 
+def test_opportunity_backtest_mode_contract(runtime, monkeypatch):
+    from robyn.testing import TestClient
+    calls = []
+    monkeypatch.setattr(runtime.webui_core, 'start_opportunity_pattern_backtest',
+                        lambda **params: calls.append(params) or {'job_id': 'test'})
+    with TestClient(runtime.app) as client:
+        path = '/api/opportunity/pattern-backtest'
+        for body, mode in [({'run_id': 5}, 'run_date'), ({'mode': 'run_date'}, 'run_date'), ({'mode': 'latest'}, 'latest')]:
+            assert client.post(path, json_data=body).json()['job_id'] == 'test'
+            assert calls[-1]['mode'] == mode and calls[-1]['run_id'] == body.get('run_id')
+        for body in [{'mode': 'unknown'}, {'mode': None}, ['latest']]:
+            assert client.post(path, json_data=body).status_code == 400
+        assert len(calls) == 3
+        assert client.post(path, body="{").status_code == 400
+        desktop = client.get('/desktop/market_health').text
+        assert desktop.index('lumo_opportunity_backtest.js') < desktop.index('lumo_desktop_app.js')
+        assert client.get('/static/lumo_opportunity_backtest.js').ok
+
+
+def test_macro_events_and_status_do_not_rebuild_report(runtime, monkeypatch):
+    from robyn.testing import TestClient
+    monkeypatch.setattr(runtime.market_macro_service, 'build_research', lambda *a, **kw: pytest.fail('unexpected full report'))
+    with TestClient(runtime.app) as client:
+        path = '/api/market-health/macro/events'
+        first = client.get(path, query_params={'category': 'fiscal', 'limit': '2'}).json()
+        second = client.get(path, query_params={'category': 'fiscal', 'offset': '2', 'limit': '2'}).json()
+        assert first['snapshot_version'] == second['snapshot_version']
+        assert first['events']['total'] > 4 and first['events']['summary'] == second['events']['summary']
+        assert len(first['events']['rows']) == len(second['events']['rows']) == 2
+        assert first['events']['rows'] != second['events']['rows'] and 'chart' not in first
+        for params in [{'category':'typo'}, {'equity':'unknown'}, {'offset':'-1'}, {'limit':'1001'}, {'limit':'0'}, {'limit':'abc'}]:
+            assert client.get(path, query_params=params).status_code == 400
+        assert client.get('/api/market-health/macro/status').json() == {'job': None}
+
+
 def test_macro_rejects_invalid_frequency_window_and_nonfinite_scenario(runtime):
     from robyn.testing import TestClient
     with TestClient(runtime.app) as client:

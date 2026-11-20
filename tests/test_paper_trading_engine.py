@@ -239,3 +239,40 @@ def test_run_eod_review_holdings_consistent_with_equity(paper_mod, tmp_path):
     assert "+2,994.92" in content          # 收盘价口径浮盈(若误用报价 8.0 则为 -5.08)
 
 
+def test_historical_eod_replays_ledger_not_live_account(paper_mod, tmp_path):
+    fri = _svc(paper_mod, now=datetime(2026, 6, 5, 15))
+    pending = fri.place_order('600028', 'buy', 'open', qty=100)
+    mon = _svc(paper_mod, {'600027': {'price': 10}}, datetime(2026, 6, 8, 15))
+    mon.place_order('600027', 'buy', 'market', qty=1000)
+    tue = _svc(paper_mod, {'600027': {'price': 12}}, datetime(2026, 6, 9, 15))
+    tue.place_order('600027', 'sell', 'market', qty=1000)
+    after = tue.mark_to_market()
+    bars = _daily([('2026-06-09', 12, 12, 12, 12), ('2026-06-08', 10, 10, 10, 10)])
+    out = tue.run_eod('2026-06-08', ohlcv_loader=lambda _: bars,
+                      close_provider=lambda _: pytest.fail('历史不取即时价'), results_dir=tmp_path)
+    assert out['historical'] and out['settled'] == 0 and tue.get_order(pending['id'])['status'] == 'pending'
+    assert out['equity']['total_equity'] == pytest.approx(999_994.90)
+    assert tue.stats('2026-06-08')['sell_count'] == 0 and tue.stats()['sell_count'] == 1
+    assert tue.equity_curve()[-1]['daily_pnl'] == pytest.approx(after['total_equity'] - 999_994.90)
+    assert '999,994.90' in (tmp_path / 'paper_review_2026-06-08.md').read_text()
+    curve = tue.equity_curve()
+    with pytest.raises(ValueError, match='有效收盘价'):
+        tue.run_eod('2026-06-08', ohlcv_loader=lambda _: bars.iloc[:1], results_dir=tmp_path / 'missing')
+    assert tue.equity_curve() == curve and not (tmp_path / 'missing').exists()
+
+
+def test_historical_entrypoint_skips_today_side_effects(paper_mod, monkeypatch, tmp_path):
+    from webui import core
+    prior = _svc(paper_mod, {'600027': {'price': 10}}, datetime(2026, 6, 3, 15))
+    prior.place_order('600027', 'buy', 'market', qty=100)
+    monkeypatch.setattr(paper_mod, '_load_daily', lambda _: _daily([('2026-06-03', 10, 10, 10, 10)]))
+    monkeypatch.setattr(core, 'PAPER_TRADING_SERVICE', _svc(paper_mod))
+    monkeypatch.setattr(core, 'RESULTS_DIR', tmp_path)
+    reject = lambda *a, **kw: pytest.fail('历史复盘不触发当前跟单、市场环境或通知')
+    monkeypatch.setattr(core, '_paper_eod_market_env', reject)
+    monkeypatch.setattr(core.AUTO_FOLLOW_SERVICE, 'process_eod', reject)
+    monkeypatch.setattr(core.NOTIFICATION_EVENTS, 'push', reject)
+    result = core.run_paper_eod('2026-06-03')
+    assert result['historical'] and result['activity'] and result['generated']
+
+

@@ -20,7 +20,7 @@ on:
     # 必须都通过才会真正发布。
     tags: ["v*", "V*"]
   pull_request:
-    branches: [V2.1.4]
+    branches: ["main", "v*", "V*"]
   workflow_dispatch:
 
 # 同一 ref 的新推送取消旧 run，省 CI 额度。
@@ -41,8 +41,29 @@ env:
   KRONOS_WEB_SERVER: robyn
 
 jobs:
+  offline-checks:
+    name: Offline market regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: ./.github/actions/install-lite
+      - name: Install matching headless Chromium and system libraries
+        run: python -m playwright install --with-deps --only-shell chromium
+      - name: Run offline acceptance checks
+        run: python scripts/check_market_regressions.py
+
   build:
     name: Build (${{ matrix.os }})
+    needs: offline-checks
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -114,26 +135,9 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          python - <<'PY'
-          from pathlib import Path
-
-          skip = ("torch", "modelscope", "huggingface_hub", "safetensors", "einops")
-          out = []
-          for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines():
-              stripped = line.strip()
-              normalized = stripped.lower().replace("_", "-")
-              if stripped and not stripped.startswith("#") and any(normalized.startswith(name.replace("_", "-")) for name in skip):
-                  continue
-              out.append(line)
-          Path("build").mkdir(exist_ok=True)
-          Path("build/requirements-ci-lite.txt").write_text("\n".join(out) + "\n", encoding="utf-8")
-          PY
-          pip install -r build/requirements-ci-lite.txt
-          pip install pyinstaller
-        shell: bash
+      - uses: ./.github/actions/install-lite
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller
 
       - name: Install npm deps
         run: npm ci

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
 import calendar
 import csv
 import datetime as dt
-from functools import lru_cache
+from functools import lru_cache, partial
 import gzip
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -19,7 +21,7 @@ import httpx
 
 from analysis.market_health import number
 from analysis.market_health_fusion import iso
-from analysis.market_macro import CN10Y_SOURCE, FRED, INDEXES, SPECS, SPREAD, build_report, clean_series
+from analysis.market_macro import CN10Y_SOURCE, FRED, INDEXES, SPECS, SPREAD, build_events, build_research, clean_series, scenario
 from data_store import kv_repo, tushare_client
 from data_store.connection import close_conn
 from webui.services.market_health_service import now
@@ -46,8 +48,15 @@ def _read(key):
     return hit[0] if hit else None
 
 
+def _baseline_stamp():
+    try:
+        return BASELINE.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
 @lru_cache(maxsize=1)
-def baseline():
+def _load_baseline(stamp):
     try:
         with gzip.open(BASELINE, "rt", encoding="utf-8") as handle:
             return json.load(handle)
@@ -55,8 +64,11 @@ def baseline():
         return {}
 
 
-def bundle():
-    saved = _read("bundle")
+def baseline():
+    return _load_baseline(_baseline_stamp())
+
+
+def _with_bond_history(saved):
     if not saved:
         return baseline()
     series = saved.get("series") or {}
@@ -72,21 +84,55 @@ def bundle():
         **CN10Y_SOURCE, "rows": len(rows), "date": rows[-1]["date"], "status": "分发基线"}]}
 
 
-def query(jobs=None, **params):
-    for key in ("window", "lag"):
-        if key in params:
-            params[key] = int(params[key])
-    for key in ("earnings", "pe", "discount_bp", "duration"):
-        if key in params:
-            params[key] = float(params[key])
-    params["keyword"] = str(params.get("keyword") or "")[:100]
-    data = bundle()
-    report = build_report(data, **params)
+class _Snapshot:
+    def __init__(self, raw, baseline_stamp):
+        try:
+            saved = json.loads(raw) if raw else None
+        except (ValueError, UnicodeError):
+            saved = None
+        self.data = _with_bond_history(saved)
+        self.version = f"{baseline_stamp}:{hashlib.sha256(raw).hexdigest() if raw else 'baseline'}"
+        self.research = lru_cache(maxsize=8)(partial(build_research, self.data))
+
+    def events(self, equity, category, keyword, limit=1000, offset=0):
+        return build_events(self.data, equity=equity, category=category, keyword=str(keyword or "")[:100],
+                            limit=int(limit), offset=int(offset))
+
+
+# Key on the actual bytes: no per-query JSON decode, and revisions made in the
+# same second (even by another process) cannot hit the previous report cache.
+_snapshot_for = lru_cache(maxsize=1)(_Snapshot)
+
+
+def _snapshot():
+    return _snapshot_for(kv_repo.get_raw(NAMESPACE, "bundle"), _baseline_stamp())
+
+
+def bundle():
+    return _snapshot().data
+
+
+def status(jobs=None):
     job_id = _read("job")
-    report.update(job=jobs.get(job_id) if jobs and job_id else None, today=now().date().isoformat(),
-                  available=bool(data), indexes=[{"key": k, "code": v[0], "name": v[1]} for k, v in INDEXES.items()],
-                  factors=[{"key": k, **v} for k, v in SPECS.items()])
-    return report
+    return {"job": jobs.get(job_id) if jobs and job_id else None}
+
+
+def events(*, equity="csi300", category="all", keyword="", limit=1000, offset=0):
+    snap = _snapshot()
+    return {"equity": equity, "as_of": snap.data.get("as_of"), "snapshot_version": snap.version,
+            "events": snap.events(equity, category, keyword, limit, offset)}
+
+
+def query(jobs=None, *, equity="csi300", factor="real10y", window=252, lag=0, frequency="daily",
+          category="all", keyword="", earnings=0, pe=0, discount_bp=-25, duration=10):
+    assumptions = scenario(float(earnings), float(pe), float(discount_bp), float(duration))
+    snap = _snapshot()
+    event_data = snap.events(equity, category, keyword)
+    research = snap.research(equity=equity, factor=factor, window=int(window), lag=int(lag), frequency=frequency)
+    return {**deepcopy(research), **status(jobs), "events": event_data, "scenario": assumptions,
+            "snapshot_version": snap.version, "today": now().date().isoformat(), "available": bool(snap.data),
+            "indexes": [{"key": k, "code": v[0], "name": v[1]} for k, v in INDEXES.items()],
+            "factors": [{"key": k, **v} for k, v in SPECS.items()]}
 
 
 def _text(url):

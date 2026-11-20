@@ -15,6 +15,11 @@ def store(monkeypatch):
     values = {}
     monkeypatch.setattr(service, "_read", lambda key: deepcopy(values.get(key)))
     monkeypatch.setattr(service.kv_repo, "set_", lambda namespace, key, value: values.update({key: deepcopy(value)}))
+    monkeypatch.setattr(service.kv_repo, "range_keys", lambda ns, a, b: sorted(k for k in values if a <= k <= b))
+    monkeypatch.setattr(service.kv_repo, "range_items", lambda ns, a, b: [(k, deepcopy(values[k])) for k in sorted(values) if a <= k <= b])
+    monkeypatch.setattr(service.calendar_repo, "open_days", lambda: [])
+    monkeypatch.setattr(service, "_baseline", lambda: {})
+    monkeypatch.setattr(service, "_baseline_days", lambda: {k: {} for k in service.DAILY_SOURCES})
     monkeypatch.setattr(service, "now", lambda: dt.datetime(2026, 10, 31, 10, tzinfo=dt.timezone(dt.timedelta(hours=8))))
     return values
 
@@ -207,7 +212,8 @@ def test_etf_refresh_backfills_more_than_default_window_and_keeps_history(store,
     assert methods == ["trade_cal", "etf_basic"]
     assert sorted(reads) == [previous] + [r["cal_date"] for r in calendar if r["is_open"] and start <= r["cal_date"] <= end]
     saved = store["participants"]
-    assert saved["as_of"] == initial["as_of"] and saved["calendar"] == initial["calendar"] and saved["flows"] == initial["flows"]
+    assert saved["as_of"] == initial["as_of"] and saved["calendar"] == initial["calendar"] and "flows" not in saved
+    assert store[f"raw:moneyflow_dc:{latest}"] == initial["flows"]
     assert saved["etf_predecessors"][monday] == previous and saved["etf_calendar_ends"][friday] == end
     report = service.participants(participant="etf", start=start, end=end)
     history = service.history(participant="etf", code=code, start=start, end=end)
@@ -268,3 +274,52 @@ def test_history_is_read_only_and_actual_cutoff_is_not_query_end(store, monkeypa
 def test_history_rejects_invalid_query(store, params):
     with pytest.raises(ValueError):
         service.history(**params)
+
+
+def test_historical_ranking_and_candles_survive_refresh(store, monkeypatch):
+    dates = [f"2026-07-{d:02}" for d in (7, 8, 9, 10, 13)]
+    stock = {'ts_code': '600000.SH', 'name': '样本'}
+    flow = lambda d, n: {**stock, 'trade_date': d, 'net_amount': n}
+    # Baseline, old header and partition overlap. The last two copies of day 3 are duplicates.
+    base = {d: [flow(d, 1)] for d in dates}
+    monkeypatch.setattr(service, '_baseline_days', lambda: {'flows': base, 'institutions': {}})
+    store['participants'] = {'as_of': dates[-1], 'calendar': dates, 'flows': [flow(dates[0], 0), flow(dates[2], 99)]}
+    store['raw:moneyflow_dc:' + dates[2]] = [flow(dates[2], 2)] * 2
+    def check():
+        args = {'start': dates[0], 'end': dates[-1]}
+        lst = service.participants(**args)['rows'][0]
+        chart = service.history(code='600000', **args)
+        assert lst['days'] == chart['coverage']['amount_days'] == 5
+        assert lst['net'] == chart['totals']['net'] == chart['rows'][-1]['close'] == 50_000
+        assert chart['rows'][0]['net'] == 0
+        return chart
+    check()
+    recent = [f'2026-10-{n:02}' for n in range(1, 23)]
+    monkeypatch.setattr(service, '_sse_open_days', lambda *_: recent)
+    monkeypatch.setattr(service, '_records', lambda method, **kw: [stock] if method == 'stock_basic' else
+                        [flow(kw['trade_date'], 3)] if method == 'moneyflow_dc' else [])
+    monkeypatch.setattr(service, '_collect_etf', lambda *a: None)
+    monkeypatch.setattr(service.quant_radar_repo, 'list_dates', lambda **kw: [])
+    monkeypatch.setattr(service, 'read_baseline', lambda: {})
+    result = service.collect('participants')
+    assert next(s for s in result['sources'] if s['key'] == 'institutions')['failures'] == 0
+    assert not set(service.DAILY_SOURCES).intersection(store['participants'])
+    chart = check()
+    assert chart['data_as_of'] == dates[-1] and chart['available_end'] == recent[-1]
+
+
+def test_seats_distinguish_observed_empty_and_uncollected(store, monkeypatch):
+    a, b, c = '2026-10-28', '2026-10-29', '2026-10-30'
+    seat = {'trade_date': a, 'ts_code': '600000.SH', 'reason': '日涨幅偏离', 'exalter': '机构专用', 'buy': 100, 'sell': 20}
+    store.update({'participants': {'as_of': c, 'calendar': [a, b, c]}, 'raw:top_inst:' + a: [seat, seat, {**seat, 'buy': 40}],
+                  'raw:top_inst:' + c: []})
+    q = {'participant': 'institution', 'start': a, 'end': c}
+    report = service.participants(**q)
+    chart = service.history(code='600000', **q)
+    assert report['range_note'] and report['rows'][0]['net'] == chart['totals']['net'] == 100
+    assert [r['status'] for r in chart['rows']] == ['observed', 'unrecorded', 'no_public_seat']
+    assert chart['data_as_of'] == a and chart['available_end'] == c
+    monkeypatch.setattr(service, '_records', lambda *a, **kw: [])
+    service._day('top_inst', '2026-10-31')
+    assert 'raw:top_inst:2026-10-31' not in store
+    assert not service.participants(start='2026-10-31')['rows']

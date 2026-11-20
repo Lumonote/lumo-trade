@@ -66,3 +66,9 @@ def test_codes_isolated_by_frequency(tmp_db):
     ohlcv_repo.upsert_df("000001", "5m", _sample_df(n=7))
     assert ohlcv_repo.row_count("000001", "1d") == 3
     assert ohlcv_repo.row_count("000001", "5m") == 7
+
+
+def test_end_date_includes_intraday_before_applying_limit(tmp_db):
+    ohlcv_repo.upsert_df("000001", "1d", _sample_df(start="2026-06-08 15:00:00"))
+    rows = ohlcv_repo.load_dataframe("000001", "1d", end="2026-06-10", limit=2)
+    assert rows.timestamps.dt.strftime("%F %H:%M").tolist() == ["2026-06-09 15:00", "2026-06-10 15:00"]

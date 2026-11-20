@@ -5,6 +5,7 @@ Schema: (code, frequency, ts) primary key. `frequency` is one of
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Iterable, Optional
 
 import pandas as pd
@@ -58,17 +59,22 @@ def upsert_df(code: str, frequency: str, df: pd.DataFrame) -> int:
     return cur.rowcount if cur.rowcount is not None else len(work)
 
 
-def load_dataframe(code: str, frequency: str, limit: Optional[int] = None) -> pd.DataFrame:
+def load_dataframe(code: str, frequency: str, limit: Optional[int] = None, *, end: Optional[str] = None) -> pd.DataFrame:
     """Return OHLCV as a DataFrame with the 7 canonical columns sorted ascending."""
     conn = get_conn()
     sql = (
         "SELECT ts AS timestamps, open, high, low, close, volume, amount "
-        "FROM ohlcv WHERE code=? AND frequency=? ORDER BY ts ASC"
+        "FROM ohlcv WHERE code=? AND frequency=?"
     )
     params: tuple = (code, frequency)
+    if end is not None:
+        sql += " AND ts < ?"
+        params += ((date.fromisoformat(end) + timedelta(days=1)).isoformat(),)
     if limit:
-        sql = sql.replace("ORDER BY ts ASC", "ORDER BY ts DESC LIMIT ?")
-        params = (code, frequency, int(limit))
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params += (int(limit),)
+    else:
+        sql += " ORDER BY ts ASC"
     df = pd.read_sql_query(sql, conn, params=params, parse_dates=["timestamps"])
     if limit:
         df = df.iloc[::-1].reset_index(drop=True)

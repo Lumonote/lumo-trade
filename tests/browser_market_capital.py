@@ -1,30 +1,16 @@
-"""在独立运行的WebUI上验证真实两融/资金API与浏览器交互，不启动数据采集。"""
+"""隔离验证真实两融/资金API与浏览器交互，不启动数据采集。"""
 import json
 import csv
 from pathlib import Path
-import sys
-import urllib.request
 from urllib.parse import parse_qs, urlsplit
 
-from playwright.sync_api import sync_playwright, expect, Error
+from playwright.sync_api import expect
+from market_browser_harness import HEALTH, URL, market_page
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7098"
-OUT = Path(__file__).resolve().parents[1] / "results/market_capital_preview"
-OUT.mkdir(parents=True, exist_ok=True)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-snapshot = json.load(opener.open(URL + "/api/market-health", timeout=30))
-snapshot["source"] = "browser_read_only"
-snapshot["fusion"]["updated_at"] = snapshot["as_of"]
-finance_snapshot = json.load(opener.open(URL + "/api/market-health/financing", timeout=30))
-capital_snapshot = json.load(opener.open(URL + "/api/market-health/participants", timeout=30))
-quant_snapshot = json.load(opener.open(URL + "/api/market-health/participants?participant=quant", timeout=30))
-
-with sync_playwright() as p:
-    try:
-        browser = p.chromium.launch(headless=True)
-    except Error:
-        browser = p.chromium.launch(headless=True, channel="chrome")
-    page = browser.new_page(viewport={"width": 1440, "height": 1000}, accept_downloads=True)
+with market_page() as (page, read, OUT):
+    finance_snapshot = read(HEALTH + "/financing")
+    capital_snapshot = read(HEALTH + "/participants")
+    quant_snapshot = read(HEALTH + "/participants?participant=quant")
     page.set_default_timeout(20000)
     page.set_default_navigation_timeout(60000)
     errors = []
@@ -33,7 +19,6 @@ with sync_playwright() as p:
     page.on("request", lambda request: stock_kline_requests.append(request.url) if "/api/stock-kline/" in request.url else None)
     page.on("requestfailed", lambda request: print("request_failed",request.url,request.failure,flush=True) if "/api/market-health/participants" in request.url else None)
     # 现有大盘自动行情和自动全量采集使用只读快照，新增API保持真实请求。
-    page.route("**/api/market-health?*", lambda route: route.fulfill(json=snapshot))
     page.route("**/api/market-health/refresh", lambda route: route.fulfill(json={"job": {"status": "failed", "error": "浏览器检查不启动全量采集"}}))
     page.goto(URL + "/desktop/market_health?section=financing", wait_until="domcontentloaded", timeout=60000)
     if page.locator("#riskDisclaimerModal").is_visible():
@@ -272,5 +257,4 @@ with sync_playwright() as p:
     page.screenshot(path=str(OUT / "participants_1100.png"), full_page=True)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
     assert not errors, errors
-    print(json.dumps({"browser_errors": errors, "checks": "tabs, sorting, pagination, CSV, model, six participants, both history entries, independent date range, financing price K-line dispatch, no participant price-K-line requests, 1100px layout", "screenshots": str(OUT)}, ensure_ascii=False))
-    browser.close()
+    print(json.dumps({"browser_errors": errors, "checks": "tabs, sorting, pagination, CSV, model, six participants, both history entries, independent date range, financing price K-line dispatch, no participant price-K-line requests, 1100px layout"}, ensure_ascii=False))

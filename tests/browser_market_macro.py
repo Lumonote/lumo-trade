@@ -1,31 +1,21 @@
-"""真实宏观API与桌面/移动浏览器交互验证，不触发外部全量采集。"""
+"""宏观桌面与移动端回归：真实只读路由，任务为夹具，不启动服务或采集。"""
 import csv
 import json
 from pathlib import Path
-import sys
-import urllib.request
+from urllib.parse import parse_qs, urlsplit
 
-from playwright.sync_api import Error, expect, sync_playwright
+from playwright.sync_api import expect
+from market_browser_harness import HEALTH, URL, market_page
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:7110"
-OUT = Path(__file__).resolve().parents[1] / "results/market_macro_preview"
-OUT.mkdir(parents=True, exist_ok=True)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-snapshot = json.load(opener.open(URL + "/api/market-health", timeout=30))
-snapshot["source"] = "browser_read_only"
-snapshot.setdefault("fusion", {})["updated_at"] = snapshot["as_of"]
-report = json.load(opener.open(URL + "/api/market-health/macro", timeout=30))
+MACRO = HEALTH + '/macro'
+EVENTS = MACRO + '/events'
 
-with sync_playwright() as p:
-    try:
-        browser = p.chromium.launch(headless=True)
-    except Error:
-        browser = p.chromium.launch(headless=True, channel="chrome")
-    page = browser.new_page(viewport={"width": 1440, "height": 1000}, accept_downloads=True)
+with market_page() as (page, read, OUT):
+    report = read(MACRO)
     page.set_default_timeout(30000)
-    errors = []
+    errors, calls = [], []
     page.on("pageerror", lambda error: errors.append(str(error)))
-    page.route("**/api/market-health?*", lambda route: route.fulfill(json=snapshot))
+    page.on('request', lambda req: calls.append(urlsplit(req.url).path) if urlsplit(req.url).path.startswith(MACRO) else None)
     page.route("**/api/market-health/refresh", lambda route: route.fulfill(json={"job": {"status": "failed", "error": "只读检查"}}))
     page.goto(URL + "/desktop/market_health?section=macro", wait_until="domcontentloaded", timeout=60000)
     if page.locator("#riskDisclaimerModal").is_visible():
@@ -135,12 +125,25 @@ with sync_playwright() as p:
     page.set_viewport_size({'width':1440, 'height':1000})
 
     page.locator('#mmFactor').select_option('equity_bond_spread')
-    analyze_factor('equity_bond_spread')
+    spread = analyze_factor('equity_bond_spread')['valuation_comparison']
     expect(page.locator('#mmTrend h3')).to_have_text('沪深300 × 股债利差')
     comparison = page.locator('#mmValuationComparison tbody tr')
-    expect(comparison).to_have_count(5)
-    expect(comparison.filter(has_text='沪深300').locator('td').nth(4)).to_have_text('6.09')
-    expect(comparison.filter(has_text='创业板指').locator('.mm-low-mark')).to_have_text('历史低估')
+    expect(comparison).to_have_count(len(spread['rows']))
+    heading = page.locator('#mmValuationComparison .mh-box-head')
+    names = [r['name'] for r in spread['rows'] if r['low'] is True]
+    verdict = '、'.join(names) or ('无符合条件的指数' if any(r['low'] is False for r in spread['rows']) else '无可判定样本')
+    expect(heading).to_contain_text(f"比较交易日 {spread['comparison_date']} · 当日低估：{verdict}。")
+    for row in spread['rows']:
+        cells = comparison.filter(has_text=row['name']).locator('td')
+        expect(cells.nth(1).locator('.mm-low-mark')).to_have_count(int(row['low'] is True))
+        expect(cells.nth(1)).to_contain_text(row['status'])
+        expect(cells.nth(2)).to_contain_text(row['date'] or '—')
+        if row['spread'] is not None:
+            expect(cells.nth(4)).to_have_text(f"{row['spread']:.2f}")
+        if row['lag_sessions']:
+            expect(cells.nth(2)).to_contain_text(f"滞后 {row['lag_sessions']} 个交易日")
+            historical = {True:'历史低估', False:'未达条件', None:'不可判定'}[row['historical_low']]
+            expect(cells.nth(1)).to_contain_text('当时：' + historical)
     expect(page.locator('#mmFactorHistoryTitle')).to_contain_text('沪深300 股债利差')
     page.locator('#mmEquity').select_option('csi500')
     page.locator('#mmFrequency').select_option('monthly')
@@ -162,15 +165,76 @@ with sync_playwright() as p:
         page.locator('[data-mm-factor="gold"]').first.click()
     expect(page.locator('#mmTrend h3')).to_contain_text('Au99.99')
     expect(page.locator('#mmQueryButton')).to_be_enabled()
-    page.locator('#mmKeyword').fill('化债')
-    with page.expect_response(lambda r: '/macro?' in r.url and 'keyword=' in r.url):
+    def search(term):
+        page.locator('#mmKeyword').fill(term)
         page.locator('#mmEventQuery button').click()
+
+    def exported_events():
+        with page.expect_download() as download:
+            page.locator('#mmEventsCsv').click()
+        with Path(download.value.path()).open(encoding='utf-8-sig', newline='') as stream:
+            return list(csv.DictReader(stream))
+
+    page.evaluate("window.originalTrend = document.querySelector('#mmTrend svg')")
+    # 故意延迟上一次事件检索；即使旧响应最后到达也不能覆盖最新的关键词或导出。
+    delayed = []
+    query_route = '**' + EVENTS + '?*'
+    def hold_old(route):
+        if parse_qs(urlsplit(route.request.url).query).get('keyword') == ['预算']:
+            delayed.append(route)
+        else:
+            route.fallback()
+
+    page.route(query_route, hold_old)
+    before = len(calls)
+    with page.expect_request(lambda r: urlsplit(r.url).path == EVENTS):
+        search('预算')
+    expect(page.locator('#mmEventsCsv')).to_be_disabled()
+    with page.expect_response(lambda r: urlsplit(r.url).path == EVENTS):
+        search('化债')
     expect(page.locator('#mmEvents')).to_contain_text('隐性债务')
-    expect(page.locator('#mmQueryButton')).to_be_enabled()
-    with page.expect_download() as event_download:
-        page.locator('#mmEventsCsv').click()
-    events = list(csv.DictReader(Path(event_download.value.path()).read_text(encoding='utf-8-sig').splitlines()))
+    [old] = delayed
+    with page.expect_event('requestfinished', predicate=lambda req: req.url == old.request.url):
+        old.fulfill(json=read(old.request.url))
+    page.unroute(query_route, hold_old)
+    events = exported_events()
     assert events and '隐性债务' in events[0]['事件']
+
+    # 真实路由的小分页迫使前端取后续页；未完成时不可翻页/导出。表格每页 50 条。
+    pending, offsets = [], []
+    def small_pages(route):
+        offset = int(parse_qs(urlsplit(route.request.url).query)['offset'][0])
+        offsets.append(offset)
+        if offset == 45:
+            pending.append(route)
+        else:
+            route.fulfill(json=read(route.request.url + '&limit=45'))
+
+    page.route(query_route, small_pages)
+    with page.expect_request(lambda r: 'offset=45' in r.url):
+        search('')
+    expect(page.locator('#mmExport')).to_be_disabled()
+    expect(page.locator('#mmEventNext')).to_be_disabled()
+    [second] = pending
+    second.fulfill(json=read(second.request.url + '&limit=45'))
+    expect(page.locator('#mmEventNext')).to_be_enabled()
+    all_rows = read(EVENTS + '?equity=csi500')['events']['rows']
+    assert offsets == list(range(0, len(all_rows), 45))
+    page.unroute(query_route, small_pages)
+    page.locator('#mmEventNext').click()
+    expect(page.locator('#mmEventPage')).to_contain_text('2 /')
+    sort_title = page.locator('#mmEvents [data-mm-column="1"]')
+    sort_title.click()
+    expect(page.locator('#mmEventPage')).to_contain_text('1 /')
+    expect(sort_title.locator('..')).to_have_attribute('aria-sort', 'ascending')
+    dumped = exported_events()
+    visible = page.locator('#mmEvents tbody .mm-wide a')
+    assert sorted((e['事件日'], e['事件']) for e in dumped) == sorted((r['date'], r['title']) for r in all_rows)
+    assert visible.all_text_contents() == [r['事件'] for r in dumped[:50]]
+    page.locator('#mmEventNext').click()
+    assert visible.all_text_contents() == [r['事件'] for r in dumped[50:100]]
+    assert set(calls[before:]) == {EVENTS}, calls[before:]
+    assert page.evaluate("originalTrend === document.querySelector('#mmTrend svg')")
     page.locator('#mmEarnings').fill('10')
     page.locator('#mmPe').fill('-10')
     expect(page.locator('#mmScenarioResult')).to_contain_text('-1.00%')
@@ -186,11 +250,25 @@ with sync_playwright() as p:
     expect(page.locator('#mmError')).to_contain_text('原日期保留')
     assert page.locator('#mmMeta').inner_text() == original
     page.unroute('**/api/market-health/macro?*')
-    # 更新复用任务，轮询失败不覆盖旧数据；拦截请求，不实际采集。
+    # 轮询只读状态；失败保留报告，成功才重取一次完整研究。
     page.route('**/api/market-health/macro/refresh', lambda route: route.fulfill(status=202,json={'job':{'status':'running','progress':30}}))
+    statuses = iter([{'status':'running','progress':75}, {'status':'failed','error':'测试：原研究保留'}, {'status':'finished'}])
+    page.route('**/api/market-health/macro/status', lambda route: route.fulfill(json={'job':next(statuses)}))
+    before = len(calls)
     page.locator('#mmRefresh').click()
     expect(page.locator('#mmRefresh')).to_be_disabled()
     expect(page.locator('#mmJob')).to_contain_text('30%')
+    expect(page.locator('#mmJob')).to_contain_text('75%', timeout=10000)
+    expect(page.locator('#mmJob')).to_contain_text('测试：原研究保留', timeout=10000)
+    assert calls[before:] == [MACRO + '/refresh', MACRO + '/status', MACRO + '/status']
+    assert page.locator('#mmMeta').inner_text() == original
+    assert page.evaluate("originalTrend === document.querySelector('#mmTrend svg')")
+    before = len(calls)
+    with page.expect_response(lambda r: urlsplit(r.url).path == MACRO):
+        page.locator('#mmRefresh').click()
+    expect(page.locator('#mmQueryButton')).to_be_enabled()
+    assert calls[before:] == [MACRO + '/refresh', MACRO + '/status', MACRO]
+    assert page.evaluate("originalTrend !== document.querySelector('#mmTrend svg')")
     page.set_viewport_size({'width':390,'height':844})
     page.locator('#mhTab-macro').scroll_into_view_if_needed()
     page.screenshot(path=str(OUT / 'macro_mobile.png'), full_page=True)
@@ -203,5 +281,4 @@ with sync_playwright() as p:
         print(json.dumps(page.evaluate("Array.from(document.querySelectorAll('body *')).map(e=>({id:e.id,cls:e.className,width:Math.round(e.getBoundingClientRect().width),right:Math.round(e.getBoundingClientRect().right),overflow:getComputedStyle(e).overflowX})).filter(r=>r.right>innerWidth+1&&r.width>0).slice(0,30)"),ensure_ascii=False),flush=True)
     assert not overflow
     assert not errors, errors
-    browser.close()
-print(json.dumps({'status':'passed','metrics':len(report['metrics']),'industries':31,'errors':errors,'screenshots':str(OUT)},ensure_ascii=False))
+print(json.dumps({'status':'passed','metrics':len(report['metrics']),'industries':31,'events':len(dumped),'errors':errors},ensure_ascii=False))

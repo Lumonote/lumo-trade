@@ -12,6 +12,13 @@ from typing import Any, Optional, Tuple
 from data_store.connection import get_conn
 
 
+def get_raw(namespace: str, key: str) -> Optional[bytes]:
+    """Read the exact stored JSON for consumers that cache by content, not by second."""
+    row = get_conn().execute("SELECT CAST(payload AS BLOB) FROM kv_cache WHERE namespace=? AND key=?",
+                             (namespace, key)).fetchone()
+    return row[0] if row else None
+
+
 def get(namespace: str, key: str) -> Optional[Tuple[Any, float]]:
     row = get_conn().execute(
         "SELECT payload, updated_at FROM kv_cache WHERE namespace=? AND key=?",
@@ -25,6 +32,26 @@ def get(namespace: str, key: str) -> Optional[Tuple[Any, float]]:
         return None
     epoch = _dt.datetime.fromisoformat(row[1]).timestamp()
     return payload, epoch
+
+
+def range_items(namespace: str, first: str, last: str):
+    """Inclusive indexed range; decode only the partitions requested."""
+    rows = get_conn().execute(
+        "SELECT key, payload FROM kv_cache WHERE namespace=? AND key BETWEEN ? AND ? ORDER BY key",
+        (namespace, first, last),
+    )
+    for key, raw in rows:
+        try:
+            yield key, json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+
+def range_keys(namespace: str, first: str, last: str):
+    return [r[0] for r in get_conn().execute(
+        "SELECT key FROM kv_cache WHERE namespace=? AND key BETWEEN ? AND ? ORDER BY key",
+        (namespace, first, last),
+    )]
 
 
 def set_(namespace: str, key: str, payload: Any, ttl_seconds: int = 0) -> None:

@@ -1,0 +1,22 @@
+name: Install lite Python dependencies
+description: Install the desktop runtime and tests without the optional model stack.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python - <<'PY'
+        import re
+        from pathlib import Path
+
+        skip = {"torch", "modelscope", "huggingface-hub", "safetensors", "einops"}
+        lines = []
+        for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines():
+            name = re.match(r"[\w.-]+", line.lstrip())
+            if not name or re.sub(r"[-_.]+", "-", name[0].lower()) not in skip:
+                lines.append(line)
+        Path("build").mkdir(exist_ok=True)
+        Path("build/requirements-ci-lite.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        PY
+        python -m pip install -r build/requirements-ci-lite.txt

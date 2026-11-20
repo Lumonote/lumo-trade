@@ -33,6 +33,7 @@
   <div class="mh-box mh-space"><div class="mh-box-head"><div><h3>政策与利率事件研究</h3><p>筛选政策主题，比较之后1、5、20、60个交易日的指数表现。</p></div><button id="mmEventsCsv" class="button secondary" type="button" disabled>导出事件 CSV</button></div>
     <form id="mmEventQuery" class="mm-event-filters"><label>类型<select id="mmCategory"><option value="all">全部</option><option value="fed">美联储</option><option value="monetary">国内货币</option><option value="fiscal">国内财政与政策</option></select></label><label>关键词<input id="mmKeyword" type="search" placeholder="降息、化债、消费、预算…" maxlength="100"></label><button class="button secondary" type="submit">查询事件</button></form>
     <div id="mmEventSummary" class="mm-event-summary"></div><div id="mmEvents"></div><p id="mmEventNote" class="mh-note"></p>
+    <div id="mmEventPages" hidden><button id="mmEventPrev" class="button secondary compact" type="button" aria-label="上一页事件">上一页</button> <span id="mmEventPage" aria-live="polite"></span> <button id="mmEventNext" class="button secondary compact" type="button" aria-label="下一页事件">下一页</button></div>
   </div>
   <div class="mm-grid mh-space"><div id="mmFiscal" class="mh-box"></div><div id="mmDebt" class="mh-box"></div></div>
   <div class="mm-grid mh-space"><div id="mmValuation" class="mh-box"></div><div class="mh-box"><div class="mh-box-head"><div><h3>盈利与折现的情景实验</h3><p>自行设定假设，观察估值与盈利如何共同影响价格。</p></div></div>

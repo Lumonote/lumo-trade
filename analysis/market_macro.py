@@ -177,17 +177,28 @@ def relationship(asset, factor, spec, *, window=252, lag=0, frequency="daily"):
     return stats
 
 
-def event_study(events, asset, *, category="all", keyword="", limit=1000):
+def event_study(events, asset, *, category="all", keyword="", limit=1000, offset=0):
+    if category not in ("all", "fed", "monetary", "fiscal"):
+        raise ValueError("不支持的事件类型")
+    if not 1 <= limit <= 1000 or offset < 0:
+        raise ValueError("事件分页须为非负偏移和 1 至 1000 条记录")
     rows = clean_series(asset)
     dates = [r["date"] for r in rows]
-    result = []
-    for event in sorted(events, key=lambda r: r.get("date") or "", reverse=True):
+    # 修订后的同一事件只使用最后一版；匹配、重叠与样本数均不受分页截断。
+    unique = {e.get("id") or e.get("url") or (e.get("date"), e.get("title")): e for e in events}
+    matches = []
+    keyword = keyword.strip().casefold()
+    for event in unique.values():
         date = iso(event.get("date"))
-        if not date or category != "all" and event.get("category") != category:
+        if not date or (category != "all" and event.get("category") != category):
             continue
-        if keyword and keyword.casefold() not in " ".join(str(event.get(k) or "") for k in ("title", "summary", "category", "tags")).casefold():
+        if keyword and keyword not in " ".join(str(event.get(k) or "") for k in ("title", "summary", "category", "tags")).casefold():
             continue
+        matches.append((date, event))
+    result, positions = [], []
+    for date, event in sorted(matches, key=lambda item: item[0], reverse=True):
         anchor = bisect_right(dates, date)
+        positions.append(anchor if anchor < len(dates) else None)
         row = {**event, "anchor": dates[anchor] if anchor < len(dates) else None, "returns": {}, "overlap": False}
         for horizon in (1, 5, 20, 60):
             end = anchor + horizon - 1
@@ -199,16 +210,17 @@ def event_study(events, asset, *, category="all", keyword="", limit=1000):
         else:
             row["drawdown20"] = None
         result.append(row)
-    for row in result:
-        if row["anchor"]:
-            position = bisect_left(dates, row["anchor"])
-            row["overlap"] = any(other is not row and other["anchor"] and abs(bisect_left(dates, other["anchor"]) - position) < 20 for other in result)
+    # 事件日期已排序，只需检查前后最近的锚点，同日的不同事件也算重叠。
+    for index, position in enumerate(positions):
+        if position is not None:
+            result[index]["overlap"] = any(0 <= j < len(positions) and positions[j] is not None and
+                                           abs(positions[j] - position) < 20 for j in (index - 1, index + 1))
     summary = []
     for horizon in (1, 5, 20, 60):
         values = [r["returns"][str(horizon)] for r in result if r["returns"][str(horizon)] is not None]
         summary.append({"horizon": horizon, "n": len(values), "mean": mean(values) if values else None, "median": median(values) if values else None,
                         "positive": sum(v > 0 for v in values), "positive_share": sum(v > 0 for v in values) / len(values) * 100 if values else None})
-    return {"rows": result[:limit], "total": len(result), "summary": summary,
+    return {"rows": result[offset:offset + limit], "total": len(result), "offset": offset, "limit": limit, "summary": summary,
             "note": "仅按日级日期观察，事件锚点保守取公告/生效日期之后的首个A股交易日，以此前收盘为基准。无精确公告时刻，不声称捕捉公告当日反应；窗口重叠、其他政策及行情会影响结果，频率不是未来上涨概率。"}
 
 
@@ -267,11 +279,12 @@ def equity_bond_spread(valuations, bonds, end):
     return rows
 
 
-def compare_valuations(spreads):
+def compare_valuations(spreads, sessions):
     rule = LOW_VALUATION
+    comparison_date = sessions[-1] if sessions else None
     rows = []
     for key, (code, name) in INDEXES.items():
-        series = spreads[key]
+        series = [r for r in spreads[key] if not comparison_date or r['date'] <= comparison_date]
         latest = series[-1] if series else {}
         history = []
         if latest:
@@ -288,11 +301,16 @@ def compare_valuations(spreads):
 
         pe_rank, spread_rank = percentile("pe"), percentile("value")
         low = None if pe_rank is None else pe_rank <= rule["pe_max"] and spread_rank >= rule["spread_min"]
-        rows.append({"key": key, "code": code, "name": name, "date": latest.get("date"), "pe": latest.get("pe"),
+        date = latest.get("date")
+        comparable = bool(date and date == comparison_date)
+        lag = len(sessions) - bisect_right(sessions, date) if date and comparison_date else None
+        verdict = "历史低估" if low else "未达低估条件" if low is False else "不可判定"
+        rows.append({"key": key, "code": code, "name": name, "date": date, "pe": latest.get("pe"),
                      "cn10y": latest.get("cn10y"), "spread": latest.get("value"), "pe_percentile": pe_rank,
-                     "spread_percentile": spread_rank, "samples": len(history), "low": low,
-                     "status": "历史低估" if low else "未达低估条件" if low is False else "不可判定"})
-    return {**rule, "rows": rows}
+                     "spread_percentile": spread_rank, "samples": len(history), "historical_low": low,
+                     "lag_sessions": lag, "comparable": comparable, "low": low if comparable else None,
+                     "status": verdict if comparable or not date else "仅历史观测"})
+    return {**rule, "comparison_date": comparison_date, "current_low": [r['key'] for r in rows if r['low']], "rows": rows}
 
 
 def latest_metrics(series, end):
@@ -307,7 +325,7 @@ def latest_metrics(series, end):
     return result
 
 
-def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0, frequency="daily", category="all", keyword="", earnings=0, pe=0, discount_bp=-25, duration=10):
+def build_research(bundle, *, equity="csi300", factor="real10y", window=252, lag=0, frequency="daily"):
     if equity not in INDEXES or factor not in SPECS or frequency not in ("daily", "monthly"):
         raise ValueError("未知指数、宏观因子或频率")
     if SPECS[factor]["frequency"] == "quarterly" or frequency == "daily" and SPECS[factor]["frequency"] != "daily":
@@ -322,7 +340,10 @@ def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0
     spreads = {key: equity_bond_spread(valuations.get(key), bonds, end) for key in INDEXES}
     series[SPREAD] = spreads[equity]
     factor_rows = series.get(factor, [])
-    all_prices = clean_series((bundle.get("equities") or {}).get(equity, []), end)
+    equities = {k: clean_series(rows, end) for k, rows in (bundle.get('equities') or {}).items() if k in INDEXES}
+    # A股指数实际收盘日的并集，不用自然日或 FOMC 会议日历推算休市日。
+    sessions = sorted({r['date'] for prices in equities.values() for r in prices if r['value'] > 0})
+    all_prices = equities.get(equity, [])
     prices = all_prices
     complete_end = end
     if frequency == "monthly":
@@ -337,22 +358,12 @@ def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0
     for key, spec in SPECS.items():
         if frequency == "daily" and spec["frequency"] != "daily" or spec["frequency"] == "quarterly":
             continue
-        row = relationship(prices, series.get(key, []), spec, window=window, lag=lag, frequency=frequency)
+        row = chosen if key == factor else relationship(prices, series.get(key, []), spec, window=window, lag=lag, frequency=frequency)
         overview.append({k: v for k, v in {"key": key, "name": spec["name"], **row}.items() if k not in ("pairs", "stability")})
     sectors = []
     for key, raw in (bundle.get("sectors") or {}).items():
         row = relationship(clean_series(raw.get("rows"), complete_end), factor_rows, SPECS[factor], window=window, lag=lag, frequency=frequency)
         sectors.append({"code": key, "name": raw.get("name") or key, **{k: v for k, v in row.items() if k not in ("pairs", "stability")}})
-    events = [r for r in bundle.get("events", []) if iso(r.get("date")) and r["date"] <= end]
-    for key, category_key in (("fed_upper", "fed"), ("lpr1y", "monetary")):
-        rows = series.get(key, [])
-        for previous, current in zip(rows, rows[1:]):
-            delta = current["value"] - previous["value"]
-            if abs(delta) > 1e-8:
-                events.append({"id": f"{key}:{current['date']}", "date": current["date"], "category": category_key,
-                               "title": f"{SPECS[key]['name']}{'上调' if delta > 0 else '下调'}{abs(delta) * 100:g}bp",
-                               "summary": "公开利率序列的生效/报价日变动，非精确政策公告时刻。", "date_kind": "利率生效/报价日", "url": SPECS[key]["url"], "source": SPECS[key]["source"]})
-    unique = {r.get("id") or r.get("url") or r["date"] + r.get("title", ""): r for r in events}
     metrics = latest_metrics(series, end)
     lookup = {r["key"]: r for r in metrics}
     gold_links = []
@@ -379,10 +390,9 @@ def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0
             "frequency": frequency, "window": window, "lag": lag, "metrics": metrics, "relationship": chosen, "correlations": overview,
             "gold_links": gold_links,
             "sector_sensitivity": sorted(sectors, key=lambda r: abs(r["rho"]) if r["rho"] is not None else -1, reverse=True),
-            "events": event_study(list(unique.values()), all_prices, category=category, keyword=keyword),
             "valuation": valuation_decomposition(all_prices, valuations.get(equity, [])),
-            "valuation_comparison": compare_valuations(spreads),
-            "scenario": scenario(earnings, pe, discount_bp, duration), "transmissions": TRANSMISSIONS,
+            "valuation_comparison": compare_valuations(spreads, sessions),
+            "transmissions": TRANSMISSIONS,
             "chart": {"asset": (monthly(prices) if frequency == "monthly" else prices)[-window - 1:],
                       "factor": (monthly(factor_rows) if frequency == "monthly" else factor_rows)[-window * 2 - 40:],
                       "factor_history": [{"date": r["date"], "value": r["value"]} for r in factor_rows]},
@@ -390,3 +400,27 @@ def build_report(bundle, *, equity="csi300", factor="real10y", window=252, lag=0
             "insights": notes, "sources": bundle.get("sources", []), "errors": bundle.get("errors", []), "updated_at": bundle.get("updated_at"),
             "alignment_note": "日频：美国观测仅匹配严格早于A股日期的数值；额外领先期按A股交易日计算。重复沿用同一因子观测日不产生新样本；超过10天未更新（日频LPR允许45天）不匹配。月频：按完整统计月份描述关系，不冒充宏观数据公布前即可交易的回测。",
             "limits": ["统计相关不等于因果，政策也可能是对市场与经济状况的回应。", "FRED与国内宏观历史可能修订；无完整实时发布版本库，不能用于无前视偏差的交易回测。", "未接入可验证的联邦基金期货预期与概率，不把当前利率或会议日历当作隐含降息预期。", "M1统计口径自2025年调整，跨口径比较需谨慎；国内金价为人民币/克，含汇率和境内溢价，非美元现货金价。"]}
+
+
+def build_events(bundle, *, equity="csi300", category="all", keyword="", limit=1000, offset=0):
+    if equity not in INDEXES:
+        raise ValueError("未知研究指数")
+    end = iso(bundle.get("as_of")) or dt.date.today().isoformat()
+    events = [{**r, "date": day} for r in bundle.get("events", []) if (day := iso(r.get("date"))) and day <= end]
+    for key, kind in (("fed_upper", "fed"), ("lpr1y", "monetary")):
+        rows = clean_series((bundle.get("series") or {}).get(key), end)
+        for a, b in zip(rows, rows[1:]):
+            delta = b["value"] - a["value"]
+            if abs(delta) > 1e-8:
+                events.append({"id": f"{key}:{b['date']}", "date": b["date"], "category": kind,
+                               "title": f"{SPECS[key]['name']}{'上调' if delta > 0 else '下调'}{abs(delta) * 100:g}bp",
+                               "summary": "公开利率序列的生效/报价日变动，非精确政策公告时刻。", "date_kind": "利率生效/报价日",
+                               "url": SPECS[key]["url"], "source": SPECS[key]["source"]})
+    prices = clean_series((bundle.get("equities") or {}).get(equity), end)
+    return event_study(events, prices, category=category, keyword=keyword, limit=limit, offset=offset)
+
+
+def build_report(bundle, *, equity="csi300", category="all", keyword="", earnings=0, pe=0, discount_bp=-25, duration=10, **research):
+    """离线导出和既有调用保留完整报告。"""
+    return {**build_research(bundle, equity=equity, **research), "events": build_events(bundle, equity=equity, category=category, keyword=keyword),
+            "scenario": scenario(earnings, pe, discount_bp, duration)}

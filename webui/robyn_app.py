@@ -1050,6 +1050,20 @@ def market_health_macro(request: Request) -> Response:
         return _json_response({"error": str(exc)}, status_code=400)
 
 
+@_native_get("/api/market-health/macro/events")
+def market_health_macro_events(request: Request) -> Response:
+    try:
+        defaults = {"equity": "csi300", "category": "all", "keyword": "", "offset": 0, "limit": 1000}
+        return _json_response(market_macro_service.events(**{k: _query_value(request, k, v) for k, v in defaults.items()}))
+    except (ValueError, TypeError, OverflowError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_get("/api/market-health/macro/status")
+def market_health_macro_status(request: Request) -> Response:
+    return _json_response(market_macro_service.status(webui_core.JOB_SERVICE))
+
+
 @_native_post("/api/market-health/macro/refresh")
 def market_health_macro_refresh(request: Request) -> Response:
     return _json_response({"job": market_macro_service.start_refresh(webui_core.JOB_SERVICE)}, status_code=202)
@@ -1313,11 +1327,16 @@ def pattern_search_backtest(request: Request) -> Response:
 @_native_post("/api/opportunity/pattern-backtest")
 def opportunity_pattern_backtest(request: Request) -> Response:
     """机会挖掘形态回测:对某次 run 的 Top-N 股票做形态自回测打分(后台 job)。"""
-    body = _request_json(request) or {}
+    try:
+        body = json.loads(_request_body(request) or '{}')
+    except (TypeError, ValueError):
+        return _json_response({'error': '回测参数不是有效的JSON'}, status_code=400)
+    if not isinstance(body, dict) or body.get('mode', 'run_date') not in ('run_date', 'latest'):
+        return _json_response({'error': '回测模式须为 run_date 或 latest'}, status_code=400)
     run_id = body.get("run_id")
     date = (str(body.get("date") or "").strip() or None)
     top_n = body.get("top_n") or 20
-    return _json_response(webui_core.start_opportunity_pattern_backtest(run_id=run_id, date=date, top_n=top_n))
+    return _json_response(webui_core.start_opportunity_pattern_backtest(run_id=run_id, date=date, top_n=top_n, mode=body.get('mode', 'run_date')))
 
 
 @_native_post("/api/pattern-search/save")

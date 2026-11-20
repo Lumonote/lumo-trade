@@ -189,7 +189,7 @@
   }
   const historyState={id:0,target:null,data:null,controller:null};
   const historyLabel=kind=>({main:"大资金",elg:"超大单",lg:"大单",md:"中单",sm:"散户",institution:"大机构",etf:"ETF",quant:"量化资金",national:"国家队"}[kind]);
-  const historyStatus=r=>r.status==="unrecorded"?"未采集 / 未披露":r.status==="no_activity"?"已采集 · 该股无异动":r.missing_reason||"已观测";
+  const historyStatus=r=>r.status==="unrecorded"?"未采集 / 未披露":r.status==="no_public_seat"?"已采集 · 无公开单日机构席位":r.status==="no_activity"?"已采集 · 该股无异动":r.missing_reason||"已观测";
   function historyColumns(kind) {
     if(kind==="national")return [["公告日","date"],["披露股东","holder"],["报告期","period"],["持股数量（股）","shares",v=>num(v,0)],["披露持股变化（股）","change_shares",v=>num(v,0)],["持股占比","hold_ratio",pct]];
     if(kind==="quant")return [["观测日","date"],["疑似活跃刻度","activity",num],["偏多行为数","bull",v=>num(v,0)],["偏空行为数","bear",v=>num(v,0)],["方向代理","direction"]];
@@ -218,7 +218,7 @@
   }
   function renderHistory(data) {
     const kind=data.participant,identity=["national","quant"].includes(kind),t=data.totals,c=data.coverage;
-    $("mpHistoryMeta").textContent=`${data.code} · 查询 ${data.start} 至 ${data.end} · 实际数据截止 ${data.data_as_of||"未取得"}`;
+    $("mpHistoryMeta").textContent=`${data.code} · 查询 ${data.start} 至 ${data.end} · 本证券区间内实际数据截止 ${data.data_as_of||"未取得"} · 可查询 ${data.available_start||"—"} 至 ${data.available_end||"—"}`;
     $("mpHistorySummary").innerHTML=`<div class="mh-kpis">${identity?kpi("有效证据",`${c.observed}项`,kind==="quant"?"含已采集无异动日期":"按股东、公告日与报告期列示")+kpi("资金金额","不可识别","该类证据不提供实际买卖金额"):kpi(kind==="etf"?"净申购估算小计":"买入金额小计",money(t.buy),kind==="etf"?"正向日净申赎估算":kind==="institution"?"公开单日机构席位":"来源未提供双边金额")+kpi(kind==="etf"?"净赎回估算小计":"卖出金额小计",money(t.sell),kind==="etf"?"负向日净申赎绝对额":kind==="institution"?"公开单日机构席位":"来源未提供双边金额")+kpi("净额有效小计",money(t.net),`有效 ${c.amount_days}/${c.days} 日`)}${kpi(kind==="etf"?"份额变化有效小计":"观测覆盖",kind==="etf"?`${num(t.share_change,0)} 份`:`${c.observed}/${c.days}`,kind==="etf"?`有效 ${c.share_days}/${c.days} 日`:"缺失日期不补零")}</div>`;
     $("mpHistoryNote").textContent=data.note;
     let charts="";
@@ -262,7 +262,7 @@
   $("mpHistoryModal").addEventListener("click",e=>{
     const button=e.target.closest("[data-mp-history-days]"),data=historyState.data;if(!button||!data)return;
     const count=button.dataset.mpHistoryDays,dates=data.calendar.filter(d=>d<=$("mpHistoryEnd").value);
-    if(count==="all"&&data.available_start){$("mpHistoryStart").value=data.available_start;$("mpHistoryEnd").value=data.data_as_of;}
+    if(count==="all"){if(!data.available_start||!data.available_end)return;$("mpHistoryStart").value=data.available_start;$("mpHistoryEnd").value=data.available_end;}
     else if(dates.length)$("mpHistoryStart").value=dates[Math.max(0,dates.length-Number(count))];
     loadHistory();
   });
