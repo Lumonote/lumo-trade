@@ -11,7 +11,7 @@
   const signed = v => v == null ? "—" : `${v > 0 ? "+" : ""}${num(v)}%`;
   const tone = v => v == null || v === 0 ? "mh-neutral" : v > 0 ? "mh-positive" : "mh-negative";
   const badge = (text, cls = "") => `<span class="mh-badge ${cls}">${esc(text)}</span>`;
-  const stat = (label, value, note) => `<div class="mh-kpi"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></div>`;
+  const stat = (label, value, note, valueClass = "") => `<div class="mh-kpi"><span>${esc(label)}</span><strong class="${esc(valueClass)}">${esc(value)}</strong><small>${esc(note)}</small></div>`;
   const q = new URLSearchParams(location.search);
   const tabs = [...$("mhTabs").querySelectorAll("[data-mh-tab]")].map(b => b.dataset.mhTab);
   let section = tabs.includes(q.get("section")) ? q.get("section") : "overview";
@@ -31,16 +31,27 @@
       if (indexWindow.window==='custom' && v) next.searchParams.set(k,v); else next.searchParams.delete(k);
     }
     next.searchParams.set("view",viewMode);
+    if (section === "correlation") next.searchParams.set("networkSection", corrSection);
     history.replaceState(null, "", next);
   }
   function selectTab(tab, focus = false) {
     section = tabs.includes(tab) ? tab : "overview";
+    if (section !== "correlation") restoreCorrelationSection();
     for (const key of tabs) {
       const button = $(`mhTab-${key}`), active = key === section;
       button.setAttribute("aria-selected", String(active));
       button.tabIndex = active ? 0 : -1;
-      $(`mhView-${key}`).hidden = !active;
+      $(`mhView-${key}`).hidden = !active && !(section === "correlation" && key === corrSection);
       if (active && focus) button.focus();
+    }
+    if (section === "correlation") {
+      if (!corrOverview) {
+        corrOverview = new window.LumoMarketCorrelationScene($("corrOverview"));
+        corrOverview.setSections(corrGroups, showCorrelationSection, corrSection);
+        updateCorrelationSummaries();
+      }
+      if (corrSection === "correlation" && !corrSymbol) loadCorrelation();
+      else if (corrSection !== "correlation" && !corrSectionHome) mountCorrelationSection();
     }
     remember();
   }
@@ -289,6 +300,7 @@
     if ($("refreshMeta")) $("refreshMeta").textContent = `体检 · ${payload.as_of || "待更新"}`;
     if (!payload.indices.some(r => r.symbol === symbol)) symbol="sh000001";
     renderOverview();renderCross();renderSignals();renderIndices();renderBreadth();renderConfirmation();renderHistory();renderMethod();
+    updateCorrelationSummaries();
     $("mhLoading").hidden=true;root.setAttribute("aria-busy","false");$("mhExport").disabled=false;
     selectTab(section);renderJob(payload.job);
   }
@@ -362,21 +374,90 @@
   });
   window.addEventListener("pagehide", () => {clearTimeout(pollTimer);clearTimeout(liveTimer);});
 
-  // ===== 关联网络功能 =====
-  let corrData = null;
+  const corrGroups = [
+    ["综合研判", [["overview", "综合总览"], ["cross", "跨市场研判"], ["macro", "宏观经济"]]],
+    ["指数与市场结构", [["indices", "指数趋势"], ["breadth", "广度与估值"], ["correlation", "技术指标关联"], ["limits", "涨跌停"]]],
+    ["资金与板块", [["participants", "谁买谁卖"], ["financing", "融资风险"], ["sectors", "板块深度"]]],
+    ["信号与验证", [["signals", "顶底信号"], ["confirmation", "反转确认"], ["history", "历史对照"], ["method", "指标口径"]]],
+  ];
+  const corrLabels = new Map(corrGroups.flatMap(([, nodes]) => nodes));
+  const requestedCorrSection = q.get("networkSection");
+  let corrOverview = null, corrSection = corrLabels.has(requestedCorrSection) ? requestedCorrSection : "correlation", corrSectionHome = null;
+  let corrData = null, corrScene = null, corrNetwork = null, corrSymbol = "", corrRequest = 0;
+
+  function updateCorrelationSummaries() {
+    if (!corrOverview) return;
+    const breadth = payload?.breadth;
+    const shanghai = payload?.indices.find(index => index.symbol === "sh000001");
+    const summaries = {
+      overview: payload?.temperature?.score == null ? "" : `温度 ${num(payload.temperature.score, 0)}/100`,
+      cross: payload?.fusion?.pressure == null ? "" : `综合压力 ${num(payload.fusion.pressure, 0)}/100`,
+      indices: shanghai?.ret20 == null ? "" : `上证20日 ${signed(shanghai.ret20)}`,
+      breadth: breadth?.above_ma20 == null ? "" : `站上MA20 ${pct(breadth.above_ma20)}`,
+      signals: payload?.signals ? `底部 ${payload.signals.bottom.hit}/12 · 顶部 ${payload.signals.top.hit}/12` : "",
+      correlation: corrData ? `多 ${corrData.metadata.bull_signal_count} · 空 ${corrData.metadata.bear_signal_count}` : "",
+    };
+    corrOverview.setSummaries(summaries);
+  }
+
+  function renderCorrelationSelection() {
+    const technical = corrSection === "correlation";
+    $("corrEvidenceTitle").textContent = corrLabels.get(corrSection);
+    $("corrTechnical").hidden = !technical;
+    $("corrOpenSection").hidden = technical;
+  }
+
+  function mountCorrelationSection() {
+    const panel = $(`mhView-${corrSection}`);
+    corrSectionHome = document.createComment("market health panel");
+    panel.before(corrSectionHome);
+    $("corrSectionContent").append(panel);
+    panel.setAttribute("role", "region");
+    panel.hidden = false;
+  }
+
+  function restoreCorrelationSection() {
+    if (!corrSectionHome) return;
+    const panel = $(`mhView-${corrSection}`);
+    panel.hidden = true;
+    panel.setAttribute("role", "tabpanel");
+    corrSectionHome.replaceWith(panel);
+    corrSectionHome = null;
+  }
+
+  function showCorrelationSection(key) {
+    if (key !== corrSection) {
+      restoreCorrelationSection();
+      corrSection = key;
+      renderCorrelationSelection();
+      if (key !== "correlation") mountCorrelationSection();
+      else if (!corrSymbol) loadCorrelation();
+      remember();
+    }
+    $("corrEvidenceTitle").scrollIntoView({block: "nearest"});
+  }
+
   async function loadCorrelation() {
-    const index = $("corrIndex")?.value || "sh000001";
-    const format = $("corrFormat")?.value || "visual";
-    $("corrStatus").textContent = "正在加载关联分析...";
+    const index = $("corrIndex").value, id = ++corrRequest;
+    corrSymbol = index;
+    corrData = null;
+    updateCorrelationSummaries();
+    $("corrMeta").textContent = $("corrIndex").selectedOptions[0].textContent;
+    $("corrExportText").disabled = true;
+    for (const panel of ["corrSummary", "corrVisualization", "corrTextTree"]) $(panel).hidden = true;
+    $("corrStatus").textContent = "正在加载关联分析…";
     $("corrError").hidden = true;
     try {
-      const resp = await fetch(`/api/market-health/correlation?symbol=${index}&format=all`);
-      const data = await resp.json();
+      const data = await request(`/api/market-health/correlation?symbol=${encodeURIComponent(index)}&format=all`);
+      if (id !== corrRequest) return;
       if (!data.success) throw new Error(data.error || "加载失败");
       corrData = data;
-      renderCorrelation(format);
+      updateCorrelationSummaries();
+      renderCorrelation($("corrFormat").value);
+      $("corrExportText").disabled = !data.data.text;
       $("corrStatus").textContent = `已加载 ${data.metadata.name || index} 的关联分析`;
     } catch (e) {
+      if (id !== corrRequest) return;
       $("corrError").textContent = `加载失败: ${e.message}`;
       $("corrError").hidden = false;
       $("corrStatus").textContent = "";
@@ -396,11 +477,12 @@
     if (diff > 2) { bias = "看多"; biasClass = "mh-positive"; biasIcon = "📈"; }
     else if (diff < -2) { bias = "看空"; biasClass = "mh-negative"; biasIcon = "📉"; }
 
+    $("corrSummary").hidden = false;
     $("corrSummaryContent").innerHTML = `
       <div class="mh-kpis">
         ${stat("看多信号", `${bullCount} 项`, "上涨驱动因素")}
         ${stat("看空信号", `${bearCount} 项`, "下跌驱动因素")}
-        ${stat("市场偏向", `<span class="${biasClass}">${biasIcon} ${bias}</span>`, `信号差 ${diff > 0 ? '+' : ''}${diff}`)}
+        ${stat("市场偏向", `${biasIcon} ${bias}`, `信号差 ${diff > 0 ? '+' : ''}${diff}`, biasClass)}
       </div>
     `;
 
@@ -412,67 +494,21 @@
     } else {
       $("corrVisualization").hidden = false;
       $("corrTextTree").hidden = true;
-      renderCorrelationChart(corrData.data.network);
+      if (corrNetwork !== corrData.data.network) {
+        corrScene ??= new window.LumoMarketCorrelationScene($("corrChart"));
+        corrScene.setNetwork(corrData.data.network);
+        corrNetwork = corrData.data.network;
+      }
     }
   }
 
-  function renderCorrelationChart(network) {
-    // 使用 ECharts 渲染树形图（需要引入 echarts 库）
-    const chartDom = $("corrChart");
-    if (!window.echarts) {
-      chartDom.innerHTML = `<div style="padding: 2rem; text-align: center; color: #999;">
-        <p>可视化图表需要 ECharts 库支持</p>
-        <p>请切换到"文本树"格式查看</p>
-      </div>`;
-      return;
-    }
+  window.addEventListener("pagehide", event => {
+    if (event.persisted) return;
+    corrOverview?.destroy();
+    corrScene?.destroy();
+  });
 
-    const chart = echarts.init(chartDom);
-    const bullTree = network.bull || {};
-    const bearTree = network.bear || {};
-
-    const option = {
-      title: [
-        { text: '📈 上涨驱动因素', left: '25%', textAlign: 'center', top: 20 },
-        { text: '📉 下跌驱动因素', left: '75%', textAlign: 'center', top: 20 }
-      ],
-      tooltip: { trigger: 'item', formatter: '{b}: {c}' },
-      series: [
-        {
-          type: 'tree',
-          name: '上涨',
-          data: [bullTree],
-          left: '5%',
-          right: '52%',
-          top: '15%',
-          bottom: '5%',
-          orient: 'vertical',
-          expandAndCollapse: true,
-          label: { position: 'top', verticalAlign: 'middle', align: 'center', fontSize: 12 },
-          leaves: { label: { position: 'bottom', verticalAlign: 'middle', align: 'center' } },
-          itemStyle: { color: '#10b981', borderColor: '#059669' }
-        },
-        {
-          type: 'tree',
-          name: '下跌',
-          data: [bearTree],
-          left: '52%',
-          right: '5%',
-          top: '15%',
-          bottom: '5%',
-          orient: 'vertical',
-          expandAndCollapse: true,
-          label: { position: 'top', verticalAlign: 'middle', align: 'center', fontSize: 12 },
-          leaves: { label: { position: 'bottom', verticalAlign: 'middle', align: 'center' } },
-          itemStyle: { color: '#ef4444', borderColor: '#dc2626' }
-        }
-      ]
-    };
-
-    chart.setOption(option);
-    window.addEventListener('resize', () => chart.resize());
-  }
-
+  $("corrOpenSection").addEventListener("click", () => selectTab(corrSection, true));
   // 绑定关联网络事件
   $("corrRefresh")?.addEventListener("click", loadCorrelation);
   $("corrIndex")?.addEventListener("change", loadCorrelation);
@@ -491,5 +527,8 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
 
+  const corrIndex = $("corrIndex");
+  if (Array.from(corrIndex.options).some(option => option.value === symbol)) corrIndex.value = symbol;
+  renderCorrelationSelection();
   selectTab(section);load();
 })();

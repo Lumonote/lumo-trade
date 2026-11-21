@@ -1,0 +1,152 @@
+.mcorr-scene {
+  --corr-bull: #a53e37;
+  --corr-bear: #15735d;
+  min-width: 0;
+  container-type: inline-size;
+}
+.mcorr-board {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  background: var(--surface, #fff);
+  border-block: 1px solid var(--mh-line, #dce5e5);
+}
+.mcorr-board canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+}
+.mcorr-motion {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+.mcorr-motion .st-flow-layer span > i {
+  filter: brightness(.7) saturate(1.5);
+}
+.mcorr-side {
+  --corr-tone: var(--corr-bull);
+  min-width: 0;
+  padding: 20px 10px 24px 16px;
+}
+.mcorr-side[data-side="bear"] { --corr-tone: var(--corr-bear); }
+.mcorr-side + .mcorr-side { border-left: 1px solid var(--mh-line, #dce5e5); }
+.mcorr-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.mcorr-side-head small { white-space: nowrap; }
+.mcorr-node {
+  box-sizing: border-box;
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 34px;
+  position: relative;
+  border: 1px solid var(--mh-line, #dce5e5);
+  background: var(--surface, white);
+  border-radius: 6px;
+  padding: 5px 9px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.mcorr-node[data-kind="root"] {
+  border: 0;
+  background: transparent;
+  padding: 3px 0;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--corr-tone);
+}
+.mcorr-node[data-kind="dimension"] { font-weight: 600; }
+.mcorr-node[data-kind="signal"] {
+  border: 0;
+  border-left: 2px solid var(--corr-tone);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--corr-tone) 6%, var(--surface, white));
+}
+.mcorr-node[aria-pressed="true"], .mcorr-node:hover {
+  color: var(--corr-tone);
+  border-color: var(--corr-tone);
+  background: color-mix(in srgb, var(--corr-tone) 11%, var(--surface, white));
+}
+.mcorr-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  column-gap: clamp(20px, 4cqw, 68px);
+  min-height: 46px;
+  padding: 5px 0 5px 23px;
+}
+.mcorr-leaves { display: grid; gap: 7px; }
+.mh-root .mcorr-empty {
+  color: var(--mh-muted);
+  font-size: 13px;
+  margin: 16px 0;
+}
+.mcorr-detail {
+  border-left: 3px solid var(--corr-bull);
+  padding: 4px 12px;
+  margin-top: 14px;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.mcorr-detail[data-side="bear"] { border-left-color: var(--corr-bear); }
+.mcorr-detail strong, .mcorr-detail small { display: block; }
+.mcorr-board.mcorr-sections {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 26px 16px;
+  padding: 18px 16px 20px;
+}
+.mcorr-hub {
+  grid-column: 1 / -1;
+  justify-self: center;
+  padding: 6px 18px;
+  border: 1px solid #446383;
+  border-radius: 6px;
+  color: #34516e;
+  font-weight: 650;
+}
+.mcorr-column {
+  --corr-tone: #446383;
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+}
+.mcorr-column h4 {
+  background: color-mix(in srgb, var(--corr-tone) 10%, var(--surface, white));
+  color: #34516e;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  padding: 6px 4px;
+  margin: 0;
+}
+.mcorr-column .mcorr-node { width: auto; margin-left: 14px; }
+.mh-root .mcorr-node-summary { display: block; color: var(--mh-muted); }
+.mcorr-node-summary:empty { display: none; }
+.corr-evidence-head { align-items: center; margin: 18px 0 12px; }
+#corrSectionContent { min-width: 0; }
+#corrTextContent { margin: 0; padding: 12px; overflow: auto; }
+@container (max-width: 700px) {
+  .mcorr-board { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .mcorr-board.mcorr-sections { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 9px; padding-inline: 8px; }
+  .mcorr-side { padding: 14px 3px 14px 6px; }
+  .mcorr-side + .mcorr-side { border-left: 0; border-top: 1px solid var(--mh-line, #dce5e5); }
+}

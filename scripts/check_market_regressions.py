@@ -16,9 +16,10 @@ UNIT = ("market_capital", "market_capital_service", "market_macro", "market_heal
         "model_runtime",
         "ohlcv_repo", "opportunity_pattern_backtest", "pattern_backtest", "paper_trading_engine",
         "paper_trading_service", "paper_auto_follow")
-BROWSER = ("market_capital", "market_capital_history", "market_macro", "market_ice", "price_charts", "opportunity_backtest")
+BROWSER = ("market_capital", "market_capital_history", "market_correlation", "market_macro", "market_ice",
+           "price_charts", "opportunity_backtest")
 JS = ("desktop_app", "desktop_kline", "particle_kline", "price_chart", "market_health", "market_capital",
-      "market_macro", "opportunity_backtest")
+      "market_correlation_scene", "market_macro", "opportunity_backtest")
 
 
 def benchmark():

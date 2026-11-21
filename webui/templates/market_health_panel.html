@@ -13,22 +13,28 @@
   <div id="mhError" class="mh-notice mh-error" role="alert" hidden></div>
   <div id="mhJob" class="mh-job" role="status" hidden></div>
   <nav id="mhTabs" class="mh-tabs" aria-label="体检分区" role="tablist">
-    {% for key, label in [('overview','综合总览'),('correlation','技术指标关联'),('cross','跨市场研判'),('sectors','板块深度'),('limits','涨跌停'),('financing','融资风险'),('participants','谁买谁卖'),('macro','宏观经济'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
+    {% for key, label in [('overview','综合总览'),('correlation','全市场关系网络'),('cross','跨市场研判'),('sectors','板块深度'),('limits','涨跌停'),('financing','融资风险'),('participants','谁买谁卖'),('macro','宏观经济'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
     <button type="button" role="tab" id="mhTab-{{ key }}" aria-controls="mhView-{{ key }}" aria-selected="{{ 'true' if key == 'overview' else 'false' }}" tabindex="{{ '0' if key == 'overview' else '-1' }}" data-mh-tab="{{ key }}">{{ label }}</button>
     {% endfor %}
   </nav>
   <div id="mhLoading" class="mh-loading" role="status"><div></div><div></div><div></div><p>正在计算顶底特征与市场温度…</p></div>
   <section id="mhView-overview" role="tabpanel" aria-labelledby="mhTab-overview"></section>
   <section id="mhView-correlation" role="tabpanel" aria-labelledby="mhTab-correlation" hidden>
+    <div class="mh-space" id="corrOverview"></div>
+    <section id="corrEvidence" aria-labelledby="corrEvidenceTitle">
+    <header class="mh-box-head corr-evidence-head">
+      <h3 id="corrEvidenceTitle">技术指标关联</h3>
+      <button class="button secondary" id="corrOpenSection" type="button" hidden>打开原分区</button>
+    </header>
+    <div id="corrTechnical">
     <div class="mh-box mh-space">
       <div class="mh-box-head">
         <div>
-          <h3>技术指标因果关系树</h3>
-          <p id="corrMeta">直观展示哪些因素驱动市场上涨或下跌</p>
+          <p id="corrMeta"></p>
         </div>
         <div class="mh-actions">
           <button class="button secondary" id="corrRefresh" type="button">刷新关联分析</button>
-          <button class="button secondary" id="corrExportText" type="button">导出文本树</button>
+          <button class="button secondary" id="corrExportText" type="button" disabled>导出文本树</button>
         </div>
       </div>
       <div class="mh-controls">
@@ -38,10 +44,13 @@
           <option value="sz399001">深证成指</option>
           <option value="sz399006">创业板指</option>
           <option value="sh000300">沪深300</option>
+          <option value="sh000688">科创50</option>
+          <option value="sh000852">中证1000</option>
+          <option value="sz399303">国证2000</option>
         </select>
         <label for="corrFormat">展示格式</label>
         <select id="corrFormat">
-          <option value="visual">可视化图表</option>
+          <option value="visual">关系网络</option>
           <option value="text">文本树</option>
         </select>
       </div>
@@ -49,19 +58,19 @@
       <p id="corrError" class="mh-notice mh-error" role="alert" hidden></p>
     </div>
 
-    <div class="mh-box mh-space" id="corrSummary">
-      <h4>市场信号摘要</h4>
+    <div class="mh-box mh-space" id="corrSummary" hidden>
+      <h4>指数技术信号摘要</h4>
       <div id="corrSummaryContent"></div>
     </div>
 
-    <div class="mh-box mh-space" id="corrVisualization">
+    <div class="mh-space" id="corrVisualization" hidden>
       <h4>上涨驱动因素 vs 下跌驱动因素</h4>
-      <div id="corrChart" style="width: 100%; height: 600px;"></div>
+      <div id="corrChart"></div>
     </div>
 
     <div class="mh-box mh-space" id="corrTextTree" hidden>
       <h4>文本树形结构</h4>
-      <pre id="corrTextContent" style="background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto;"></pre>
+      <pre id="corrTextContent"></pre>
     </div>
 
     <details class="mh-box mh-method">
@@ -78,6 +87,9 @@
       <p>看多信号与看空信号独立计算，信号差值反映市场偏向。关联树自动识别矛盾信号（如超卖+空头排列），辅助判断市场状态。</p>
       <p><strong>注意</strong>：本分析基于历史统计规律，仅供参考，不构成投资建议。</p>
     </details>
+    </div>
+    <div id="corrSectionContent"></div>
+    </section>
   </section>
   <section id="mhView-cross" role="tabpanel" aria-labelledby="mhTab-cross" hidden></section>
   <section id="mhView-sectors" role="tabpanel" aria-labelledby="mhTab-sectors" hidden>
