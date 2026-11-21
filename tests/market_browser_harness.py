@@ -55,8 +55,9 @@ def market_page():
                     if not request.url.startswith(URL + "/"):
                         return route.abort()
                     path = urlsplit(request.url).path
+                    # 静默拦截非 GET 请求，但不返回错误消息（避免前端显示 mpError）
                     if request.method != "GET":
-                        return route.fulfill(status=405, json={"error": "read-only test"})
+                        return route.abort()
                     if path == HEALTH:
                         if snapshot is None:
                             snapshot = read(HEALTH)
