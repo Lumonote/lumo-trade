@@ -39,6 +39,12 @@ from webui.services import market_limits_service
 from webui.services import short_term_screen_service
 from webui.services.watchlist_service import WatchlistStorageError
 from data_store import quant_radar_repo, star_orbit_repo
+from analysis.market_correlation_network import (
+    build_correlation_network,
+    generate_text_tree,
+    generate_mermaid_diagram
+)
+from analysis.market_health import index_metrics as market_health_index_metrics, normalize_bars
 
 
 def _robyn_config() -> Config:
@@ -1139,6 +1145,135 @@ def market_health_limits_refresh(request: Request) -> Response:
             start=data.get("start", ""), end=data.get("end", ""))}, status_code=202)
     except (ValueError, TypeError, AttributeError) as exc:
         return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_get("/api/market-health/correlation")
+def market_health_correlation_network(request: Request) -> Response:
+    """获取市场技术指标关联网络"""
+    try:
+        symbol = _query_value(request, "symbol", "sh000001")
+        format_type = _query_value(request, "format", "json")
+
+        # 获取指数数据
+        state = market_health_service.read_state()
+        bars = state.get("bars", {}).get(symbol, [])
+
+        if not bars:
+            return _json_response({"success": False, "error": "指数数据不存在"}, status_code=404)
+
+        # 计算指标
+        rows = normalize_bars(bars)
+        metrics = market_health_index_metrics(symbol, rows, with_chart=False)
+
+        if not metrics.get("available"):
+            return _json_response({"success": False, "error": "指标数据不足"}, status_code=404)
+
+        # 构建关联网络
+        network = build_correlation_network(metrics)
+
+        # 根据格式返回
+        result = {
+            "success": True,
+            "data": {},
+            "metadata": network.metadata
+        }
+
+        if format_type in ("json", "all"):
+            result["data"]["network"] = network.to_dict()
+
+        if format_type in ("text", "all"):
+            result["data"]["text"] = generate_text_tree(network)
+
+        if format_type in ("mermaid", "all"):
+            result["data"]["mermaid"] = generate_mermaid_diagram(network)
+
+        return _json_response(result)
+
+    except Exception as exc:
+        import traceback
+        return _json_response({
+            "success": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc()
+        }, status_code=500)
+
+
+@_native_get("/api/market-health/correlation/summary")
+def market_health_correlation_summary(request: Request) -> Response:
+    """获取市场关联网络摘要"""
+    try:
+        symbol = _query_value(request, "symbol", "sh000001")
+
+        # 获取指数数据
+        state = market_health_service.read_state()
+        bars = state.get("bars", {}).get(symbol, [])
+
+        if not bars:
+            return _json_response({"success": False, "error": "指数数据不存在"}, status_code=404)
+
+        # 计算指标
+        rows = normalize_bars(bars)
+        metrics = market_health_index_metrics(symbol, rows, with_chart=False)
+
+        if not metrics.get("available"):
+            return _json_response({"success": False, "error": "指标数据不足"}, status_code=404)
+
+        # 构建网络
+        network = build_correlation_network(metrics)
+        meta = network.metadata
+
+        bull_count = meta.get('bull_signal_count', 0)
+        bear_count = meta.get('bear_signal_count', 0)
+        diff = bull_count - bear_count
+
+        # 判断偏向
+        if diff > 2:
+            bias = "bull"
+        elif diff < -2:
+            bias = "bear"
+        else:
+            bias = "neutral"
+
+        # 提取顶层信号
+        def extract_top_signals(node):
+            signals = []
+            if node.type.value == "category":
+                signals.append({
+                    "label": node.label,
+                    "description": node.description
+                })
+            for child in node.children:
+                signals.extend(extract_top_signals(child))
+            return signals
+
+        top_bull_signals = extract_top_signals(network.bull_root)[:5]
+        top_bear_signals = extract_top_signals(network.bear_root)[:5]
+
+        result = {
+            "success": True,
+            "data": {
+                "symbol": meta.get("symbol"),
+                "name": meta.get("name"),
+                "as_of": meta.get("as_of"),
+                "close": meta.get("close"),
+                "bull_signal_count": bull_count,
+                "bear_signal_count": bear_count,
+                "bias": bias,
+                "bias_strength": abs(diff),
+                "top_bull_signals": top_bull_signals,
+                "top_bear_signals": top_bear_signals
+            }
+        }
+
+        return _json_response(result)
+
+    except Exception as exc:
+        import traceback
+        return _json_response({
+            "success": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc()
+        }, status_code=500)
 
 
 # ----------------------------- 模拟盘 paper trading -----------------------------

@@ -731,6 +731,39 @@ _MIGRATIONS: List[Tuple[int, str]] = [
           PRIMARY KEY (source, symbol, frequency, ts)
         ) WITHOUT ROWID;
     """),
+    (
+        23,
+        """
+        -- 大盘技术指标关联网络历史记录 (2026-11-21)
+        -- 用于记录每日的关联树数据，支持历史回测和信号准确率分析
+        CREATE TABLE IF NOT EXISTS market_correlation_history (
+          trade_date        TEXT NOT NULL,           -- ISO YYYY-MM-DD
+          symbol            TEXT NOT NULL,           -- 指数代码 (sh000001, sz399001, etc.)
+          as_of             TEXT NOT NULL,           -- 数据时点 ISO datetime
+          close_price       REAL,                    -- 收盘价
+          bull_signal_count INTEGER NOT NULL,        -- 看多信号数量
+          bear_signal_count INTEGER NOT NULL,        -- 看空信号数量
+          market_bias       TEXT,                    -- 市场偏向: bull|bear|neutral
+          bias_strength     INTEGER,                 -- 偏向强度 (信号差绝对值)
+          network_json      TEXT NOT NULL,           -- 完整网络树 JSON
+          text_tree         TEXT,                    -- 文本树 (可选，用于快速查看)
+          metadata_json     TEXT,                    -- 元数据 JSON
+          -- 回测验证字段 (事后填充)
+          actual_ret_1d     REAL,                    -- 次日实际收益率 (%)
+          actual_ret_5d     REAL,                    -- 5日实际收益率 (%)
+          actual_ret_20d    REAL,                    -- 20日实际收益率 (%)
+          signal_correct    INTEGER,                 -- 信号是否正确 (1=正确, 0=错误, NULL=未验证)
+          verified_at       TEXT,                    -- 验证时间
+          PRIMARY KEY (trade_date, symbol)
+        ) WITHOUT ROWID;
+
+        CREATE INDEX IF NOT EXISTS idx_mch_symbol_date
+          ON market_correlation_history(symbol, trade_date DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_mch_bias
+          ON market_correlation_history(market_bias, trade_date);
+        """,
+    ),
 ]
 
 

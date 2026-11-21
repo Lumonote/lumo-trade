@@ -361,5 +361,135 @@
     const a=document.createElement("a");a.href=url;a.download=`大盘体检_${payload.as_of || "未更新"}.json`;a.click();setTimeout(() => URL.revokeObjectURL(url),1000);
   });
   window.addEventListener("pagehide", () => {clearTimeout(pollTimer);clearTimeout(liveTimer);});
+
+  // ===== 关联网络功能 =====
+  let corrData = null;
+  async function loadCorrelation() {
+    const index = $("corrIndex")?.value || "sh000001";
+    const format = $("corrFormat")?.value || "visual";
+    $("corrStatus").textContent = "正在加载关联分析...";
+    $("corrError").hidden = true;
+    try {
+      const resp = await fetch(`/api/market-health/correlation?symbol=${index}&format=all`);
+      const data = await resp.json();
+      if (!data.success) throw new Error(data.error || "加载失败");
+      corrData = data;
+      renderCorrelation(format);
+      $("corrStatus").textContent = `已加载 ${data.metadata.name || index} 的关联分析`;
+    } catch (e) {
+      $("corrError").textContent = `加载失败: ${e.message}`;
+      $("corrError").hidden = false;
+      $("corrStatus").textContent = "";
+    }
+  }
+
+  function renderCorrelation(format) {
+    if (!corrData) return;
+    const meta = corrData.metadata;
+    $("corrMeta").textContent = `${meta.name || ""} · ${meta.as_of || ""} 收盘 ${num(meta.close,2)}`;
+
+    // 渲染摘要
+    const bullCount = meta.bull_signal_count || 0;
+    const bearCount = meta.bear_signal_count || 0;
+    const diff = bullCount - bearCount;
+    let bias = "中性", biasClass = "mh-neutral", biasIcon = "⚖️";
+    if (diff > 2) { bias = "看多"; biasClass = "mh-positive"; biasIcon = "📈"; }
+    else if (diff < -2) { bias = "看空"; biasClass = "mh-negative"; biasIcon = "📉"; }
+
+    $("corrSummaryContent").innerHTML = `
+      <div class="mh-kpis">
+        ${stat("看多信号", `${bullCount} 项`, "上涨驱动因素")}
+        ${stat("看空信号", `${bearCount} 项`, "下跌驱动因素")}
+        ${stat("市场偏向", `<span class="${biasClass}">${biasIcon} ${bias}</span>`, `信号差 ${diff > 0 ? '+' : ''}${diff}`)}
+      </div>
+    `;
+
+    // 切换显示格式
+    if (format === "text") {
+      $("corrVisualization").hidden = true;
+      $("corrTextTree").hidden = false;
+      $("corrTextContent").textContent = corrData.data.text || "暂无文本树";
+    } else {
+      $("corrVisualization").hidden = false;
+      $("corrTextTree").hidden = true;
+      renderCorrelationChart(corrData.data.network);
+    }
+  }
+
+  function renderCorrelationChart(network) {
+    // 使用 ECharts 渲染树形图（需要引入 echarts 库）
+    const chartDom = $("corrChart");
+    if (!window.echarts) {
+      chartDom.innerHTML = `<div style="padding: 2rem; text-align: center; color: #999;">
+        <p>可视化图表需要 ECharts 库支持</p>
+        <p>请切换到"文本树"格式查看</p>
+      </div>`;
+      return;
+    }
+
+    const chart = echarts.init(chartDom);
+    const bullTree = network.bull || {};
+    const bearTree = network.bear || {};
+
+    const option = {
+      title: [
+        { text: '📈 上涨驱动因素', left: '25%', textAlign: 'center', top: 20 },
+        { text: '📉 下跌驱动因素', left: '75%', textAlign: 'center', top: 20 }
+      ],
+      tooltip: { trigger: 'item', formatter: '{b}: {c}' },
+      series: [
+        {
+          type: 'tree',
+          name: '上涨',
+          data: [bullTree],
+          left: '5%',
+          right: '52%',
+          top: '15%',
+          bottom: '5%',
+          orient: 'vertical',
+          expandAndCollapse: true,
+          label: { position: 'top', verticalAlign: 'middle', align: 'center', fontSize: 12 },
+          leaves: { label: { position: 'bottom', verticalAlign: 'middle', align: 'center' } },
+          itemStyle: { color: '#10b981', borderColor: '#059669' }
+        },
+        {
+          type: 'tree',
+          name: '下跌',
+          data: [bearTree],
+          left: '52%',
+          right: '5%',
+          top: '15%',
+          bottom: '5%',
+          orient: 'vertical',
+          expandAndCollapse: true,
+          label: { position: 'top', verticalAlign: 'middle', align: 'center', fontSize: 12 },
+          leaves: { label: { position: 'bottom', verticalAlign: 'middle', align: 'center' } },
+          itemStyle: { color: '#ef4444', borderColor: '#dc2626' }
+        }
+      ]
+    };
+
+    chart.setOption(option);
+    window.addEventListener('resize', () => chart.resize());
+  }
+
+  // 绑定关联网络事件
+  $("corrRefresh")?.addEventListener("click", loadCorrelation);
+  $("corrIndex")?.addEventListener("change", loadCorrelation);
+  $("corrFormat")?.addEventListener("change", () => {
+    if (corrData) renderCorrelation($("corrFormat").value);
+  });
+  $("corrExportText")?.addEventListener("click", () => {
+    if (!corrData) return;
+    const text = corrData.data.text || "暂无数据";
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `关联分析_${corrData.metadata.symbol}_${corrData.metadata.as_of}.txt`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
   selectTab(section);load();
 })();

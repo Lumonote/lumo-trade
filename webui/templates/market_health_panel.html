@@ -13,12 +13,72 @@
   <div id="mhError" class="mh-notice mh-error" role="alert" hidden></div>
   <div id="mhJob" class="mh-job" role="status" hidden></div>
   <nav id="mhTabs" class="mh-tabs" aria-label="体检分区" role="tablist">
-    {% for key, label in [('overview','综合总览'),('cross','跨市场研判'),('sectors','板块深度'),('limits','涨跌停'),('financing','融资风险'),('participants','谁买谁卖'),('macro','宏观经济'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
+    {% for key, label in [('overview','综合总览'),('correlation','技术指标关联'),('cross','跨市场研判'),('sectors','板块深度'),('limits','涨跌停'),('financing','融资风险'),('participants','谁买谁卖'),('macro','宏观经济'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
     <button type="button" role="tab" id="mhTab-{{ key }}" aria-controls="mhView-{{ key }}" aria-selected="{{ 'true' if key == 'overview' else 'false' }}" tabindex="{{ '0' if key == 'overview' else '-1' }}" data-mh-tab="{{ key }}">{{ label }}</button>
     {% endfor %}
   </nav>
   <div id="mhLoading" class="mh-loading" role="status"><div></div><div></div><div></div><p>正在计算顶底特征与市场温度…</p></div>
   <section id="mhView-overview" role="tabpanel" aria-labelledby="mhTab-overview"></section>
+  <section id="mhView-correlation" role="tabpanel" aria-labelledby="mhTab-correlation" hidden>
+    <div class="mh-box mh-space">
+      <div class="mh-box-head">
+        <div>
+          <h3>技术指标因果关系树</h3>
+          <p id="corrMeta">直观展示哪些因素驱动市场上涨或下跌</p>
+        </div>
+        <div class="mh-actions">
+          <button class="button secondary" id="corrRefresh" type="button">刷新关联分析</button>
+          <button class="button secondary" id="corrExportText" type="button">导出文本树</button>
+        </div>
+      </div>
+      <div class="mh-controls">
+        <label for="corrIndex">指数</label>
+        <select id="corrIndex">
+          <option value="sh000001">上证指数</option>
+          <option value="sz399001">深证成指</option>
+          <option value="sz399006">创业板指</option>
+          <option value="sh000300">沪深300</option>
+        </select>
+        <label for="corrFormat">展示格式</label>
+        <select id="corrFormat">
+          <option value="visual">可视化图表</option>
+          <option value="text">文本树</option>
+        </select>
+      </div>
+      <p id="corrStatus" class="mh-note" role="status"></p>
+      <p id="corrError" class="mh-notice mh-error" role="alert" hidden></p>
+    </div>
+
+    <div class="mh-box mh-space" id="corrSummary">
+      <h4>市场信号摘要</h4>
+      <div id="corrSummaryContent"></div>
+    </div>
+
+    <div class="mh-box mh-space" id="corrVisualization">
+      <h4>上涨驱动因素 vs 下跌驱动因素</h4>
+      <div id="corrChart" style="width: 100%; height: 600px;"></div>
+    </div>
+
+    <div class="mh-box mh-space" id="corrTextTree" hidden>
+      <h4>文本树形结构</h4>
+      <pre id="corrTextContent" style="background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto;"></pre>
+    </div>
+
+    <details class="mh-box mh-method">
+      <summary>关联网络说明</summary>
+      <p>技术指标关联网络展示了各项技术指标如何影响市场涨跌。系统从六大维度分析：</p>
+      <ul>
+        <li><strong>趋势维度（均线）</strong>：多头/空头排列，均线方向</li>
+        <li><strong>动量维度（RSI）</strong>：强势/超买/弱势/超卖区域</li>
+        <li><strong>量能维度（成交量）</strong>：放量上涨/下跌，量价配合</li>
+        <li><strong>位置维度（60日相对位置）</strong>：高位/中位/低位，安全边际</li>
+        <li><strong>波动率维度</strong>：高低波动，市场情绪</li>
+        <li><strong>技术形态维度</strong>：创新高/新低，超跌反弹</li>
+      </ul>
+      <p>看多信号与看空信号独立计算，信号差值反映市场偏向。关联树自动识别矛盾信号（如超卖+空头排列），辅助判断市场状态。</p>
+      <p><strong>注意</strong>：本分析基于历史统计规律，仅供参考，不构成投资建议。</p>
+    </details>
+  </section>
   <section id="mhView-cross" role="tabpanel" aria-labelledby="mhTab-cross" hidden></section>
   <section id="mhView-sectors" role="tabpanel" aria-labelledby="mhTab-sectors" hidden>
     <div class="mh-box mh-space"><div class="mh-box-head"><div><h3>追踪资金的去向与持续性</h3><p id="sdMeta">正在读取板块研究…</p></div><div class="mh-actions"><button class="button" id="sdRefresh" type="button">更新板块研究</button><button class="button secondary" id="sdExport" type="button" disabled>导出板块研究</button></div></div>
