@@ -240,7 +240,18 @@ with market_page() as (page, read, OUT):
     page.locator('#mpDirection').select_option('sell')
     page.locator('#mpSort').select_option('asc')
     saved={key:page.locator('#'+key).input_value() for key in ('mpStart','mpEnd','mpSearch','mpSector','mpDirection','mpSort')}
+    # 区间缺数时页面会自动提交补数；离线验收只接收请求，查询仍走真实 GET。
+    backfill_requests = []
+
+    def accept_backfill(route):
+        if route.request.method != "POST":
+            return route.fallback()
+        backfill_requests.append(route.request.post_data_json)
+        route.fulfill(status=202, json={"job": {"status": "queued"}})
+
+    page.route(URL + HEALTH + "/participants/refresh", accept_backfill)
     for kind in ('main','institution','etf','national','quant','sm','main'):
+        previous_requests = len(backfill_requests)
         with page.expect_response(lambda response:'/participants?' in response.url and parse_qs(urlsplit(response.url).query).get('participant')==[kind]) as switched:
             page.locator(f'[data-mp-type="{kind}"]').click()
         response=switched.value
@@ -254,6 +265,8 @@ with market_page() as (page, read, OUT):
         expect(page.locator('#mpCount')).to_contain_text(f'当前 {expected} 项',timeout=30000)
         for key,value in saved.items():
             expect(page.locator('#'+key)).to_have_value(value)
+        expect(page.locator('#mpRefresh')).to_be_enabled()
+        assert backfill_requests[previous_requests:] == ([result['backfill']] if result.get('backfill') else [])
         expect(page.locator('#mpError')).to_be_hidden()
     page.set_viewport_size({"width": 1100, "height": 900})
     page.screenshot(path=str(OUT / "participants_1100.png"), full_page=True)

@@ -55,7 +55,7 @@ def market_page():
                     if not request.url.startswith(URL + "/"):
                         return route.abort()
                     path = urlsplit(request.url).path
-                    # 静默拦截非 GET 请求，但不返回错误消息（避免前端显示 mpError）
+                    # 只转发 GET；需要刷新请求的用例应自行模拟其响应。
                     if request.method != "GET":
                         return route.abort()
                     if path == HEALTH:
