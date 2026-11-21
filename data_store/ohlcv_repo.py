@@ -59,7 +59,7 @@ def upsert_df(code: str, frequency: str, df: pd.DataFrame) -> int:
     return cur.rowcount if cur.rowcount is not None else len(work)
 
 
-def load_dataframe(code: str, frequency: str, limit: Optional[int] = None, *, end: Optional[str] = None) -> pd.DataFrame:
+def load_dataframe(code: str, frequency: str, limit: Optional[int] = None, *, start: Optional[str] = None, end: Optional[str] = None) -> pd.DataFrame:
     """Return OHLCV as a DataFrame with the 7 canonical columns sorted ascending."""
     conn = get_conn()
     sql = (
@@ -67,6 +67,9 @@ def load_dataframe(code: str, frequency: str, limit: Optional[int] = None, *, en
         "FROM ohlcv WHERE code=? AND frequency=?"
     )
     params: tuple = (code, frequency)
+    if start is not None:
+        sql += " AND ts >= ?"
+        params += (start,)
     if end is not None:
         sql += " AND ts < ?"
         params += ((date.fromisoformat(end) + timedelta(days=1)).isoformat(),)

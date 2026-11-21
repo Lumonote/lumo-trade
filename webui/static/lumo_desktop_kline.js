@@ -14,19 +14,21 @@ function fetchKlineData(code) {
 function renderDesktopPrice(slot) {
   const data=slot.data, modal=slot===desktopKline.modal;
   const title=[data.name!==data.code && data.name,data.code].filter(Boolean).join(' ');
+  const loadRange=range=>LumoPriceChart.stockRange(data.code,data.period || 'daily',range);
   if (!modal) {
     $('#klineTitle').textContent=`${title} K线`;
-    $('#klineMeta').textContent=klineMetaText(data);
-    window.LumoPanic?.mount($('#klineMeta'),data.panic);
     $('#openKlineModalBtn').disabled=!data.records?.length;
-    LumoPriceChart.mount($('#klineChart'),data);
+    LumoPriceChart.mount($('#klineChart'),data,{loadRange,onRange(_rows,_state,_stats,active) {
+      $('#klineMeta').textContent=klineMetaText(active);
+      window.LumoPanic?.mount($('#klineMeta'),active.panic);
+    }});
     return;
   }
   $('#klineModalTitle').textContent=`${title} 股票K线与分析`;
-  $('#klineModalMeta').textContent=klineMetaText(data);
-  window.LumoPanic?.mount($('#klineModalMeta'),data.panic);
-  $('#klineModalSource').textContent=data.source || '—';
-  LumoPriceChart.mount($('#klineModalChart'),data,{onRange(rows, _state, stats) {
+  LumoPriceChart.mount($('#klineModalChart'),data,{loadRange,onRange(rows, _state, stats, active) {
+    $('#klineModalMeta').textContent=klineMetaText(active);
+    window.LumoPanic?.mount($('#klineModalMeta'),active.panic);
+    $('#klineModalSource').textContent=active.source || '—';
     const fmt=v=>v==null?'—':num(v);
     $('#klineModalRange').textContent=rows.length?`区间 ${fmt(stats.change)}${stats.change==null?'':'%'} · 高 ${fmt(stats.high)} / 低 ${fmt(stats.low)}`:'区间无行情';
     $('#klineModalVolume').textContent=`均量 ${fmt(stats.avgVolume)}`;

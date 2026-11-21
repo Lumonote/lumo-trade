@@ -1915,7 +1915,10 @@
                 if (revision !== klineRevision) return;
                 const host = $('#klineChart');
                 host.className = '';
-                LumoPriceChart.mount(host, data, {onRange:(rows, _state, stats) => renderChartStats(data, rows, stats)});
+                LumoPriceChart.mount(host, data, {
+                    loadRange:range => LumoPriceChart.stockRange(code, period, range),
+                    onRange:(rows, _state, stats, active) => renderChartStats(active, rows, stats),
+                });
             } catch (error) {
                 if (revision === klineRevision) renderKlineEmpty(error.message);
             }

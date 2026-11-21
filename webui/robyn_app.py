@@ -380,6 +380,7 @@ def _dataframe_info(df: Any) -> dict[str, Any]:
 
     return {
         "dataset": df.attrs.get('dataset'),
+        "coverage_note": df.attrs.get('coverage_note'),
         "rows": len(df),
         "columns": list(df.columns),
         "timestamps": [ts.isoformat() for ts in df["timestamps"]],
@@ -490,7 +491,7 @@ def load_data(request: Request) -> Response:
         if not file_path:
             return _json_response({"error": "File path cannot be empty"}, status_code=400)
 
-        df, error = webui_core.load_data_file(file_path)
+        df, error = webui_core.load_data_file(file_path, start=data.get('start'), end=data.get('end'))
         if error:
             return _json_response({"error": error}, status_code=400)
 
@@ -592,6 +593,7 @@ def get_stock_kline(request: Request, stock_code=None) -> Response:
         _path_param(request, "stock_code", stock_code),
         period=_query_value(request, "period", "daily"),
         limit=_query_value(request, "limit", 120),
+        start=_query_value(request, "start", None),
         end=_query_value(request, "end", None),
     )
     if error:
@@ -968,6 +970,19 @@ def market_health(request: Request) -> Response:
     return _json_response(market_health_service.query(webui_core.JOB_SERVICE,refresh_live=live in ("1","force"),force_live=live == "force"))
 
 
+@_native_get("/api/market-health/index-history")
+def market_health_index_history(request: Request) -> Response:
+    try:
+        return _json_response(market_health_service.index_history(
+            _query_value(request, "symbol", "sh000001"),
+            _query_value(request, "start", ""),
+            _query_value(request, "end", ""),
+            breadth=_query_value(request, "breadth", "") == "1",
+        ))
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
 @_native_post("/api/market-health/refresh")
 def market_health_refresh(request: Request) -> Response:
     try:
@@ -1065,6 +1080,16 @@ def market_health_macro_cycle(request: Request) -> Response:
         return _json_response(market_macro_service.cycle(_query_value(request, 'equity', 'csi300'),
                                                        _query_value(request, 'cutoff', '')))
     except (ValueError, TypeError) as exc:
+        return _json_response({'error': str(exc)}, status_code=400)
+
+
+@_native_get('/api/market-health/macro/history')
+def market_health_macro_history(request: Request) -> Response:
+    try:
+        defaults = {'factor': 'real10y', 'equity': 'csi300', 'start': '', 'end': ''}
+        return _json_response(market_macro_service.history(**{key: _query_value(request, key, value)
+                                                             for key, value in defaults.items()}))
+    except ValueError as exc:
         return _json_response({'error': str(exc)}, status_code=400)
 
 
@@ -1809,15 +1834,28 @@ def opportunity_stock_pool(request: Request) -> Response:
     """
     try:
         from data_store import market_daily_fetch, opportunity_repo
+        from webui.services.daily_history import parse_day
         limit = webui_core._safe_int(_query_value(request, "limit"), 300, minimum=1, maximum=2000) or 300
         since = str(_query_value(request, "since") or "").strip() or None
         until = str(_query_value(request, "until") or "").strip() or None
         try:
-            market_daily_fetch.ensure_pool_dates_background(since)
+            if since:
+                parse_day(since)
+            if until:
+                parse_day(until)
+            if since and until and since > until:
+                raise ValueError("开始日期不能晚于结束日期")
+        except ValueError as exc:
+            return _json_response({"stocks": [], "error": str(exc)}, status_code=400)
+        stocks = opportunity_repo.stock_pool(limit=limit, since_date=since, until_date=until)
+        first = min((row['first_date'] for row in stocks if row.get('first_date')), default=None)
+        try:
+            if first:
+                market_daily_fetch.ensure_pool_dates_background(first)
         except Exception:  # noqa: BLE001 — 补数是锦上添花,不能影响榜单返回
             pass
         return _json_response({
-            "stocks": opportunity_repo.stock_pool(limit=limit, since_date=since, until_date=until),
+            "stocks": stocks,
             "since": since,
             "until": until,
             "price_date": market_daily_fetch.latest_filled_date(),

@@ -47,6 +47,38 @@ def test_query_contains_all_dimensions_without_invented_cross_data(runtime):
     assert all(r["basis_change"] is not None for r in future["details"]["basis"])
 
 
+def test_deep_index_history_keeps_warmup_and_only_observed_closed_breadth(runtime, monkeypatch):
+    from robyn.testing import TestClient
+    service = runtime.market_health_service
+    calls = []
+
+    def load(symbol, start, end, *, warmup, now):
+        calls.append((symbol, start, end, warmup))
+        rows = [{"date": day, "open": price, "high": price + 5, "low": price - 5, "close": price, "volume": 100}
+                for day, price in (("2007-12-28", 5000), ("2008-01-02", 5272), ("2008-01-03", 5319))]
+        return rows, "sqlite:tencent", None
+
+    monkeypatch.setattr(service.daily_history, "load_range", load, raising=False)
+    monkeypatch.setattr(service.market_ice_service, "history", lambda: [
+        {"as_of": day, "provisional": provisional, "above_ma20": 30, "denominators": {"above_ma20": 225}}
+        for day, provisional in (("2007-12-28", False), ("2008-01-02", False), ("2008-01-03", True),
+                                 ("2008-01-04", False))
+    ])
+    path = "/api/market-health/index-history"
+    query = {"symbol": "sh000001", "start": "2008-01-02", "end": "2008-01-04"}
+    with TestClient(runtime.app) as client:
+        response = client.get(path, query_params={**query, "breadth": "1"})
+        assert response.status_code == 200
+        result = response.json()
+        assert result["source"] == "sqlite:tencent" and result["as_of"] == "2008-01-03"
+        assert [r["date"] for r in result["series"]] == ["2007-12-28", "2008-01-02", "2008-01-03"]
+        assert [r["as_of"] for r in result["observations"]] == ["2008-01-02"]
+        assert "observations" not in client.get(path, query_params=query).json()
+        for invalid in ({"symbol": "sz000001"}, {"start": "2008-02-30"}, {"end": "2008-01-01"}):
+            assert client.get(path, query_params={**query, **invalid}).status_code == 400
+    assert calls == [("sh000001", "2008-01-02", "2008-01-04", 249)] * 2
+
+
 def test_refresh_uses_shared_jobs_and_rejects_bad_modes(runtime,monkeypatch):
     from robyn.testing import TestClient
     calls=[]
@@ -120,14 +152,14 @@ def test_participant_refresh_validates_range_and_matches_running_job(runtime, mo
 
     with TestClient(runtime.app) as client:
         for invalid in (["etf"], {**params, "keyword": "ETF"}, {**params, "start": None}, {**params, "end": ""},
-                        {**params, "participant": "main"}, {**params, "end": "20261030"},
+                        {**params, "participant": "quant"}, {**params, "end": "20261030"},
                         {**params, "end": "2026-02-30"}, {**params, "end": "2025-01-01"},
-                        {**params, "end": "2099-01-01"}, {**params, "start": "2000-01-01"}):
+                        {**params, "end": "2099-01-01"}, {**params, "start": "2000-01-01", "end": "2004-01-01"}):
             assert client.post(path, json_data=invalid).status_code == 400, invalid
 
         response = client.post(path, json_data=params)
         assert response.status_code == 202 and response.json()["job"] == active
-        for conflicting in ({}, {**params, "start": "2026-01-02"}):
+        for conflicting in ({}, {**params, "start": "2026-01-02"}, {**params, "participant": "main"}):
             response = client.post(path, json_data=conflicting)
             assert response.status_code == 409 and "正在执行" in response.json()["error"]
 

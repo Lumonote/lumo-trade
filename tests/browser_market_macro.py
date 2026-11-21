@@ -98,6 +98,20 @@ with market_page() as (page, read, OUT):
         page.locator('#mmCandleEnd').fill(end)
         page.locator('#mmCandleQuery button[type="submit"]').click()
 
+    # The earlier year goes through the real history route and its SQLite cache.
+    from data_store import kv_repo
+    from webui.services.market_macro_service import _HISTORY_NAMESPACE
+    kv_repo.set_(_HISTORY_NAMESPACE, 'us10y', {'covered': [['1998-09-21', '1998-09-25']], 'rows': [
+        {'date': '1998-09-21', 'value': 4.69}, {'date': '1998-09-25', 'value': 4.60}]})
+    page.locator('#mmFactor').select_option('us10y')
+    analyze_factor('us10y')
+    with page.expect_response(lambda r: '/macro/history?' in r.url) as old_history:
+        candle_range('1998-09-21', '1998-09-25')
+    assert old_history.value.ok
+    expect(page.locator('#mmCandleDetail')).to_contain_text('1998-09-21 至 1998-09-25')
+    page.locator('#mmFactor').select_option('lpr5y')
+    analyze_factor('lpr5y')
+
     candle_range('2026-07-20', '2026-07-20')
     expect(page.locator('[data-mm-candle]')).to_have_count(1)
     expect(page.locator('#mmCandleDetail')).to_contain_text('开 3.50')

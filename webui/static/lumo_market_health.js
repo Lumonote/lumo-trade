@@ -184,20 +184,22 @@
   function renderIndices() {
     const r = currentIndex(symbol);
     $("mhView-indices").innerHTML = `<div class="mh-controls"><label for="mhIndexSelect">指数</label><select id="mhIndexSelect">${payload.indices.map(i => `<option value="${esc(i.symbol)}">${esc(i.name)}</option>`).join("")}</select></div>
-      <article class="mh-box mh-space">${boxHead(`${r.name || "指数"} · 量价与波段`, `${r.quote_at || r.as_of || "未取得"} · ${r.provisional ? "盘中" : "收盘"} ${num(r.close,2)} · ${r.trend || "数据不足"}`, badge(`历史 ${num(r.bars,0)} 根`))}<div id="mhIndexChart"></div></article>
+      <article class="mh-box mh-space">${boxHead(`${r.name || "指数"} · 量价与波段`, `最新快照 ${r.quote_at || r.as_of || "未取得"} · ${r.provisional ? "盘中" : "收盘"} ${num(r.close,2)} · ${r.trend || "数据不足"}`)}<div id="mhIndexChart"></div></article>
+      <h3>最新快照指标</h3>
       <div class="mh-kpis">${stat("20日涨跌", signed(r.ret20), `60日 ${signed(r.ret60)}`)}${stat("RSI14", num(r.rsi14), "Wilder平滑 · ≤30超卖 / ≥80过热观察")}${stat("20日年化波动率", pct(r.volatility20), "对数日收益样本标准差 × √250")}${stat("当日 / 前5日均量", r.provisional ? "收盘后确认" : `${num(r.volume5,2)}x`, r.provisional ? "全天成交量和均量比仅在收盘后确认" : `当日 / 250日均量 ${num(r.volume250,2)}x`)}</div>
       <article class="mh-box mh-space">${boxHead("指数指标矩阵", "各指数保留自己的数据日期；非同日指标不合入综合评分")}${indexTable(true)}</article>
       <article class="mh-box">${boxHead("波段回撤参考位", "近500个交易日：先低后高的收盘价锚点；仅作价位观察")}
       <div class="mh-kpis">${Object.entries(r.levels || {}).map(([p,v]) => stat(`${num(Number(p)*100)}% 回撤`, num(v,1), `波段低 ${num(r.swing_low,0)} / 高 ${num(r.peak,0)}`)).join("") || '<p class="mh-empty">缺少有效波段锚点</p>'}</div>
       <p class="mh-note">参考位不是预测目标。跌破后能否收回、量价配合与广度变化，比单独触及某个点位更有意义。</p></article>`;
     $("mhIndexSelect").value = symbol;
-    window.LumoPriceChart.mount($("mhIndexChart"),r,{state:indexWindow,onRange:remember});
+    window.LumoPriceChart.mount($("mhIndexChart"),r,{state:indexWindow,onRange:remember,
+      loadRange:bounds=>window.LumoPriceChart.indexRange(r.symbol,bounds)});
     $("mhIndexSelect").addEventListener("change", e => { symbol=e.target.value;remember();renderIndices(); });
   }
   function renderBreadth() {
     const b = payload.breadth || {}, m = payload.market?.values || {};
     const c = payload.ice_coverage;
-    const coverage = !c ? '' : `收盘观测 ${num(c.covered,0)} / ${num(c.total,0)} 个交易日` + (c.missing
+    const coverage = !c ? '' : `近期快照收盘观测 ${num(c.covered,0)} / ${num(c.total,0)} 个交易日` + (c.missing
       ? ` · 待补 ${num(c.missing,0)} 日（最早 ${c.first_missing}） · ${c.running ? '正在补采' : c.retry_at ? '下次重试 '+new Date(c.retry_at*1000).toLocaleString('zh-CN') : '等待补采'}` : ' · 无缺口');
     const barSpecs = [["站上MA20",b.above_ma20],["站上MA60",b.above_ma60],["站上MA250",b.above_ma250],["创60日收盘新低",b.newlow60],["创60日收盘新高",b.newhigh60]];
     const details = [["正PB中位数",`${num(m.pb_median,3)} 倍`],["正PE中位数",`${num(m.pe_median,2)} 倍`],["正PB样本破净率",pct(m.below_pb1_ratio)],["换手率中位数",pct(m.turnover_median)],["个股涨跌中位数",signed(m.chg_median)],["市值加权涨跌",signed(m.mv_weighted_chg)],["近涨停 / 近跌停",`${num(m.limit_up,0)} / ${num(m.limit_down,0)}`],["有效正PB / 正PE样本",`${num(m.pb_sample,0)} / ${num(m.pe_sample,0)}`]];
@@ -212,7 +214,9 @@
       <article class="mh-box mh-space">${boxHead("广度观测记录", "完整更新回算最近5个交易日；同一窗口固定成分和分母，同日重复更新不增加连续天数")}
       <div class="mh-table-wrap"><table><thead><tr><th>日期</th><th>样本</th><th>MA20上方</th><th>MA250上方</th><th>60日新低 / 新高</th><th>高点回撤中位</th><th>数据口径 / 组号</th></tr></thead><tbody>${[...(payload.observations || [])].reverse().map(r => `<tr><td>${esc(r.as_of)}</td><td>${num(r.sample,0)}</td><td>${pct(r.above_ma20)}</td><td>${pct(r.above_ma250)}</td><td>${pct(r.newlow60)} / ${pct(r.newhigh60)}</td><td>${signed(r.dd52_median)}</td><td>${esc(r.method)}<small>${esc(r.cohort || "")}${r.backfilled ? " · 历史回算" : ""}</small></td></tr>`).join("") || '<tr><td colspan="7">尚无同日观测</td></tr>'}</tbody></table></div></article>
       <div class="mh-notice">观察“指数与个股背离”：比较大盘与小盘20日收益差、指数回撤和个股回撤中位。样本口径不同只能交叉观察，不能直接把差值解释成确定的补跌空间。</div>`;
-    window.LumoPriceChart.mount($("mhIceChart"),currentIndex('sh000001'),{state:iceWindow,observations:payload.ice_history ?? payload.observations ?? []});
+    window.LumoPriceChart.mount($("mhIceChart"),currentIndex('sh000001'),{state:iceWindow,
+      observations:payload.ice_history ?? payload.observations ?? [],
+      loadRange:bounds=>window.LumoPriceChart.indexRange('sh000001',bounds,{breadth:true})});
   }
   function renderConfirmation() {
     $("mhView-confirmation").innerHTML = `<div class="mh-notice">收盘确认截至 ${esc(payload.confirmation_as_of || payload.as_of)}。盘中预警不改写此区。以下为经验确认条件，至少3项触发后标记“条件满足”；缺失项保留待补，信号仍可能失效。跨日确认仅用已收盘交易日。</div>

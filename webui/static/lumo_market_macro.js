@@ -11,7 +11,7 @@
   const stat=(title,value,note="")=>`<div class="mm-stat"><span>${esc(title)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></div>`;
   const link=(url,label)=>/^https:\/\//.test(url||"")?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`:esc(label);
   const eventPageSize=50;
-  const state={data:null,id:0,eventId:0,eventPage:0,filters:{category:"all",keyword:""},jobId:0,poll:null,started:false,sort:new Map(),tables:new Map(),factors:[],candle:null,candles:[],candleWidth:0};
+  const state={data:null,id:0,eventId:0,eventPage:0,filters:{category:"all",keyword:""},jobId:0,poll:null,started:false,sort:new Map(),tables:new Map(),factors:[],candle:null,candles:[],candleWidth:0,candleRequest:0};
   const selected=()=>({equity:$("mmEquity").value,factor:$("mmFactor").value,frequency:$("mmFrequency").value,window:$("mmWindow").value,lag:$("mmLag").value,...state.filters});
   function error(message=""){$("mmError").hidden=!message;$("mmError").textContent=message;}
   async function api(url,opts={}){const response=await fetch(url,{...opts,headers:{"Content-Type":"application/json"}});const body=await response.json();if(!response.ok)throw new Error(body.error||"宏观研究读取失败");return body;}
@@ -109,13 +109,14 @@
     const latest=state.candles.at(-1);
     $("mmCandleDetail").textContent=latest?candleDescription(latest):"";
     if(latest)renderCandlePlot();
-    else $("mmCandlePlot").innerHTML=empty(c.start>c.end?"开始日期不能晚于结束日期。":rows.length?"所选区间没有实际观测。":"当前快照没有该指标的实际观测。");
+    else $("mmCandlePlot").innerHTML=empty(c.start>c.end?"开始日期不能晚于结束日期。":c.mode==='custom'||rows.length?"所选区间没有实际观测。":"当前快照没有该指标的实际观测。");
   }
   function renderFactorHistory(d,factor,preset){
     const rows=d.chart.factor_history,first=rows[0]?.date,last=rows.at(-1)?.date,end=last||d.as_of;
     $("mmFactorHistory").hidden=false;
     $("mmFactorHistoryTitle").textContent=`${d.factor==="equity_bond_spread"?d.equity_name+" ":""}${d.factor_name} · 指标 K 线`;
-    $("mmFactorCoverage").textContent=`${first?`历史观测 ${first} 至 ${last}`:"暂无历史观测"} · 单位：${factor.unit} · 开收取周期内首末观测，高低取极值`;
+    const coverage=`${first?`历史观测 ${first} 至 ${last}`:"暂无历史观测"}`;
+    $("mmFactorCoverage").textContent=`${coverage} · 单位：${factor.unit} · 开收取周期内首末观测，高低取极值`;
     const previous=state.candle,key=d.factor==='equity_bond_spread'?`${d.factor}:${d.equity}`:d.factor;
     const mode=preset || (previous?.key===key?previous.mode:'all');
     if(mode!=='custom'){
@@ -152,7 +153,7 @@
     const valuation=replay?null:state.data.valuation_comparison.rows.find(r=>r.key===state.data.equity);
     const breadthChange=b.change_pp==null?"前一区间待确认":`较前一区间 ${b.change_pp>0?'+':''}${num(b.change_pp,1)} 个百分点`;
     const source=(r,key)=>r[key]?link(r[key].url,`${num(r[key].value)}% · ${r[key].published_on}`):"待披露";
-    $("mmCycle").innerHTML=`<p class="mh-note">${replay?"披露日回放":"快照"} ${esc(c.cutoff)} · ${esc(state.data.equity_name)} · 最新统计月 ${esc(last?.period||"—")}：${esc(last?.phase||"待披露")}</p><div class="mm-stats">`+
+    $("mmCycle").innerHTML=`<p class="mh-note">${replay?"披露日回放":"快照"} ${esc(c.cutoff)} · ${esc(state.data.equity_name)} · 最新统计月 ${esc(last?.period||"—")}：${esc(last?.phase||"待披露")}</p>${rows.length?'':empty('所选区间暂无带原始披露日期的库存周期观测。')}<div class="mm-stats">`+
       (valuation?stat("研究指数低估判定",valuation.low===true?"达到低估条件":valuation.status,`配对 ${valuation.date||"—"} · 样本 ${valuation.samples}`):'')+
       stat("最近可判读月份",known?.phase||"待确认",`${known?.period||"—"} · 披露齐备 ${known?.known_on||"—"}`)+
       stat("近三个月新增社融同比差额",credit.value==null?"待确认":`${num(credit.value,0)} 亿元`,`${credit.status} · ${credit.period||"—"} · ${credit.published_on||"缺原始披露日；不用于历史回放"}`)+
@@ -258,10 +259,29 @@
   $("mmQuery").addEventListener("submit",e=>{e.preventDefault();load();});
   $("mmEventQuery").addEventListener("submit",e=>{e.preventDefault();state.filters={category:$("mmCategory").value,keyword:$("mmKeyword").value.trim()};loadEvents();});
   for(const [button,delta] of [["mmEventPrev",-1],["mmEventNext",1]])$(button).onclick=()=>{if(state.data?.events){state.eventPage+=delta;renderEvents(state.data.events);}};
-  $("mmCandleQuery").addEventListener("submit",e=>{e.preventDefault();if(!state.candle)return;
-    Object.assign(state.candle,{start:$("mmCandleStart").value,end:$("mmCandleEnd").value,bucket:$("mmCandleBucket").value,mode:'custom'});
-    for(const id of ['mmCandleAll','mmCandleReset'])$(id).setAttribute('aria-pressed','false');filterFactorHistory();});
-  for(const [id,preset] of [['mmCandleAll','all'],['mmCandleReset','year']])$(id).onclick=()=>{const d=state.data;if(d)renderFactorHistory(d,d.metrics.find(m=>m.key===d.factor),preset);};
+  $("mmCandleQuery").addEventListener("submit",async e=>{
+    e.preventDefault();const d=state.data;if(!d||!state.candle)return;
+    const request=++state.candleRequest,start=$("mmCandleStart").value,end=$("mmCandleEnd").value;
+    Object.assign(state.candle,{start,end,bucket:$("mmCandleBucket").value,mode:'custom'});
+    const current=()=>request===state.candleRequest&&d===state.data;
+    const spec=d.factors.find(f=>f.key===d.factor),status=$("mmCandleStatus");
+    renderFactorHistory(d,spec,'custom');
+    if(start>end){status.textContent="开始日期不能晚于结束日期。";return;}
+    status.textContent="正在查询历史观测…";
+    try{
+      const history=await api("/api/market-health/macro/history?"+new URLSearchParams({equity:d.equity,factor:d.factor,start,end}));
+      if(!current())return;
+      const merged=new Map(d.chart.factor_history.map(r=>[r.date,r]));
+      for(const row of history.rows)merged.set(row.date,row);
+      d.chart.factor_history=[...merged.values()].sort((a,b)=>a.date.localeCompare(b.date));
+      renderFactorHistory(d,spec,'custom');
+      status.textContent=history.message||'';
+    }catch(err){if(current())status.textContent=err.message;}
+  });
+  for(const [id,preset] of [['mmCandleAll','all'],['mmCandleReset','year']])$(id).onclick=()=>{
+    ++state.candleRequest;$("mmCandleStatus").textContent='';
+    const d=state.data;if(d)renderFactorHistory(d,d.factors.find(m=>m.key===d.factor),preset);
+  };
   for(const type of ["pointerover","click"])$("mmCandlePlot").addEventListener(type,e=>{const mark=e.target.closest("[data-mm-candle]");if(mark)$("mmCandleDetail").textContent=candleDescription(state.candles[Number(mark.dataset.mmCandle)]);});
   new ResizeObserver(()=>{if($("mmCandlePlot").clientWidth>0&&$("mmCandlePlot").clientWidth!==state.candleWidth)renderCandlePlot();}).observe($("mmCandlePlot"));
   $("mmFrequency").addEventListener("change",frequencyChanged);$("mmScenario").addEventListener("input",renderScenario);$("mmScenario").addEventListener("submit",e=>e.preventDefault());

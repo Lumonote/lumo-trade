@@ -39,6 +39,12 @@ def _read(key):
     return hit[0] if hit else None
 
 
+def _archive_range():
+    days = kv_repo.range_keys(NAMESPACE, "report:0000-00-00", "report:9999-12-31")
+    return {"start": days[0].removeprefix("report:") if days else None,
+            "end": days[-1].removeprefix("report:") if days else None}
+
+
 def _local_radar():
     latest = get_conn().execute("SELECT MAX(trade_date) FROM quant_radar_stock_daily").fetchone()[0]
     if not latest:
@@ -74,8 +80,10 @@ def query(jobs=None, date=""):
         if date > now().date().isoformat():
             raise ValueError("不能查询未来的行情快照；未来日程请在催化日历查看")
         stored = _read("report:" + date)
+        history_range = _archive_range()
         if not stored:
             return {**build_report({}, date, now().isoformat()), "available": False, "job": None, "historical": True,
+                    "history_range": history_range,
                     "notes": ["该日尚无短线大屏快照，未使用其他日期冒充所选日行情"]}
         # 兼容分流规则加入前的已归档快照，仍只使用归档消息和原发表日。
         news = [{**r, **classify_news({**r, "is_today": r.get("date") == date})} for r in stored.get("news", [])]
@@ -86,12 +94,13 @@ def query(jobs=None, date=""):
                 "hot_stocks": stored.get("hot_stocks", []), "popularity_rises": stored.get("popularity_rises", []),
                 "big_buys":stored.get("big_buys",[]), "big_sells":stored.get("big_sells",[]),
                 "order_events":stored.get("order_events",[]),"order_meta":stored.get("order_meta",{}),
-                "historical": True, "job": None, "available": True}
+                "historical": True, "job": None, "available": True, "history_range": history_range}
     inputs = _local_sources()
     result = build_report(inputs, now().date().isoformat(), now().isoformat(), current_only=True)
     job_id = _read("latest_job")
     result.update(job=jobs.get(job_id) if jobs and job_id else None,
-                  updated_at=_read("updated_at"), available=bool(result["stocks"] or result["sectors"] or result["calendar"]), historical=False)
+                  updated_at=_read("updated_at"), available=bool(result["stocks"] or result["sectors"] or result["calendar"]),
+                  historical=False, history_range=_archive_range())
     return result
 
 

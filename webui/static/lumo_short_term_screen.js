@@ -240,7 +240,14 @@ await import(new URL("./lumo_short_term_scene.js?v="+document.getElementById("st
     if(kind==="sectors")keys.push("rank","trading_heat","heat_date","heat_coverage","display_pct","pct_label","pct_at","display_net","net_label","net_at","coverage","quote_note");
     const exportRows=kind==="sectors"?rows.map((r,index)=>{const q=sectorQuote(r);return {...r,rank:index+1,trading_heat:sectorHeat(r),display_pct:q.pct,display_net:q.net,pct_label:q.pct_label,pct_at:q.pct_at,net_label:q.net_label,net_at:q.net_at,coverage:JSON.stringify(q.coverage||{}),quote_note:q.note};}):rows;
     const cell=value=>{let s=String(value??"");if(/^[=+\-@]/.test(s)&&!/^[-+]?\d+(\.\d+)?$/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';};download("\uFEFF"+[keys,...exportRows.map(r=>keys.map(k=>r[k]))].map(r=>r.map(cell).join(",")).join("\r\n"),`短线大屏_${kind}_${data.today}.csv`,"text/csv;charset=utf-8");}
-  function liveStatus(){const historical=data?.historical;$("stLiveState").textContent=historical?"历史快照 · 自动滚动":"今日实时监控 · 分区独立更新";$("stLiveState").title="盘口15秒 · 个股异动1分钟 · 消息45秒 · 人气3分钟 · 板块资金2分钟 · 盘中涨跌停90秒；首屏立即错峰连接，旧日记录仅留在历史查询";}
+  function liveStatus(){
+    const {start,end}=data.history_range || {};
+    const coverage=start ? `已归档短线快照覆盖 ${start} 至 ${end}，部分日期可能缺失` : '暂未归档短线快照';
+    $("stDate").title=coverage;
+    const status=$("stLiveState");
+    status.textContent=data.historical ? (data.available ? `${data.today} 历史快照 · 自动滚动` : `${data.today} 无短线快照 · ${coverage}`) : '今日实时监控 · 分区独立更新';
+    status.title=data.historical ? coverage : '盘口15秒 · 个股异动1分钟 · 消息45秒 · 人气3分钟 · 板块资金2分钟 · 盘中涨跌停90秒';
+  }
   function stopFeeds(){for(const state of feedStates.values())clearTimeout(state.timer);feedStates.clear();fieldRevisions.clear();for(const clock of root.querySelectorAll(".st-feed-clock"))clock.remove();}
   function markFeed(kind,seconds,value={}){const hosts={radar:["stStockList"],news:["stNews"],popularity:["stHotList","stRapidList"],sectors:[],limits:["stUpList","stDownList","stEmotion"],orders:["stBuyList","stSellList"]};if(kind===(sectorSort()==="heat"?"radar":"sectors"))hosts[kind].push("stSectorList");for(const id of hosts[kind]||[]){const header=$(id).closest(".st-panel")?.querySelector("header");if(!header)continue;let clock=header.querySelector(".st-feed-clock");if(!clock){clock=document.createElement("small");clock.className="st-feed-clock";header.querySelector("h2").after(clock);}clock.textContent=seconds>=60?`${seconds/60}分`:`${seconds}秒`;clock.dataset.state=value.error?"error":value.running?"loading":"ready";clock.title=`每${seconds}秒独立检查${value.error?" · "+value.error:value.running?" · 后台采集中":""}${value.checked_at?" · 最近成功检查 "+value.checked_at:""}；行情日期以分区记录为准`;}}
   function startFeeds(){if(data?.historical||disposed)return;for(const [kind,[interval,offset]] of Object.entries(feedConfig))if(!feedStates.has(kind)){const state={version:"",busy:false,timer:null};feedStates.set(kind,state);markFeed(kind,interval/1000);state.timer=setTimeout(()=>loadFeed(kind,state,interval),offset);}}
@@ -274,7 +281,10 @@ await import(new URL("./lumo_short_term_scene.js?v="+document.getElementById("st
     buttonElement.disabled=true;host.textContent="正在读取实际日K…";
     try{
       const {data:payload}=await api(`/api/stock-kline/${encodeURIComponent(code)}?${query}`);
-      if(current())window.LumoPriceChart.mount(host,payload);
+      if(current())window.LumoPriceChart.mount(host,payload,{
+        rangeEnd:end,
+        loadRange:range=>window.LumoPriceChart.stockRange(code,'daily',range),
+      });
     }catch(error){if(current())host.textContent=error.message;}
     finally{buttonElement.disabled=false;}
   }

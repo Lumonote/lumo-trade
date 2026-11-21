@@ -13,6 +13,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from html import unescape
 from typing import Any
 
+from data_store import kv_repo
 from webui.services.http_client import request_json, request_json_post, request_text
 
 
@@ -449,13 +450,13 @@ class MarketIntelligenceService:
                 fields='ts_code,symbol,name,industry,market,list_date',
             )
         except Exception:
-            return []
+            basic_df = None
         basics = self._stock_basic_by_ts_code(basic_df)
-        if not basics:
-            return []
 
         requested_trade_date = re.sub(r'\D', '', str(trade_date or '').strip())
         if requested_trade_date and len(requested_trade_date) != 8:
+            return []
+        if not basics and not requested_trade_date:
             return []
         quote_df = None
         resolved_trade_date = None
@@ -483,7 +484,7 @@ class MarketIntelligenceService:
 
         flow_df = None
         fetch_flow = getattr(pro, 'moneyflow_dc', None) or getattr(pro, 'moneyflow_ths', None)
-        if fetch_flow is not None:
+        if fetch_flow is not None and (not requested_trade_date or resolved_trade_date >= '20230911'):
             try:
                 flow_df = fetch_flow(trade_date=resolved_trade_date)
             except Exception:
@@ -498,7 +499,10 @@ class MarketIntelligenceService:
         for ts_code, quote in quote_map.items():
             meta = basics.get(ts_code)
             if not meta:
-                continue
+                if not requested_trade_date or not re.fullmatch(r'(?:6\d{5}\.SH|[03]\d{5}\.SZ|[489]\d{5}\.BJ)', ts_code):
+                    continue
+                # Exact-date daily quotes also include stocks that subsequently delisted.
+                meta = {'code': ts_code.split('.')[0]}
             code = meta.get('code') or ts_code.split('.')[0]
             name = meta.get('name') or code
             amount = _safe_float(quote.get('amount'), None)
@@ -524,7 +528,8 @@ class MarketIntelligenceService:
                 'code': code,
                 'name': name,
                 'price': _safe_float(quote.get('close'), None),
-                'change_pct': round(_safe_float(quote.get('pct_chg'), 0.0) or 0.0, 2),
+                'change_pct': (_safe_float(quote.get('pct_chg'), None) if requested_trade_date else
+                               round(_safe_float(quote.get('pct_chg'), 0.0) or 0.0, 2)),
                 'amount': amount_yuan,
                 'turnover_rate': _safe_float(metrics.get('turnover_rate') if metrics is not None else None, None),
                 'market_cap': market_cap_yuan,
@@ -627,8 +632,12 @@ class MarketIntelligenceService:
         """
         now = time.time()
         requested_trade_date = re.sub(r'\D', '', str(trade_date or '').strip())
-        if requested_trade_date and len(requested_trade_date) != 8:
-            return []
+        if requested_trade_date:
+            try:
+                if len(requested_trade_date) != 8 or datetime.date.fromisoformat(requested_trade_date) > datetime.date.today():
+                    return []
+            except ValueError:
+                return []
         limit = max(100, min(int(limit or 5000), 6000))
         # 缓存只按「交易日口径」分槽,槽里放本进程请求过的最宽 limit 那份,更窄的请求取前缀:
         # 各数据源都是排好序再截断,前缀 == 按该 limit 单独取数。云图页(市值前 5000)与
@@ -646,7 +655,17 @@ class MarketIntelligenceService:
             return cache['payload'][:limit]
 
         if requested_trade_date:
-            items = self.fetch_tushare_market_cloud_stocks(limit=fetch_limit, trade_date=requested_trade_date)
+            namespace = 'market_cloud_history_v1'
+            hit = kv_repo.get(namespace, requested_trade_date)
+            saved = hit[0] if hit else []
+            if not force_refresh and saved:
+                return saved[:limit]
+            items = self.fetch_tushare_market_cloud_stocks(limit=6000, trade_date=requested_trade_date)
+            items = [r for r in items if str(r.get('trade_date', '')).replace('-', '') == requested_trade_date]
+            if items and len(items) >= len(saved):
+                kv_repo.set_(namespace, requested_trade_date, items)
+                saved = kv_repo.get(namespace, requested_trade_date)[0]
+            items = saved
             self._market_cloud_cache = {'ts': now, 'key': cache_key, 'limit': fetch_limit, 'payload': items}
             return items[:limit]
 

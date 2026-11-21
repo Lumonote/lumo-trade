@@ -27,6 +27,8 @@ _locks = {key: threading.Lock() for key in ("financing", "participants")}
 PARTICIPANTS = {"main", "elg", "lg", "md", "sm", "institution", "etf", "national", "quant"}
 DAILY_SOURCES = {"flows": "moneyflow_dc", "institutions": "top_inst"}
 PARTICIPANTS_SEED = "seed:participants:v1"
+RANGE_START = {"flows": "2023-09-11", "institutions": "2005-01-01", "etf": "2005-02-23"}
+RANGE_LIMIT = 45
 NATIONAL_NAMES = ("中央汇金投资有限责任公司", "中央汇金资产管理有限责任公司", "中国证券金融股份有限公司", "中国国新控股有限责任公司", "中国诚通控股集团有限公司")
 
 
@@ -131,7 +133,7 @@ def _archive_legacy(data):
                 kv_repo.set_(NAMESPACE, f"raw:{method}:{day}", rows)
 
 
-def _range_evidence(data, start, end, keys):
+def _range_evidence(data, start, end, keys, *, code=None):
     """Priority per whole market day: raw partition > legacy snapshot > bundled baseline."""
     result = dict(data)
     dates = set(data.get("calendar", [])) | set(data.get("evidence_calendar", []))
@@ -146,11 +148,14 @@ def _range_evidence(data, start, end, keys):
         known = _daily_keys(method) | base | legacy.keys()
         dates.update(known)
         bounds[key] = (min(known, default=None), max(known, default=None))
+        def selected(rows):
+            return [row for row in rows if security_code(row.get('ts_code')) == code] if code else rows
+
         days = {}
         if start and end:
-            days.update((k[len(seed_prefix):], rows) for k, rows in kv_repo.range_items(NAMESPACE, seed_prefix + start, seed_prefix + end))
-            days.update((d, rows) for d, rows in legacy.items() if start <= d <= end)
-            days.update((k[len(prefix):], rows) for k, rows in kv_repo.range_items(NAMESPACE, prefix + start, prefix + end))
+            days.update((k[len(seed_prefix):], selected(rows)) for k, rows in kv_repo.range_items(NAMESPACE, seed_prefix + start, seed_prefix + end))
+            days.update((d, selected(rows)) for d, rows in legacy.items() if start <= d <= end)
+            days.update((k[len(prefix):], selected(rows)) for k, rows in kv_repo.range_items(NAMESPACE, prefix + start, prefix + end))
         result[key] = [row for d in sorted(days) for row in days[d]]
         result[key + '_days'] = sorted(days)
     # Legacy ETF snapshots infer their predecessors from their *own* calendar.
@@ -162,6 +167,50 @@ def _range_evidence(data, start, end, keys):
 def _status(kind, jobs):
     job_id = _read("job:" + kind)
     return jobs.get(job_id) if jobs and job_id else None
+
+
+def _source_key(participant):
+    return {"institution": "institutions", "etf": "etf", "national": "national", "quant": "quant"}.get(participant, "flows")
+
+
+def _range_status(participant, data, start, end):
+    key = _source_key(participant)
+    floor = RANGE_START.get(key)
+    bounds = data.get('evidence_bounds', {}).get(key)
+    if key in DAILY_SOURCES:
+        covered = set(data.get(f'{key}_days', []))
+    else:
+        stamp = 'trade_date' if key == 'etf' else 'as_of'
+        covered = {d for r in data.get(key, []) if (d := iso(r.get(stamp)))}
+        if key == 'etf':
+            covered &= etf_predecessors(data).keys()
+    if not bounds:
+        bounds = (min(covered, default=None), max(covered, default=None))
+    if key == 'quant':
+        earliest, latest = quant_radar_repo.date_bounds()
+        bounds = (min(filter(None, (bounds[0], earliest)), default=None),
+                  max(filter(None, (bounds[1], latest)), default=None))
+    first, last = bounds
+    note = ''
+    if key == 'flows':
+        note = '东财订单规模资金流自 2023-09-11 起提供。'
+    elif key == 'national':
+        note = '国家队按已入库的实际公告日查询。'
+    elif key == 'quant':
+        note = '量化榜显示每只股票在区间内最近一次已入库观测，资金轨迹可逐日查询。'
+    elif key == 'etf':
+        note = '首只境内 ETF 于 2005-02-23 上市。估算须取得所选日净值及相邻两日份额。'
+    if first:
+        note += f' 已入库覆盖 {first} 至 {last}。'
+    elif floor is None:
+        note += ' 本地暂无该类档案。'
+    through = min(end, _publishable_day(now()).isoformat()) if end else None
+    if not (floor and start and through and start <= through and through >= floor):
+        return None, note.strip()
+    lower = max(start, floor)
+    expected = {d for d in data.get('calendar', []) if lower <= d <= through}
+    needs_fill = not first or lower < first or through > last or not expected.issubset(covered)
+    return ({'participant': participant, 'start': lower, 'end': through} if needs_fill else None), note.strip()
 
 
 def financing(jobs=None, **params):
@@ -190,24 +239,42 @@ def participants(jobs=None, **params):
         raise ValueError("日期须为YYYY-MM-DD，开始日期不能晚于结束日期")
     if end and end > now().date().isoformat():
         raise ValueError("结束日期不能晚于今日")
+    explicit = bool(start or end)
     data = bundle("participants")
-    source_key = {"institution": "institutions", "etf": "etf", "national": "national", "quant": "quant"}.get(participant, "flows")
+    source_key = _source_key(participant)
     source = next((r for r in data.get("sources", []) if r["key"] == source_key), {})
     if not end:
         end = source.get("as_of") or data.get("flow_as_of") or data.get("as_of")
+        if participant == 'quant':
+            latest_observed = quant_radar_repo.date_bounds()[1]
+            end = max(filter(None, (end, latest_observed)), default=None)
         if start:
             end = max(start, end or start)
     if not start and participant == "national":
         start = min((r["as_of"] for r in data.get("national", []) if r.get("as_of") and r["as_of"] <= (end or "")), default=end)
     if participant != 'etf':
         data = _range_evidence(data, start or end, end, DAILY_SOURCES)
+    if participant == 'quant' and (first := start or end) and end:
+        evidence = {security_code(r.get('code')): r for r in sorted(data.get('quant', []), key=lambda r: r.get('as_of') or '')
+                    if first <= (r.get('as_of') or '') <= end}
+        for row in quant_radar_repo.latest_in_range(first, end):
+            code = security_code(row['code'])
+            day = row['trade_date']
+            if day >= (evidence.get(code, {}).get('as_of') or ''):
+                evidence[code] = {'code': code, 'name': row['name'], 'sector': row['industry'], 'as_of': day,
+                                  'activity': row['activity'], 'direction': row['direction'],
+                                  'bull': row['changes_bull'], 'bear': row['changes_bear'], 'net': None}
+        data['quant'] = list(evidence.values())
     report = capital_report(data, start=start, end=end, participant=participant,
                             keyword=str(params.get("keyword") or "")[:100], sector=str(params.get("sector") or "")[:100])
     report["data_as_of"] = source.get("as_of") or max((iso(r.get("trade_date") or r.get("as_of")) or "" for r in data.get(source_key, [])), default=None)
     if source_key in DAILY_SOURCES:
         report['data_as_of'] = data['evidence_bounds'][source_key][1] or report['data_as_of']
+    elif source_key == 'quant':
+        report['data_as_of'] = max(filter(None, (report['data_as_of'], quant_radar_repo.date_bounds()[1])), default=None)
+    hint, note = _range_status(participant, data, (start or end) if explicit else None, end)
     etf = participant == "etf"
-    report.update(job=_status("participants", jobs), updated_at=(data.get("etf_updated_at") if etf else None) or data.get("updated_at"),
+    report.update(backfill=hint, coverage_note=note, job=_status("participants", jobs), updated_at=(data.get("etf_updated_at") if etf else None) or data.get("updated_at"),
                   errors=data.get("etf_errors", data.get("errors", [])) if etf else data.get("errors", []), today=now().date().isoformat(),
                   disclosure="资金类型可能重叠，不可加总为市场增量资金。大单/小单为订单规模；ETF为份额变化×同日净值的申赎估算；机构仅限龙虎榜公开单日席位；国家队为已公告持仓；量化为公开行为代理。")
     return report
@@ -225,16 +292,16 @@ def history(*, participant="main", code="", start="", end=""):
     if end and end > now().date().isoformat():
         raise ValueError("结束日期不能晚于今日")
     data = bundle("participants")
-    key = {"institution": "institutions", "etf": "etf", "national": "national", "quant": "quant"}.get(participant, "flows")
+    key = _source_key(participant)
     source = next((r for r in data.get("sources", []) if r["key"] == key), {})
     end = end or source.get("as_of") or data.get("flow_as_of") or data.get("as_of")
     start = start or end
     if not start or not end:
         raise ValueError("尚无日期可查询，请先更新资金研究")
-    if start > end or (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days > 3660:
-        raise ValueError("开始日期不能晚于结束日期，单次查询最长十年")
+    if start > end:
+        raise ValueError("开始日期不能晚于结束日期")
     if key in DAILY_SOURCES:
-        data = _range_evidence(data, start, end, [key])
+        data = _range_evidence(data, start, end, [key], code=code)
         calendar = data['calendar']
     else:
         calendar = sorted({d for d in [*(data.get("calendar") or []), *(iso(d) for d in calendar_repo.open_days())] if d})
@@ -246,7 +313,8 @@ def history(*, participant="main", code="", start="", end=""):
         first, last = quant_radar_repo.date_bounds()
         report["available_start"] = min(filter(None, (first, report["available_start"])), default=None)
         report["available_end"] = max(filter(None, (last, report["available_end"])), default=None)
-    report.update(today=now().date().isoformat(), source=source,
+    hint, note = _range_status(participant, data, start, end)
+    report.update(backfill=hint, coverage_note=note, today=now().date().isoformat(), source=source,
                   updated_at=(data.get("etf_updated_at") if participant == "etf" else None) or data.get("updated_at"))
     return report
 
@@ -351,6 +419,20 @@ def _sse_open_days(start, end):
                    and (d := iso(r.get("cal_date"))) and first <= d <= last})
 
 
+def _historical_sessions(first, last):
+    found = [s for d in calendar_repo.open_days() if (s := iso(d))]
+    if found and found[0] <= first.isoformat() and found[-1] >= last.isoformat():
+        return [d for d in found if first.isoformat() <= d <= last.isoformat()]
+    return _sse_open_days(first, last)
+
+
+def _window_progress(participant, start, end, missing):
+    key = f'range_cursor:{participant}:{start}:{end}'
+    cursor = _read(key) or ''
+    pending = [date for date in missing if date > cursor]
+    return key, pending or missing
+
+
 def _publishable_day(current):
     return current.date() - dt.timedelta(days=current.time() < dt.time(15, 30))
 
@@ -426,24 +508,80 @@ def _collect_etf(result, dates, previous, through, progress):
 
 def collect_etf_range(start, end, progress):
     result = dict(bundle("participants"))
-    first = dt.date.fromisoformat(start)
+    first = dt.date.fromisoformat(max(start, RANGE_START['etf']))
     requested_end = dt.date.fromisoformat(end)
     publishable = _publishable_day(now()).isoformat()
     lookback = dt.date.fromordinal(max(1, first.toordinal() - 35))
-    calendar = _sse_open_days(lookback, requested_end)
+    calendar = _historical_sessions(lookback, requested_end)
     through = min(end, publishable) if end in calendar else end
-    dates = [d for d in calendar if start <= d <= through]
+    dates = [d for d in calendar if first.isoformat() <= d <= through]
     if not dates:
         raise ValueError("所选区间没有已收盘的交易日可刷新；当日数据在北京时间15:30后采集")
-    previous = max((d for d in calendar if d < start), default=None)
-    _collect_etf(result, dates, previous, through, progress)
+    covered = set(etf_predecessors(result)) & {d for r in result.get('etf', []) if (d := iso(r.get('trade_date')))
+                                               and number(r.get('total_share')) is not None and number(r.get('nav')) is not None}
+    key, pending = _window_progress('etf', start, end, [d for d in dates if d not in covered])
+    first_missing = dates.index(pending[0]) if pending else None
+    batch = dates[first_missing:first_missing + RANGE_LIMIT] if first_missing is not None else []
+    if batch:
+        previous = max((d for d in calendar if d < batch[0]), default=None)
+        _collect_etf(result, batch, previous, through if batch[-1] == dates[-1] else batch[-1], progress)
     amount_dates = {r["date"] for r in etf_rows(result, start=start, end=through) if r["net"] is not None}
     if through < end:
-        result["etf_errors"].append(f"{end} 未到北京时间15:30，未计入采集交易日")
+        result.setdefault("etf_errors", []).append(f"{end} 未到北京时间15:30，未计入采集交易日")
     _archive_legacy(result)
     kv_repo.set_(NAMESPACE, "participants", {k: v for k, v in result.items() if k not in DAILY_SOURCES})
-    return {"start": start, "end": end, "as_of": max(amount_dates, default=None), "notes": result["etf_errors"],
-            "processed_days": len(dates), "amount_days": len(amount_dates)}
+    remaining = len(set(pending) - set(batch))
+    if batch:
+        kv_repo.set_(NAMESPACE, key, batch[-1] if remaining else '')
+    return {"start": start, "end": end, "as_of": max(amount_dates, default=None), "notes": result.get('etf_errors', []),
+            "processed_days": len(batch), "amount_days": len(amount_dates), "remaining_days": remaining}
+
+
+def collect_orders_range(participant, start, end, progress):
+    key = _source_key(participant)
+    method = DAILY_SOURCES[key]
+    first = dt.date.fromisoformat(max(start, RANGE_START[key]))
+    last = min(dt.date.fromisoformat(end), _publishable_day(now()))
+    dates = _historical_sessions(first, last)
+    if not dates:
+        raise ValueError('所选区间没有取得交易日，无法补采该来源。')
+
+    data = bundle('participants')
+    ready = _daily_keys(method) | _daily_keys(method, 'seed') | _group_days(data.get(key, [])).keys()
+    cursor, missing = _window_progress(key, start, end, [d for d in dates if d not in ready])
+    batch = missing[:RANGE_LIMIT]
+    saved, failures, checked = 0, 0, []
+    for index, date in enumerate(batch, 1):
+        try:
+            rows = _day(method, date)
+        except Exception as exc:
+            if not checked:
+                raise ValueError('所选区间的资金来源读取失败，请核对接口权限或稍后重试。') from exc
+            failures += 1
+            break
+        checked.append(date)
+        if rows or _read(f'raw:{method}:{date}') is not None:
+            ready.add(date)
+        if rows:
+            saved += 1
+        progress(f'{method}：已检查 {index}/{len(batch)} 个交易日', index, len(batch))
+
+    refreshed = dict(bundle('participants'))
+    refreshed['evidence_calendar'] = sorted(set(refreshed.get('evidence_calendar', [])) | set(dates))
+    refreshed['updated_at'] = now().isoformat()
+    _archive_legacy(refreshed)
+    kv_repo.set_(NAMESPACE, 'participants', {k: v for k, v in refreshed.items() if k not in DAILY_SOURCES})
+    notes = []
+    if not failures and batch and not saved:
+        notes.append('所选区间的接口未返回可验证的资金记录。')
+    if failures:
+        notes.append('部分交易日读取失败，保留本批已经取得的数据。')
+    remaining = len(missing) - len(checked)
+    if checked:
+        kv_repo.set_(NAMESPACE, cursor, checked[-1] if remaining else '')
+    return {'start': start, 'end': end, 'as_of': max((d for d in dates if d in ready), default=None),
+            'notes': notes, 'processed_days': len(checked),
+            'amount_days': saved, 'remaining_days': remaining}
 
 
 def collect(kind, progress=lambda message: None):
@@ -582,15 +720,16 @@ def start_refresh(kind, jobs, *, participant="", start="", end=""):
         raise ValueError("无效的资金类型或日期")
     params = {}
     if start or end:
-        if kind != "participants" or participant != "etf":
-            raise ValueError("区间刷新仅适用于ETF资金研究")
+        floor = RANGE_START.get(_source_key(participant)) if participant else None
+        if kind != "participants" or not floor:
+            raise ValueError("该资金类型使用已披露或已采集的档案，没有按日补采接口。")
         if not start or not end or iso(start) != start or iso(end) != end or start > end:
             raise ValueError("请选择完整的起止日期（YYYY-MM-DD），开始日期不能晚于结束日期")
         if end > now().date().isoformat():
             raise ValueError("结束日期不能晚于北京时间今日")
-        if (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days > 3660:
-            raise ValueError("单次刷新区间最长十年")
-        params = {"participant": "etf", "start": start, "end": end}
+        if end < floor:
+            raise ValueError(f"该来源的可查时间不早于 {floor}。")
+        params = {"participant": participant, "start": max(start, floor), "end": end}
     with _locks[kind]:
         active = _status(kind, jobs)
         if active and active.get("status") in ("queued", "running"):
@@ -616,8 +755,13 @@ def start_refresh(kind, jobs, *, participant="", start="", end=""):
             try:
                 progress()
                 if params:
-                    result = collect_etf_range(params["start"], params["end"],
-                                               lambda message, done, total: progress(message, percent=1 + 94 * done // total))
+                    def report_progress(message, done, total):
+                        progress(message, percent=1 + 94 * done // total)
+
+                    if params['participant'] == 'etf':
+                        result = collect_etf_range(params['start'], params['end'], report_progress)
+                    else:
+                        result = collect_orders_range(params['participant'], params['start'], params['end'], report_progress)
                 else:
                     data = collect(kind, progress)
                     result = {"as_of": data["as_of"], "notes": data["errors"] + data.get("etf_errors", [])}

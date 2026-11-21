@@ -37,6 +37,8 @@ PRODUCTS: List[Dict[str, str]] = [
     {"variety": "IM", "name": "中证1000", "node": "im_qh", "index_code": "sh000852", "ts_index": "000852.SH"},
 ]
 VARIETIES = {p["variety"]: p for p in PRODUCTS}
+# Product launch dates published by CFFEX in its PFMI disclosure.
+_FIRST_TRADE = {"IF": "20100416", "IH": "20150416", "IC": "20150416", "IM": "20220722"}
 
 _KV_NAMESPACE = "futures_rank"
 _OVERVIEW_TTL = 30  # 行情缓存秒数(盘中自动刷新即 30s 一拍)
@@ -623,6 +625,15 @@ def position_rank(variety: str, date: str = "", force: bool = False) -> Dict[str
     if not meta:
         return {"ok": False, "error": f"未知品种 {variety},支持 {'/'.join(VARIETIES)}"}
     requested = str(date or "").replace("-", "").strip()
+    first_trade = _FIRST_TRADE[variety]
+    if requested:
+        try:
+            _dt.date.fromisoformat(requested)
+        except ValueError:
+            return {"ok": False, "error": "日期须为 YYYY-MM-DD"}
+        if requested < first_trade:
+            return {"ok": False, "variety": variety, "date": _iso(requested), "available_start": _iso(first_trade),
+                    "error": f"{meta['name']}股指期货于 {_iso(first_trade)} 上市，所选日期无席位持仓。"}
     candidates = [requested] if requested else _recent_trade_dates(8)
     for yyyymmdd in candidates:
         payload = _load_day_rank(variety, yyyymmdd, force=force)
@@ -631,9 +642,9 @@ def position_rank(variety: str, date: str = "", force: bool = False) -> Dict[str
             if not requested and yyyymmdd != candidates[0]:
                 fallback = _iso(candidates[0])
             return {"ok": True, "variety": variety, "name": meta["name"],
-                    "date": _iso(yyyymmdd), "fallback_from": fallback, **payload}
+                    "date": _iso(yyyymmdd), "available_start": _iso(first_trade), "fallback_from": fallback, **payload}
     which = _iso(requested) if requested else "最近交易日"
-    return {"ok": False, "variety": variety, "name": meta["name"],
+    return {"ok": False, "variety": variety, "name": meta["name"], "available_start": _iso(first_trade),
             "error": f"{which}无持仓排名数据(节假日或中金所尚未发布,盘后约16:00更新)"}
 
 

@@ -32,9 +32,10 @@
       <label>结束日期<input id="mmCandleEnd" type="date" required></label>
       <label>聚合周期<select id="mmCandleBucket"><option value="week">周</option><option value="month">月</option><option value="quarter">季</option></select></label>
       <button class="button secondary" type="submit">查询区间</button>
-      <button class="button secondary" id="mmCandleAll" type="button">全部历史</button>
+      <button class="button secondary" id="mmCandleAll" type="button">已入库历史</button>
       <button class="button secondary" id="mmCandleReset" type="button">最近一年</button>
     </form>
+    <p class="mh-note" id="mmCandleStatus" role="status"></p>
     <p class="mh-note" id="mmCandleDetail"></p>
     <div id="mmCandlePlot" aria-live="polite"></div>
   </section>

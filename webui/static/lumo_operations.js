@@ -47,21 +47,23 @@
     const sameSource=!!plan.source && plan.source===data.source;
     if (!sameSource) note+=' 计划与图表的价格来源不一致或未记录，不叠加计划价位。';
     window.LumoPanic?.mount(host.parentElement,data.panic,{detail:true,title:'恐慌指标'});
-    LumoPriceChart.mount(host,data,{levels:sameSource?plan.levels:{}, locked:!!plan.locked,
-      levelsAt:plan.locked?plan.locked_at:plan.data_as_of,note});
+    LumoPriceChart.mount(host,data,{levels:sameSource?plan.levels:{}, levelsSource:plan.source, locked:!!plan.locked,
+      levelsAt:plan.locked?plan.locked_at:plan.data_as_of,note,
+      loadRange:range=>LumoPriceChart.stockRange(plan.code,'daily',range)});
   }
 
   async function indexChart(host,index) {
-    let data=index, note='';
+    let data=index, note='', loadRange;
     try {
       const health=await fetchJson('/api/market-health');
       const history=health.indices?.find(r=>r.symbol===index.symbol);
+      if (history) loadRange=range=>LumoPriceChart.indexRange(index.symbol,range);
       if (history?.series?.length && history.series.length>=(index.records || []).length) data=history;
       else note='显示指数风向已有的同频历史。';
     } catch { note='大盘历史读取失败，显示指数风向快照。'; }
     if (!host.isConnected) return;
     window.LumoPanic?.mount(host.parentElement,index.panic,{detail:true,title:'恐慌指标'});
-    LumoPriceChart.mount(host,data,{note});
+    LumoPriceChart.mount(host,data,{note,loadRange});
   }
 
   function modelHtml(op, selected) {

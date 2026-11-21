@@ -76,17 +76,41 @@
     return {high,low,close:last,change:first>0 && last!=null ? (last/first-1)*100 : null,avgVolume:count?sum/count:null};
   }
 
+  async function rangeJson(path, filters, {start,end,signal}={}) {
+    const params=new URLSearchParams(filters);
+    if(start) params.set('start',start);
+    if(end) params.set('end',end);
+    const response=await fetch(`${path}?${params}`,{signal});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok || !payload) throw new Error(payload?.error || `行情读取失败 (${response.status})`);
+    return payload;
+  }
+
+  async function stockRange(code, period, range) {
+    const payload=await rangeJson(`/api/stock-kline/${encodeURIComponent(code)}`,{period,limit:'all'},range);
+    if(!payload.data) throw new Error('行情响应缺少数据');
+    return payload.data;
+  }
+
+  function indexRange(symbol, range, {breadth=false}={}) {
+    const filters=breadth ? {symbol,breadth:'1'} : {symbol};
+    return rangeJson('/api/market-health/index-history',filters,range);
+  }
+
   function mount(host, payload={}, options={}) {
     if (!host) return;
     const key = `${payload.symbol || payload.code || ''}:${payload.period || 'daily'}`;
     const previous = instances.get(host);
     const state = options.state || (previous?.key === key && previous.state) || {};
     previous?.observer.disconnect();
-    const all = prepare(payload.records || payload.series);
-    const op = payload.operation || {};
-    const breadth = options.observations ? breadthByDate(options.observations) : null;
+    if (state.rangeRequest && state.rangeRequest.key!==key) {
+      state.rangeRequest.controller.abort();
+      state.rangeRequest=null;
+    }
+    let activePayload = payload, all = prepare(payload.records || payload.series), op = payload.operation || {};
+    let breadth = options.observations ? breadthByDate(options.observations) : null;
     const comparison = options.comparison;
-    const minute = all.some(r=>r.date.length>10);
+    const minute = /^\d+m$|^1h$/.test(payload.period || '') || all.some(r=>r.date.length>10);
     const inputType = minute ? 'datetime-local' : 'date';
     const presets = [['all','全部'],['60','60根'],['120','120根'],['250','250根']];
     if (breadth?.size) presets.push(['observed','观测区间']);
@@ -99,24 +123,49 @@
     host.innerHTML = `<div class="lp-controls"><div class="lp-presets" role="group" aria-label="行情窗口">${presets.map(([v,l])=>`<button type="button" data-window="${v}">${l}</button>`).join('')}</div>
       <form class="lp-range"><input type="${inputType}" step="1" aria-label="K线起点"><span>至</span><input type="${inputType}" step="1" aria-label="K线终点"><button type="submit">查询</button></form></div>
       <div class="lp-layers">${Object.entries(layers).map(([k,l])=>`<label><input type="checkbox" data-layer="${k}" ${state.layers[k]?'checked':''}>${l}</label>`).join('')}</div>
-      <div class="lp-meta"></div><div class="lp-summary"></div><div class="lp-legend"></div><div class="lp-frame"></div><output class="lp-readout" aria-live="off"></output><div class="lp-note"></div>`;
+      <div class="lp-range-status" role="status" hidden></div><div class="lp-meta"></div><div class="lp-summary"></div><div class="lp-legend"></div><div class="lp-frame"></div><output class="lp-readout" aria-live="off"></output><div class="lp-note"></div>`;
     const find = s => host.querySelector(s);
     const frame=find('.lp-frame'), readout=find('.lp-readout'), form=find('.lp-range');
     const [from,to] = form.querySelectorAll('input');
+    const rangeStatus = find('.lp-range-status');
+    if (options.rangeEnd) {
+      from.max=to.max=options.rangeEnd+(minute?'T23:59:59':'');
+    }
     const observer = new ResizeObserver(() => { if (!frame.isConnected) observer.disconnect(); else if (frame.clientWidth && frame.clientWidth !== width) paint(); });
-    instances.set(host,{key,state,observer});
+    const chart={key,state,observer,frame,select,renderRangeStatus};
+    instances.set(host,chart);
+    if (state.rangeRequest?.key===key) state.rangeRequest.chart=chart;
     let rows=[], width=0, left=0, dx=0, cursor=-1, pivots=[], waves=[], events=[], fib=[], trends=[], zones=[], visibleLevels=[];
     const indices = new Map();
     const normalizeInput = v => minute ? v.slice(0,19).replace(' ','T') : v.slice(0,10);
-    function select() {
+    function renderRangeStatus() {
+      const loading=state.rangeRequest?.key===key;
+      const error=state.rangeError?.key===key ? state.rangeError.message : '';
+      rangeStatus.textContent=loading?'正在查询历史行情…':error;
+      rangeStatus.hidden=!loading && !error;
+      rangeStatus.classList.toggle('lp-range-error',!!error);
+      form.setAttribute('aria-busy',String(loading));
+    }
+    function select(updateInput=true) {
+      const saved=state.window==='custom' && state.rangeData?.key===key ? state.rangeData.payload : payload;
+      if (saved!==activePayload) {
+        activePayload=saved;
+        all=prepare(saved.records || saved.series);
+        op=saved.operation || {};
+        const observations=saved.observations ?? options.observations;
+        breadth=observations ? breadthByDate(observations) : null;
+      }
       if (state.window === 'custom') {
         const lo=timeKey(state.from), hi=timeKey(state.to);
         rows = all.filter(r=>(!lo || r.date>=lo) && (!hi || r.date.slice(0,hi.length)<=hi));
       } else if (state.window === 'observed' && breadth?.size) {
         const dates=[...breadth.keys()].sort(); rows=all.filter(r=>r.date>=dates[0] && r.date<=dates.at(-1));
       } else rows = Number(state.window)>0 ? all.slice(-Number(state.window)) : all;
-      from.value=state.window==='custom' ? state.from || '' : normalizeInput(rows[0]?.date || '');
-      to.value=state.window==='custom' ? state.to || '' : normalizeInput(rows.at(-1)?.date || '');
+      if (updateInput) {
+        const draft=(state.rangeRequest?.key===key && state.rangeRequest) || (state.rangeError?.key===key && state.rangeError);
+        from.value=draft ? draft.from : state.window==='custom' ? state.from || '' : normalizeInput(rows[0]?.date || '');
+        to.value=draft ? draft.to : state.window==='custom' ? state.to || '' : normalizeInput(rows.at(-1)?.date || '');
+      }
       host.querySelectorAll('[data-window]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.window===String(state.window))));
       indices.clear(); rows.forEach((r,i)=>indices.set(r.date,i));
       const end=rows.at(-1)?.date || '';
@@ -132,11 +181,11 @@
       zones=(op.zones || []).filter(z=>z.from<=end && z.to>=rows[0]?.date && (z.confirmed_at || z.to)<=end && number(z.high)>0 && number(z.low)>0);
       const since=timeKey(options.locked ? options.levelsAt : options.levelsAt || op.as_of);
       const levelDate=minute ? since : since.slice(0,10);
-      const l=options.levels ?? op.levels ?? {};
+      const l=options.levelsSource && options.levelsSource!==activePayload.source ? {} : options.levels ?? op.levels ?? {};
       visibleLevels = levelDate && levelDate<=end ? [['触发区下沿',l.entry_low,'#3775b0'],['触发区上沿',l.entry_high,'#3775b0'],[options.locked?'锁定失效线':'结构失效线',l.stop_loss,colors.down],['第一目标区',l.target1,colors.ma20]]
         .filter(([,v])=>number(v)>0).map(([label,value,color])=>({label,value:Number(value),color,asOf:levelDate})) : [];
       cursor=rows.length-1;
-      find('.lp-meta').textContent=`${rows.length ? `${rows[0].date} 至 ${end} · ` : ''}${rows.length} / ${all.length} 根${payload.source ? ' · '+payload.source : ''}`;
+      find('.lp-meta').textContent=`${rows.length ? `${rows[0].date} 至 ${end} · ` : ''}${rows.length} / ${all.length} 根${activePayload.source ? ' · '+activePayload.source : ''}`;
       const stats=rangeStats(rows);
       find('.lp-summary').textContent=rows.length ? `区间涨跌 ${stats.change==null?'—':fmt(stats.change)+'%'}　最高 ${fmt(stats.high)}　最低 ${fmt(stats.low)}　均量 ${fmt(stats.avgVolume)}` : '';
       const enabled=state.layers;
@@ -150,10 +199,10 @@
       const n = rows.filter(r=>!r.full).length, obs = breadth && rows.filter(r=>breadth.has(r.date)).length;
       find('.lp-note').textContent=[n?`${n} 根开高低收不全或不一致，仅标可用收盘。`:'',
         rows.length && enabled.volume && !rows.some(r=>r.volume!=null)?'区间无成交量数据。':'',
-        breadth?`广度有观测 ${obs} / ${rows.length} 个交易日；其中 ${rows.filter(r=>breadth.get(r.date)?.some(b=>b.value<=freezeLine && !b.provisional)).length} 日收盘触及冰点参考（≤${freezeLine}%），不代表见底。`:'',options.note || '',payload.message || '',
+        breadth?`广度有观测 ${obs} / ${rows.length} 个交易日；其中 ${rows.filter(r=>breadth.get(r.date)?.some(b=>b.value<=freezeLine && !b.provisional)).length} 日收盘触及冰点参考（≤${freezeLine}%），不代表见底。`:'',options.note || '',activePayload.message || '',
         enabled.wave && waves.length?`最近${waves.at(-1).direction==='up'?'上行':'下行'}五浪候选，确认于 ${waves.at(-1).confirmed_at}。`:'',
         enabled.wave && !waves.length?'区间未见完整、已确认的五浪候选。':''].filter(Boolean).join(' ');
-      paint(); options.onRange?.(rows,state,stats);
+      paint(); options.onRange?.(rows,state,stats,activePayload);
     }
 
     function paint() {
@@ -292,12 +341,55 @@
     frame.onpointermove=point; frame.onpointerdown=point;
     frame.onpointerleave=()=>{const tag=frame.querySelector('.lp-hover-date');if(tag)tag.hidden=true;};
     frame.onkeydown=e=>{const i={ArrowLeft:cursor-1,ArrowRight:cursor+1,Home:0,End:rows.length-1}[e.key]; if (i!==undefined){e.preventDefault();inspect(i,true);} };
-    host.querySelectorAll('[data-window]').forEach(b=>b.onclick=()=>{state.window=b.dataset.window;to.setCustomValidity('');select();});
-    host.querySelectorAll('[data-layer]').forEach(c=>c.onchange=()=>{state.layers[c.dataset.layer]=c.checked;select();});
-    form.oninput=()=>to.setCustomValidity('');
-    form.onsubmit=e=>{e.preventDefault(); if(from.value && to.value && from.value>to.value){to.setCustomValidity('终点不能早于起点');to.reportValidity();return;}
-      state.window='custom'; state.from=from.value; state.to=to.value; select();};
-    select(); observer.observe(frame);
+    function clearRangeRequest() {
+      state.rangeRequest?.controller.abort();
+      state.rangeRequest=null;
+      state.rangeError=null;
+      renderRangeStatus();
+    }
+    async function queryRange() {
+      const fromValue=from.value, toValue=to.value;
+      if(fromValue && toValue && fromValue>toValue){to.setCustomValidity('终点不能早于起点');to.reportValidity();return;}
+      clearRangeRequest();
+      if(!options.loadRange || (!fromValue && !toValue)) {
+        state.window=fromValue || toValue ? 'custom' : 'all';
+        state.from=fromValue; state.to=toValue; state.rangeData=null; select();
+        return;
+      }
+      const controller=new AbortController();
+      const request={key,from:fromValue,to:toValue,controller,chart};
+      state.rangeRequest=request;
+      renderRangeStatus();
+      const current=()=>{
+        const view=request.chart;
+        return view.frame.isConnected && state.rangeRequest===request ? view : null;
+      };
+      try {
+        const data=await options.loadRange({start:fromValue.slice(0,10) || undefined,
+          end:toValue.slice(0,10) || options.rangeEnd,signal:controller.signal});
+        const view=current();
+        if(!view) return;
+        state.rangeRequest=null;
+        state.rangeData={key,payload:data};
+        state.window='custom'; state.from=fromValue; state.to=toValue;
+        view.renderRangeStatus(); view.select();
+      } catch(error) {
+        const view=current();
+        if(!view) return;
+        state.rangeRequest=null;
+        state.rangeError={key,from:fromValue,to:toValue,message:error.message || '历史行情读取失败'};
+        view.renderRangeStatus();
+      }
+    }
+    host.querySelectorAll('[data-window]').forEach(b=>b.onclick=()=>{
+      clearRangeRequest(); state.window=b.dataset.window; to.setCustomValidity(''); select();
+    });
+    host.querySelectorAll('[data-layer]').forEach(c=>c.onchange=()=>{state.layers[c.dataset.layer]=c.checked;select(false);});
+    form.oninput=()=>{to.setCustomValidity(''); clearRangeRequest();};
+    form.onsubmit=e=>{e.preventDefault(); void queryRange();};
+    select(); renderRangeStatus(); observer.observe(frame);
+    if(options.loadRange && state.window==='custom' && state.rangeData?.key!==key && state.rangeRequest?.key!==key &&
+        state.rangeError?.key!==key && form.checkValidity()) void queryRange();
   }
-  window.LumoPriceChart={mount,rangeStats};
+  window.LumoPriceChart={mount,rangeStats,stockRange,indexRange};
 })();

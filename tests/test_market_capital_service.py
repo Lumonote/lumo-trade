@@ -239,7 +239,7 @@ def test_etf_refresh_backfills_more_than_default_window_and_keeps_history(store,
     assert job["logs"][-1].endswith("25/25 个区间交易日")
     assert job["result"] == {"start": start, "end": end, "as_of": friday,
                              "notes": ["ETF有1个区间交易日读取失败或未披露；缺失不补零，保留已有记录"],
-                             "processed_days": 25, "amount_days": 23}
+                             "processed_days": 25, "amount_days": 23, "remaining_days": 0}
     assert methods == ["trade_cal", "etf_basic"]
     assert sorted(reads) == [previous] + [r["cal_date"] for r in calendar if r["is_open"] and start <= r["cal_date"] <= end]
     saved = store["participants"]
@@ -305,6 +305,56 @@ def test_history_is_read_only_and_actual_cutoff_is_not_query_end(store, monkeypa
 def test_history_rejects_invalid_query(store, params):
     with pytest.raises(ValueError):
         service.history(**params)
+
+
+def test_older_participant_windows_report_provider_limits_and_offer_exact_backfill(store):
+    store['participants'] = {'as_of': '2026-10-29', 'calendar': ['2026-10-29']}
+    window = {'start': '2008-01-01', 'end': '2008-02-29'}
+    assert service.participants(**window)['backfill'] is None
+    assert '2023-09-11' in service.history(code='600000', **window)['coverage_note']
+    for participant in ('institution', 'etf'):
+        report = service.participants(participant=participant, **window)
+        assert report['backfill'] == {'participant': participant, **window}
+        chart = service.history(code='600000', participant=participant, start='2008-01-01', end='2026-10-29')
+        assert chart['start'] == '2008-01-01' and chart['backfill']['participant'] == participant
+    assert service.participants(start='2000-01-01', end='2026-10-29')['backfill']['start'] == '2023-09-11'
+
+
+def test_old_institution_batch_fills_only_selected_days_and_resumes(store, monkeypatch):
+    dates = ['2008-01-02', '2008-01-03', '2008-01-04', '2008-01-07']
+    seed = {'as_of': '2026-10-29', 'calendar': ['2026-10-29'],
+            'institutions': [{'trade_date': '2026-10-29', 'ts_code': '600000.SH', 'buy': 100}]}
+    store['participants'] = seed
+    reads = []
+    monkeypatch.setattr(service, 'RANGE_LIMIT', 2)
+    monkeypatch.setattr(service, '_historical_sessions', lambda a, b: dates)
+
+    def source(method, **params):
+        day = service.iso(params['trade_date'])
+        reads.append((method, day))
+        return [{'trade_date': day, 'ts_code': '600000.SH', 'exalter': '机构专用', 'reason': '日涨幅偏离值达7%', 'buy': 10, 'sell': 1, 'net_buy': 9}]
+
+    monkeypatch.setattr(service, '_records', source)
+    monkeypatch.setattr(service, 'close_conn', lambda: None)
+    args = ('institution', dates[0], dates[-1], lambda *args: None)
+    result = service.collect_orders_range(*args)
+    assert result['processed_days'] == 2 and result['remaining_days'] == 2
+    result = service.collect_orders_range(*args)
+    assert result['processed_days'] == 2 and result['remaining_days'] == 0
+    assert reads == [('top_inst', d) for d in dates]
+    report = service.history(code='600000', participant='institution', start=dates[0], end=dates[-1])
+    assert report['coverage']['observed'] == 4 and report['totals']['net'] == 36
+    assert report['backfill'] is None
+    assert service.participants(participant='institution')['as_of'] == seed['as_of']
+
+
+def test_quant_participant_list_uses_actual_archived_observations(store, isolated_price_db):
+    store['participants'] = {'as_of': '2026-10-29', 'calendar': ['2026-10-29']}
+    for date, activity in [('2021-01-04', 20), ('2021-01-05', 30), ('2026-10-29', 40)]:
+        service.quant_radar_repo.upsert_day(date, [{'code': '600000', 'name': '样本', 'activity': activity}])
+    report = service.participants(participant='quant', start='2021-01-01', end='2021-12-31')
+    assert [(r['as_of'], r['activity'], r['net']) for r in report['rows']] == [('2021-01-05', 30, None)]
+    assert report['backfill'] is None and '2021-01-04' in report['coverage_note']
 
 
 def test_historical_ranking_and_candles_survive_refresh(store, monkeypatch):

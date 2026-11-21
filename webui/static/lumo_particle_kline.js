@@ -32,7 +32,9 @@
       const response=await fetch(`/api/stock-kline/${id.slice(2)}?limit=all`,{signal:controller.signal});
       if (!response.ok) throw new Error(`行情读取失败 (${response.status})`);
       const {data}=await response.json();
-      if (dialog.open && !controller.signal.aborted) window.LumoPriceChart.mount(host,data);
+      if (dialog.open && !controller.signal.aborted) window.LumoPriceChart.mount(host,data,{
+        loadRange:range=>window.LumoPriceChart.stockRange(id.slice(2),'daily',range),
+      });
     } catch (error) {if (!controller.signal.aborted && dialog.open) host.textContent=error.message;}
   }
   picker.onsubmit=e=>{e.preventDefault(); void open(select.value);};

@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 import re
 import threading
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 import httpx
@@ -22,9 +22,12 @@ import httpx
 from analysis.market_health import number
 from analysis.market_cycle import cycle_report, flow_concentration
 from analysis.market_health_fusion import iso
-from analysis.market_macro import CN10Y_SOURCE, FRED, INDEXES, SPECS, SPREAD, build_events, build_research, clean_series, scenario
+from analysis.market_macro import (CN10Y_SOURCE, FRED, INDEXES, SPECS, SPREAD, build_events, build_research,
+                                   clean_series, equity_bond_spread, scenario)
 from data_store import kv_repo, tushare_client
-from data_store.connection import close_conn
+from data_store.connection import close_conn, get_conn
+from webui.services.daily_history import parse_day
+from webui.services.http_client import request_text
 from webui.services.market_health_service import now
 from webui.services.market_cycle_sources import AXES, fetch_releases
 
@@ -39,6 +42,17 @@ FISCAL_URL = SPECS["spending"]["url"]
 DEBT_URL = SPECS["local_new"]["url"]
 FED_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 _lock = threading.Lock()
+_HISTORY_NAMESPACE = 'market_macro_history_v1'
+_TU_DAILY_HISTORY = {'gold': ('sge_daily', 'close', 'trade_date', {'ts_code': 'Au99.99'}),
+                     'shibor3m': ('shibor', '3m', 'date', {}),
+                     'lpr1y': ('shibor_lpr', '1y', 'date', {}), 'lpr5y': ('shibor_lpr', '5y', 'date', {})}
+_TU_MONTHLY_HISTORY = {'m1': ('cn_m', 'm1_yoy'), 'm2': ('cn_m', 'm2_yoy'),
+                       'cpi': ('cn_cpi', 'nt_yoy'), 'ppi': ('cn_ppi', 'ppi_yoy'),
+                       'pmi': ('cn_pmi', 'pmi010000'), 'social': ('sf_month', 'inc_month'),
+                       'social_stock': ('sf_month', 'stk_endval')}
+_ON_DEMAND_HISTORY = FRED.keys() | _TU_DAILY_HISTORY.keys() | _TU_MONTHLY_HISTORY.keys() | {SPREAD}
+_history_locks = {key: threading.Lock() for key in _ON_DEMAND_HISTORY}
+_BOND_HISTORY_START = '2006-03-01'  # 财政部-中国国债收益率曲线的官方查询起点。
 
 POLICIES = [
     {"date": "2024-09-24", "category": "monetary", "title": "金融支持经济高质量发展政策组合发布", "summary": "降准、利率、住房金融与资本市场工具的政策组合；分别跟踪落地与信用需求。", "tags": "降准 降息 地产 资本市场", "source": "国新办 / 证监会", "url": "https://www.csrc.gov.cn/csrc/c106311/c7508374/content.shtml"},
@@ -175,7 +189,11 @@ def query(jobs=None, *, equity="csi300", factor="real10y", window=252, lag=0, fr
     snap = _snapshot()
     event_data = snap.events(equity, category, keyword)
     research = snap.research(equity=equity, factor=factor, window=int(window), lag=int(lag), frequency=frequency)
-    return {**deepcopy(research), **status(jobs), "events": event_data, "scenario": assumptions, "cycle": deepcopy(snap.cycle(equity)),
+    research = deepcopy(research)
+    if factor in _ON_DEMAND_HISTORY:
+        saved, _ = _history_cache(_history_key(factor, equity))
+        research['chart']['factor_history'] = clean_series([*saved, *research['chart']['factor_history']])
+    return {**research, **status(jobs), "events": event_data, "scenario": assumptions, "cycle": deepcopy(snap.cycle(equity)),
             "snapshot_version": snap.version, "today": now().date().isoformat(), "available": bool(snap.data),
             "indexes": [{"key": k, "code": v[0], "name": v[1]} for k, v in INDEXES.items()],
             "factors": [{"key": k, **v} for k, v in SPECS.items()]}
@@ -231,10 +249,132 @@ def _series(rows, field, date_field="trade_date", frequency="daily"):
     return clean_series(result, now().date().isoformat())
 
 
-def fred_series(code, end):
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={code}&cosd=2014-01-01"
-    rows = csv.DictReader(io.StringIO(_text(url)))
-    return clean_series([{"date": r.get("observation_date") or r.get("DATE"), "value": number(r.get(code))} for r in rows], end)
+def fred_series(code, end, *, start='2014-01-01', timeout=None):
+    params = urlencode({'id': code, 'cosd': start, 'coed': end})
+    url = f'https://fred.stlouisfed.org/graph/fredgraph.csv?{params}'
+    raw = _text(url) if timeout is None else request_text(url, timeout=timeout, trust_env=False)
+    rows = csv.DictReader(io.StringIO(raw.lstrip('\ufeff')))
+    if not rows.fieldnames or code not in rows.fieldnames or not {'observation_date', 'DATE'}.intersection(rows.fieldnames):
+        raise ValueError('FRED 返回的列与研究指标不匹配')
+    values = clean_series([{'date': r.get('observation_date') or r.get('DATE'), 'value': r.get(code)} for r in rows], end)
+    return [r for r in values if r['date'] >= start]
+
+
+def _history_key(factor, equity):
+    return f'{factor}:{equity}' if factor == SPREAD else factor
+
+
+def _history_cache(key):
+    cached = kv_repo.get(_HISTORY_NAMESPACE, key)
+    data = cached[0] if cached else {}
+    return data.get('rows', []), data.get('covered', [])
+
+
+def _missing_days(start, end, covered):
+    day = dt.timedelta(days=1)
+    for left, right in sorted((parse_day(a), parse_day(b)) for a, b in covered):
+        if right < start:
+            continue
+        if left > end:
+            break
+        if left > start:
+            yield start, left-day
+        if right >= end:
+            return
+        start = max(start, right+day)
+    if start <= end:
+        yield start, end
+
+
+def _fetch_factor(factor, equity, left, right):
+    if factor in FRED:
+        return fred_series(FRED[factor][0], right, start=left, timeout=12)
+    compact = {'start_date': left.replace('-', ''), 'end_date': right.replace('-', '')}
+    if factor == SPREAD:
+        rows = _records('index_dailybasic', **compact, ts_code=INDEXES[equity][0], fields='trade_date,pe_ttm')
+        bonds = {r['date']: r['value'] for r in cn10y_series(left, right)} if rows else {}
+        return equity_bond_spread([{'date': r['trade_date'], 'pe_ttm': r.get('pe_ttm')} for r in rows], bonds, right)
+    if factor in _TU_DAILY_HISTORY:
+        method, field, date_field, params = _TU_DAILY_HISTORY[factor]
+        return _series(_records(method, **compact, **params), field, date_field)
+    method, field = _TU_MONTHLY_HISTORY[factor]
+    start_month = compact['start_date'][:6]
+    if factor == 'social_stock':
+        start_month = f'{max(1, int(start_month[:4])-1):04}{start_month[4:]}'
+    rows = _series(_records(method, start_m=start_month, end_m=compact['end_date'][:6]), field, 'month', 'monthly')
+    if factor == 'social_stock':
+        monthly = {r['period']: r['value'] for r in rows}
+        result = []
+        for row in rows:
+            year, month = row['period'].split('-')
+            prior = monthly.get(f'{int(year)-1:04}-{month}')
+            if prior and prior > 0:
+                result.append({**row, 'value': (row['value']/prior-1)*100})
+        return result
+    return rows
+
+
+def history(*, factor, equity, start, end):
+    """Query observations only; independent from the disclosure-aware replay."""
+    if equity not in INDEXES or factor not in SPECS:
+        raise ValueError('未知指数或宏观指标')
+    begin, finish = parse_day(start), parse_day(end)
+    if begin > finish:
+        raise ValueError('开始日期不能晚于结束日期')
+    if finish > now().date():
+        raise ValueError('结束日期不能晚于今天')
+
+    snap = _snapshot()
+    source_series = snap.data.get('series') or {}
+    cutoff = snap.data.get('as_of')
+    if factor == SPREAD:
+        bonds = {r['date']: r['value'] for r in clean_series(source_series.get('cn10y'), cutoff)}
+        base = equity_bond_spread((snap.data.get('valuations') or {}).get(equity), bonds, cutoff)
+    else:
+        base = clean_series(source_series.get(factor), cutoff)
+    key = _history_key(factor, equity)
+    saved, checked = _history_cache(key) if factor in _ON_DEMAND_HISTORY else ([], [])
+    failed = False
+    earliest = max(begin, parse_day(_BOND_HISTORY_START)) if factor == SPREAD else begin
+    if factor in _ON_DEMAND_HISTORY and earliest <= finish:
+        baseline_range = [(base[0]['date'], base[-1]['date'])] if base else []
+        if list(_missing_days(earliest, finish, [*checked, *baseline_range])):
+            # Re-read in the lock so overlapping queries in this process share network work.
+            with _history_locks[factor]:
+                saved, checked = _history_cache(key)
+                missing = list(_missing_days(earliest, finish, [*checked, *baseline_range]))
+                if missing:
+                    left, right = missing[0][0].isoformat(), missing[-1][1].isoformat()
+                    try:
+                        incoming = [r for r in _fetch_factor(factor, equity, left, right) if left <= r['date'] <= right]
+                    except Exception:  # Provider auth/network/format failures are retryable.
+                        failed = True
+                    else:
+                        with get_conn() as conn:
+                            conn.execute('BEGIN IMMEDIATE')
+                            saved, checked = _history_cache(key)
+                            settled = min(right, (now().date()-dt.timedelta(days=7)).isoformat())
+                            if left <= settled:
+                                checked = [*checked, [left, settled]]
+                            kv_repo.set_(_HISTORY_NAMESPACE, key, {
+                                'rows': clean_series([*saved, *incoming]),
+                                'covered': checked,
+                            })
+                        saved, _ = _history_cache(key)
+
+    all_rows = clean_series([*saved, *base], now().date().isoformat())
+    rows = [r for r in all_rows if start <= r['date'] <= end]
+    available_start = all_rows[0]['date'] if all_rows else None
+    available_end = all_rows[-1]['date'] if all_rows else None
+    message = None
+    if failed:
+        message = '历史数据源暂不可用，已显示 SQLite 中此区间的观测。'
+    elif not rows:
+        message = '所选区间没有实际观测。'
+    elif start < available_start or end > available_end:
+        message = '所选区间部分超出实际观测覆盖。'
+    return {'start': start, 'end': end, 'rows': [{'date': r['date'], 'value': r['value']} for r in rows],
+            'available_start': available_start, 'available_end': available_end, 'message': message}
 
 
 def cn10y_series(start, end):

@@ -117,6 +117,25 @@ def _whole_market(days, wanted, stamp):
             for d,(total,n,h) in counts.items() if total >= ICE_MINIMUM}
 
 
+def saved_market_observations(days, target_days, observations):
+    """Use actual point-in-time market partitions for deep history without today's sample cohort."""
+    pending = set(target_days) & set(_closed_days(days, observations))
+    if not pending or len(days) < 20:
+        return []
+    points = {}
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
+    for i in range(19, len(days), BLOCK):
+        window = days[i-19:i+BLOCK]
+        filled = market_daily_fetch.filled_dates(window)
+        eligible = [d for j, d in enumerate(window[19:], 19) if d in pending and
+                    all(p.replace('-', '') in filled for p in window[j-19:j+1])]
+        if eligible:
+            points.update(_whole_market(window, eligible, stamp))
+    for day, row in points.items():
+        kv_repo.set_(NS, 'day:'+day, row)
+    return list(points.values())
+
+
 def _public_fill(symbols, days, needed):
     cached = price_bars_repo.closes('tencent', symbols, min(needed), max(needed))
     targets = []

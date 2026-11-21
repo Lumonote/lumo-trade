@@ -14,6 +14,8 @@
 .lp-chart .lp-layers label {display:inline-flex; align-items:center; gap:4px; font:inherit; cursor:pointer; color:var(--lp-text); margin:0}
 .lp-chart .lp-layers input {width:14px; height:14px; padding:0; margin:0; accent-color:var(--lp-accent)}
 .lp-meta,.lp-note {color:var(--lp-muted); padding:5px 0; overflow-wrap:anywhere}
+.lp-range-status {color:var(--lp-muted); margin-block:7px}
+.lp-range-error {color:inherit; padding-inline-start:8px; border-inline-start:2px solid var(--lp-accent)}
 .lp-legend {min-height:20px; gap:3px 12px; font-size:11px}
 .lp-legend i {width:12px; height:2px; display:inline-block; margin:0 4px 3px 0}
 .lp-frame {position:relative; width:100%; min-width:0; color:var(--lp-muted)}

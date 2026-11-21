@@ -92,6 +92,16 @@
                                     </select>
                                 </div>
                             </div>
+                            <div class="field-row">
+                                <div class="form-group">
+                                    <label for="data-history-start">行情起点</label>
+                                    <input id="data-history-start" type="date">
+                                </div>
+                                <div class="form-group">
+                                    <label for="data-history-end">行情终点</label>
+                                    <input id="data-history-end" type="date">
+                                </div>
+                            </div>
                             <div class="actions">
                                 <button id="load-data-btn" class="btn btn-secondary">载入数据</button>
                             </div>
@@ -234,6 +244,7 @@
         // Global variables
         let currentDataFile = null;
         let currentDataInfo = null;
+        let currentDataRange = {};
         let availableModels = [];
         let modelLoaded = false;
         let modelRuntimeAvailable = false;
@@ -432,25 +443,32 @@
                 showStatus('error', '请选择行情序列，或输入股票代码补库');
                 return;
             }
+            const start = document.getElementById('data-history-start').value;
+            const end = document.getElementById('data-history-end').value;
+            if (start && end && start > end) {
+                showStatus('error', '行情终点不能早于起点');
+                return;
+            }
+            const range = {start:start || undefined,end:end || undefined};
 
             try {
                 showLoading(true);
                 document.getElementById('load-data-btn').disabled = true;
                 currentDataFile = null;
                 currentDataInfo = null;
+                currentDataRange = {};
                 document.getElementById('data-info').style.display = 'none';
                 updateWindow();
 
                 const data = await requestJson('/api/load-data', {
                     method: 'POST',
-                    body: JSON.stringify({
-                        file_path: filePath
-                    })
+                    body: JSON.stringify({file_path: filePath, ...range})
                 });
 
                 if (data.success) {
                     currentDataFile = data.data_info.dataset;
                     currentDataInfo = data.data_info;
+                    currentDataRange = range;
                     showDataInfo(data.data_info);
                     showStatus('success', data.message);
 
@@ -527,6 +545,7 @@
 
                 let predictionParams = {
                     file_path: currentDataFile,
+                    ...currentDataRange,
                     lookback: lookback,
                     pred_len: predLen,
                     start_date: startDate,

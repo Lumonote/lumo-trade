@@ -88,7 +88,7 @@ def test_robyn_native_json_routes(robyn_module, monkeypatch):
     monkeypatch.setattr(
         robyn_module.webui_core,
         "_get_stock_kline_payload",
-        lambda code, period="daily", limit=120, end=None: (
+        lambda code, period="daily", limit=120, start=None, end=None: (
             {
                 "code": code,
                 "name": "贵州茅台",

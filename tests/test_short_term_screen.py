@@ -264,6 +264,7 @@ def test_sector_refresh_updates_old_baseline_without_relabeling_old_window_score
 def cache(monkeypatch):
     values={}
     monkeypatch.setattr(service,"_read",values.get)
+    monkeypatch.setattr(service.kv_repo,"range_keys",lambda _ns,first,last:sorted(k for k in values if first<=k<=last))
     monkeypatch.setattr(service.kv_repo,"set_",lambda ns,key,value:values.__setitem__(key,value))
     monkeypatch.setattr(service,"_local_sources",lambda:values.get("inputs") or inputs())
     monkeypatch.setattr(service,"now",lambda:dt.datetime.fromisoformat("2026-11-01T12:00:00+08:00"))
@@ -286,8 +287,11 @@ def test_read_only_query_supports_all_sections_and_detail_without_network(cache,
 
 
 def test_invalid_or_missing_historical_snapshot_never_relabels_current_data(cache):
-    missing=service.query(date="2026-10-01")
+    cache["report:2026-10-29"]=report()
+    cache["report:2026-11-01"]=report()
+    missing=service.query(date="2008-10-01")
     assert not missing["available"] and missing["stocks"]==[] and missing["sectors"]==[]
+    assert missing["today"]=="2008-10-01" and missing["history_range"]=={"start":"2026-10-29","end":"2026-11-01"}
     for date in ("bad","2026-11-02"):
         with pytest.raises(ValueError):service.query(date=date)
     with pytest.raises(ValueError):service.section("unknown")

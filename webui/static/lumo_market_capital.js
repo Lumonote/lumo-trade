@@ -1,4 +1,4 @@
-/* 两融与资金各自保留真实披露日；查询不启动网络采集，刷新复用后台任务。 */
+/* 两融与资金各自保留真实披露日；区间缺口通过刷新任务补采。 */
 (() => {
   "use strict";
   if (!document.getElementById("mhView-financing")) return;
@@ -165,7 +165,7 @@
     sectorSelect.replaceChildren(new Option("全部行业 / 跟踪指数",""),...[...sectorNames].sort((a,b)=>a.localeCompare(b,"zh-CN")).map(name=>new Option(name,name)));
     sectorSelect.value=selectedSector;
     $("mpMeta").textContent=`查询 ${data.start||"未取得"} 至 ${data.as_of||"未取得"} · ${kind[1]} · 采集 ${data.updated_at||"尚未采集"}`;
-    $("mpBoundary").textContent=kind[3];$("mpDisclosure").textContent=data.disclosure;$("mpRankTitle").textContent=`${kind[1]} · ${participant==="national"?"持仓披露查询":participant==="quant"?"疑似行为观测":"买卖与资金去向"}`;
+    $("mpBoundary").textContent=[kind[3],data.coverage_note].filter(Boolean).join(" ");$("mpDisclosure").textContent=data.disclosure;$("mpRankTitle").textContent=`${kind[1]} · ${participant==="national"?"持仓披露查询":participant==="quant"?"疑似行为观测":"买卖与资金去向"}`;
     if(data.excluded_nonstock)$("mpBoundary").textContent+=` A股榜已排除 ${data.excluded_nonstock} 条非A股记录（含可转债、优先股、B股等）。`;
     const missingMeta=data.metadata_coverage||{};
     if(missingMeta.missing_names||missingMeta.missing_sectors)$("mpBoundary").textContent+=` 当前仍有 ${missingMeta.missing_names||0} 项名称、${missingMeta.missing_sectors||0} 项行业/跟踪指数未取得，已明确标记。`;
@@ -187,7 +187,7 @@
     const value=(key,v)=>typeof v==="boolean"?(key==="complete"?(v?"完整":"不完整"):(v?"是":"否")):typeof v==="number"?num(v,counts.has(key)?0:2):String(v);
     $("mpDetail").innerHTML=head(`${r.name} · 公开证据`,`${r.code} / ${r.sector} / ${r.as_of}`)+(r.evidence?table(["交易日","公开席位","买入","卖出","净额","上榜依据"],r.evidence.map(v=>`<tr><td>${esc(v.date)}</td><td>${esc(v.seat)}</td><td>${money(v.buy)}</td><td>${money(v.sell)}</td><td>${money(v.net)}</td><td>${esc(v.reason)}</td></tr>`),"",{id:"mpEvidence",fields:["date","seat","buy","sell","net","reason"],records:r.evidence}):`<dl class="mc-detail-grid">${Object.entries(r).filter(([k,v])=>v!=null&&typeof v!=="object").map(([k,v])=>`<div><dt>${esc(labels[k]||k)}</dt><dd>${esc(value(k,v))}</dd></div>`).join("")}</dl>`)+`<p class="mc-boundary">${esc($("mpBoundary").textContent)}</p>${historyButton(r)}`;$("mpDetail").scrollIntoView({behavior:"smooth",block:"nearest"});
   }
-  const historyState={id:0,target:null,data:null,controller:null};
+  const historyState={id:0,target:null,data:null,controller:null,poll:null};
   const historyLabel=kind=>({main:"大资金",elg:"超大单",lg:"大单",md:"中单",sm:"散户",institution:"大机构",etf:"ETF",quant:"量化资金",national:"国家队"}[kind]);
   const historyStatus=r=>r.status==="unrecorded"?"未采集 / 未披露":r.status==="no_public_seat"?"已采集 · 无公开单日机构席位":r.status==="no_activity"?"已采集 · 该股无异动":r.missing_reason||"已观测";
   function historyColumns(kind) {
@@ -220,7 +220,7 @@
     const kind=data.participant,identity=["national","quant"].includes(kind),t=data.totals,c=data.coverage;
     $("mpHistoryMeta").textContent=`${data.code} · 查询 ${data.start} 至 ${data.end} · 本证券区间内实际数据截止 ${data.data_as_of||"未取得"} · 可查询 ${data.available_start||"—"} 至 ${data.available_end||"—"}`;
     $("mpHistorySummary").innerHTML=`<div class="mh-kpis">${identity?kpi("有效证据",`${c.observed}项`,kind==="quant"?"含已采集无异动日期":"按股东、公告日与报告期列示")+kpi("资金金额","不可识别","该类证据不提供实际买卖金额"):kpi(kind==="etf"?"净申购估算小计":"买入金额小计",money(t.buy),kind==="etf"?"正向日净申赎估算":kind==="institution"?"公开单日机构席位":"来源未提供双边金额")+kpi(kind==="etf"?"净赎回估算小计":"卖出金额小计",money(t.sell),kind==="etf"?"负向日净申赎绝对额":kind==="institution"?"公开单日机构席位":"来源未提供双边金额")+kpi("净额有效小计",money(t.net),`有效 ${c.amount_days}/${c.days} 日`)}${kpi(kind==="etf"?"份额变化有效小计":"观测覆盖",kind==="etf"?`${num(t.share_change,0)} 份`:`${c.observed}/${c.days}`,kind==="etf"?`有效 ${c.share_days}/${c.days} 日`:"缺失日期不补零")}</div>`;
-    $("mpHistoryNote").textContent=data.note;
+    $("mpHistoryNote").textContent=[data.coverage_note,data.note].filter(Boolean).join(" ");
     let charts="";
     if(kind==="national")charts=historyPlot(data,[{key:"shares",label:"披露持股（股）",color:"#14766d"}],{points:true,label:"持仓披露轨迹 · 每点对应一条股东公告",format:v=>num(v,0)});
     else if(kind==="quant")charts=historyPlot(data,[{key:"activity",label:"疑似活跃刻度",color:"#14766d"}],{points:true,label:"量化行为轨迹",format:num})+historyPlot(data,[{key:"bull",label:"偏多行为",color:"#b55e4a"},{key:"bear",label:"偏空行为",color:"#328067"}],{label:"行为次数",format:v=>num(v,0)});
@@ -235,9 +235,25 @@
     const columns=historyColumns(kind);
     $("mpHistoryRows").innerHTML=table([...columns.map(c=>c[0]),"覆盖状态"],data.rows.map(r=>`<tr>${columns.map(([,key,format])=>`<td>${esc(format?format(r[key]):r[key]??"—")}</td>`).join("")}<td>${esc(historyStatus(r))}</td></tr>`));
   }
-  async function loadHistory() {
+  async function pollHistoryJob(job,id) {
+    if(id!==historyState.id||!$("mpHistoryModal").open)return;
+    const busy=["queued","running"].includes(job.status);
+    if(!busy){
+      await loadHistory({completed:job});
+      if(job.status==="finished")void load("participants");
+      return;
+    }
+    $("mpHistoryStatus").textContent=`正在补充所选区间 · ${job.progress||0}%`;
+    historyState.poll=setTimeout(async()=>{
+      try{
+        const result=await api(`/api/jobs/${encodeURIComponent(job.id)}`,{signal:historyState.controller.signal});
+        void pollHistoryJob(result.job,id);
+      }catch(e){if(id===historyState.id&&e.name!=="AbortError")error("mpHistory",e.message);}
+    },2500);
+  }
+  async function loadHistory({fill=false,completed=null}={}) {
     if(!historyState.target)return;
-    const id=++historyState.id;historyState.controller?.abort();historyState.controller=new AbortController();
+    const id=++historyState.id;clearTimeout(historyState.poll);historyState.controller?.abort();historyState.controller=new AbortController();
     const target={...historyState.target,start:$("mpHistoryStart").value,end:$("mpHistoryEnd").value};
     $("mpHistoryStatus").textContent="正在读取区间证据…";error("mpHistory");historyState.data=null;
     for(const suffix of ["Summary","Chart","Rows","Point","Note"])$("mpHistory"+suffix).textContent="";
@@ -245,6 +261,13 @@
       const data=await api(`/api/market-health/participants/history?${new URLSearchParams(target)}`,{signal:historyState.controller.signal});
       if(id!==historyState.id||!$("mpHistoryModal").open)return;
       historyState.data=data;renderHistory(data);$("mpHistoryStatus").textContent="区间查询已完成 · 悬停或聚焦图形查看逐日明细";
+      if(completed?.error)error("mpHistory",completed.error);
+      if(completed?.result?.notes?.length)$("mpHistoryStatus").textContent+=` · ${completed.result.notes.join("；")}`;
+      if(completed?.result?.remaining_days)$("mpHistoryStatus").textContent+=` · 还有 ${completed.result.remaining_days} 个交易日待检查，可再次查询继续`;
+      if(fill&&data.backfill){
+        const result=await api("/api/market-health/participants/refresh",{method:"POST",body:JSON.stringify(data.backfill),signal:historyState.controller.signal});
+        void pollHistoryJob(result.job,id);
+      }
     }catch(e){if(id!==historyState.id||e.name==="AbortError")return;$("mpHistoryStatus").textContent="";error("mpHistory",e.message);}
   }
   function openHistory(code) {
@@ -256,9 +279,9 @@
     $("mpHistoryStart").max=data.today;$("mpHistoryEnd").max=data.today;
     if(!$("mpHistoryModal").open)$("mpHistoryModal").showModal();loadHistory();
   }
-  $("mpHistoryQuery").addEventListener("submit",e=>{e.preventDefault();loadHistory();});
+  $("mpHistoryQuery").addEventListener("submit",e=>{e.preventDefault();loadHistory({fill:true});});
   $("mpHistoryClose").addEventListener("click",()=>$("mpHistoryModal").close());
-  $("mpHistoryModal").addEventListener("close",()=>{historyState.id++;historyState.controller?.abort();historyState.target=null;});
+  $("mpHistoryModal").addEventListener("close",()=>{historyState.id++;clearTimeout(historyState.poll);historyState.controller?.abort();historyState.target=null;});
   $("mpHistoryModal").addEventListener("click",e=>{
     const button=e.target.closest("[data-mp-history-days]"),data=historyState.data;if(!button||!data)return;
     const count=button.dataset.mpHistoryDays,dates=data.calendar.filter(d=>d<=$("mpHistoryEnd").value);
@@ -274,17 +297,18 @@
   }
   function refreshStatus(data,busy) {
     const job=data.job,params=job?.params,result=job?.result;
-    const span=params?.participant==="etf"?`ETF ${params.start} 至 ${params.end} · `:"";
-    const notes=(data.errors||[]).join("；");
+    const span=params?.participant?`${historyLabel(params.participant) || params.participant} ${params.start} 至 ${params.end} · `:"";
+    const notes=(result?.notes||data.errors||[]).join("；");
+    const remaining=result?.remaining_days?` · 还有 ${result.remaining_days} 个交易日待检查` : "";
     if(busy)return `${span}更新中 ${job.progress||0}% · ${job.logs?.at(-1)||"准备读取公开数据"}`;
     if(job?.status==="failed")return span+(job.error||"更新失败");
-    if(span&&data.participant==="etf"&&job.status==="finished"&&result?.processed_days!=null){
-      return `${span}已处理 ${result.processed_days} 个交易日，其中 ${result.amount_days} 日有可估算净额${notes?` · ${notes}`:""}`;
+    if(span&&job.status==="finished"&&result?.processed_days!=null){
+      return `${span}已处理 ${result.processed_days} 个交易日，其中 ${result.amount_days} 日有${params.participant==="etf"?"可估算净额":"新证据"}${remaining}${notes?` · ${notes}`:""}`;
     }
     if(job?.status==="finished")return `更新完成${result?.as_of?` · 数据截至 ${result.as_of}`:""}${notes?` · ${notes}`:""}`;
     return notes;
   }
-  async function load(kind) {
+  async function load(kind,{fill=false}={}) {
     const s=state[kind],prefix=kind==="financing"?"mf":"mp",id=++s.id;clearTimeout(s.poll);error(prefix);
     try {
       const data=await api(`/api/market-health/${kind}?${query(kind)}`);if(id!==s.id)return false;s.data=data;
@@ -292,8 +316,9 @@
       const busy=data.job&&["queued","running"].includes(data.job.status);$(prefix+"Refresh").disabled=Boolean(busy||s.refreshing);$(prefix+"Export").disabled=!data.as_of;
       if(!s.refreshing)$(prefix+"Status").textContent=refreshStatus(data,busy);
       if(busy)s.poll=setTimeout(()=>load(kind),2500);
-      const missing=kind==="financing"?!data.coverage?.stocks:!data.data_as_of;
-      if(missing&&!data.job&&!s.refreshing&&!s.autoFillAttempted){s.autoFillAttempted=true;void refresh(kind);}
+      const missing=kind==="financing"?!data.coverage?.stocks:!data.start&&!data.as_of&&!data.data_as_of;
+      if(fill&&data.backfill&&!busy&&!s.refreshing)void refresh(kind,{range:data.backfill});
+      else if(missing&&!data.job&&!s.refreshing&&!s.autoFillAttempted){s.autoFillAttempted=true;void refresh(kind);}
       return true;
     }catch(e){if(id!==s.id)return false;error(prefix,`${e.message}。已显示的研究保留原日期。`);$(prefix+"Refresh").disabled=Boolean(s.refreshing);return false;}
   }
@@ -302,16 +327,16 @@
     select.value=name;state.participants.page=1;$("mpDetail").hidden=true;
     if(await load("participants"))$("mpStocks").scrollIntoView({behavior:"smooth",block:"start"});
   }
-  async function refresh(kind,{useEtfRange=false}={}) {
+  async function refresh(kind,{useSelectedRange=false,range=null}={}) {
     const s=state[kind],prefix=kind==="financing"?"mf":"mp";
     if(s.refreshing)return;
-    const params={};
-    if(useEtfRange&&kind==="participants"&&participant==="etf"){
+    const params=range?{...range}:{};
+    if(useSelectedRange&&kind==="participants"&&!['national','quant'].includes(participant)){
       const start=$("mpStart").value,end=$("mpEnd").value;
-      if(start||end)Object.assign(params,{participant,start,end});
+      if(start||end)Object.assign(params,{participant,start:start||end,end:end||s.data?.as_of||start});
     }
     s.refreshing=true;$(prefix+"Refresh").disabled=true;error(prefix);
-    $(prefix+"Status").textContent=params.participant?"正在启动 ETF 区间采集…":"正在启动完整公开数据采集，已显示的研究保留…";
+    $(prefix+"Status").textContent=params.participant?"正在补充所选资金区间…":"正在启动完整公开数据采集，已显示的研究保留…";
     try {
       await api(`/api/market-health/${kind}/refresh`,{method:"POST",body:JSON.stringify(params)});
     }catch(e){
@@ -323,19 +348,19 @@
     const prefix=kind==="financing"?"mf":"mp",root=$("mhView-"+kind);
     function activate(){if(!root.hidden&&!state[kind].started){state[kind].started=true;load(kind);}}
     new MutationObserver(activate).observe(root,{attributes:true,attributeFilter:["hidden"]});activate();
-    $(prefix+"Refresh").addEventListener("click",()=>refresh(kind,{useEtfRange:true}));$(prefix+"Export").addEventListener("click",()=>state[kind].data&&download(`${kind}_${state[kind].data.as_of}.json`,state[kind].data));
+    $(prefix+"Refresh").addEventListener("click",()=>refresh(kind,{useSelectedRange:true}));$(prefix+"Export").addEventListener("click",()=>state[kind].data&&download(`${kind}_${state[kind].data.as_of}.json`,state[kind].data));
     $(prefix+"Csv").addEventListener("click",()=>csv(`${kind}_${state[kind].data?.as_of}.csv`,kind==="financing"?financeRows():participantRows()));
     root.addEventListener("click",e=>{const sort=e.target.closest("[data-mc-sort]")||e.target.closest("th[aria-sort]")?.querySelector("[data-mc-sort]");if(sort){sortTable(sort,root);return;}const page=e.target.closest("[data-mc-page]");if(page){const[p,n]=page.dataset.mcPage.split(":");state[kind].page=Number(n);p==="mf"?renderFinanceStocks():renderParticipantStocks();}const stock=e.target.closest("[data-mc-stock]");if(stock&&typeof window.openStockKlineModal==="function")window.openStockKlineModal(stock.dataset.mcStock,240,{stockName:stock.dataset.mcName}).catch(e=>error(prefix,e.message));});
   }
   $("mfModel").addEventListener("submit",e=>{e.preventDefault();state.financing.page=1;$("mfDetail").hidden=true;load("financing");});
   for(const id of ["mfSearch","mfSector","mfRisk","mfSort"])$(id).addEventListener(id==="mfSearch"?"input":"change",()=>{if(id==="mfSort")tableSort.delete("mfStocks");state.financing.page=1;if(state.financing.data)renderFinanceStocks();});
   $("mhView-financing").addEventListener("click",e=>{const stock=e.target.closest("[data-mf-code]"),sector=e.target.closest("[data-mf-sector]");if(stock)financeDetail(stock.dataset.mfCode);if(sector){$("mfSector").value=sector.dataset.mfSector;state.financing.page=1;renderFinanceStocks();$("mfStocks").scrollIntoView({behavior:"smooth",block:"nearest"});}});
-  $("mpTypes").addEventListener("click",e=>{const b=e.target.closest("[data-mp-type]");if(!b)return;participant=b.dataset.mpType;$("mpDetail").hidden=true;state.participants.page=1;typeButtons();load("participants");});
-  $("mpQuery").addEventListener("submit",e=>{e.preventDefault();state.participants.page=1;$("mpDetail").hidden=true;load("participants");});
+  $("mpTypes").addEventListener("click",e=>{const b=e.target.closest("[data-mp-type]");if(!b)return;participant=b.dataset.mpType;$("mpDetail").hidden=true;state.participants.page=1;typeButtons();load("participants",{fill:true});});
+  $("mpQuery").addEventListener("submit",e=>{e.preventDefault();state.participants.page=1;$("mpDetail").hidden=true;load("participants",{fill:true});});
   $("mpLatest").addEventListener("click",()=>{$("mpStart").value="";$("mpEnd").value="";state.participants.page=1;load("participants");});
   for(const id of ["mpDirection","mpSort"])$(id).addEventListener("change",()=>{if(id==="mpSort"){participantOrder=$("mpSort").value;for(const key of tableSort.keys())if(key.startsWith("mpStocks-"))tableSort.delete(key);}state.participants.page=1;renderParticipantStocks();});
   $("mpSector").addEventListener("change",()=>selectParticipantSector($("mpSector").value));
-  $("mhView-participants").addEventListener("change",e=>{if(e.target.id==="mpAmountKind"){participant=e.target.value;load("participants");}});
+  $("mhView-participants").addEventListener("change",e=>{if(e.target.id==="mpAmountKind"){participant=e.target.value;load("participants",{fill:true});}});
   $("mhView-participants").addEventListener("click",e=>{const row=e.target.closest("[data-mp-row]"),sector=e.target.closest("[data-mp-sector]"),days=e.target.closest("[data-mp-days]");if(row)participantDetail(Number(row.dataset.mpRow));if(sector)selectParticipantSector(sector.dataset.mpSector);if(days){const dates=(state.participants.data?.calendar||[]).filter(d=>d<=(state.participants.data.as_of||""));if(dates.length){$("mpEnd").value=dates.at(-1);$("mpStart").value=dates[Math.max(0,dates.length-Number(days.dataset.mpDays))];state.participants.page=1;load("participants");}}});
   document.addEventListener("market-health-full-refresh",()=>{for(const kind of Object.keys(state))if(state[kind].started&&!$(kind==="financing"?"mfRefresh":"mpRefresh").disabled)refresh(kind);});
   window.addEventListener("pagehide",()=>{for(const s of Object.values(state))clearTimeout(s.poll);});typeButtons();

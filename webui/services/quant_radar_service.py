@@ -1623,9 +1623,15 @@ def _historical_overview(date_key: str) -> Dict[str, Any]:
                 "note": f"{date_iso} 由按日榜单表重建(当日完整盘口快照缺失,温度计为近似值)"}
     gauge = _build_gauge({})
     gauge["date"] = date_iso
+    try:
+        first, last = quant_radar_repo.date_bounds()
+    except Exception:
+        first, last = None, None
+    coverage = f'本地已采集 {first} 至 {last}' if first and last else '本地暂无已采集榜单'
     return {**base, "gauge": gauge, "stocks": [], "smashed": [], "sectors": [], "alerts": [],
             "market_prediction": "",
-            "note": f"{date_iso} 无按日数据(该日未运行量化雷达或非交易日)"}
+            "available_start": first, "available_end": last,
+            "note": f"{date_iso} 无按日数据（{coverage}）"}
 
 
 def overview(force: bool = False,

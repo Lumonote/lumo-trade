@@ -23,7 +23,7 @@ class ModelRuntimeContext:
     tokenizer_cls: Any
     predictor_cls: Any
     pandas: Any
-    load_data_file: Callable[[str], tuple[Any, str | None]]
+    load_data_file: Callable[..., tuple[Any, str | None]]
     create_prediction_chart: Callable[..., str]
     save_prediction_results: Callable[..., str | None]
 
@@ -127,7 +127,8 @@ def run_prediction_payload(data: dict[str, Any], context: ModelRuntimeContext) -
         if lookback < 1 or pred_len < 1:
             return {"error": "Lookback and prediction length must be positive"}, 400
 
-        df, error = context.load_data_file(file_path)
+        bounds = {key: data[key] for key in ('start', 'end') if data.get(key)}
+        df, error = context.load_data_file(file_path, **bounds)
         if error:
             return {"error": error}, 400
         if len(df) < lookback:

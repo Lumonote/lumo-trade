@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 
 import pandas as pd
 
-from data_store import dragon_tiger_list_repo, dragon_tiger_repo, moneyflow_repo
+from data_store import calendar_repo, dragon_tiger_list_repo, dragon_tiger_repo, market_daily_fetch, moneyflow_repo
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,9 @@ _auto_backfill_last_ts: dict[str, float] = {}   # kind -> 上次触发时刻
 AUTO_BACKFILL_COOLDOWN_SECS = 600.0
 AUTO_BACKFILL_MAX_DAYS = 10   # 检查最近 10 个交易日
 AUTO_BACKFILL_MAX_FETCH = 3   # 单次最多补几天(剩下的留给下次刷新,避免请求被整月回填拖死)
+_history_attempts: dict[tuple[str, str], float] = {}
+_PROVIDER_START = {"moneyflow": "2023-09-11", "dragon_tiger": "2005-01-01"}
+_PROVIDER_NAME = {"moneyflow": "东财个股资金流向", "dragon_tiger": "龙虎榜每日明细"}
 
 # 当日资金流/龙虎榜要收盘后才由 Tushare 发布。该时刻之前把「今天」算成缺口的话,
 # 每次请求都会去拉一个注定拉不到的今天,还会吃掉冷却窗口,真正缺的历史交易日
@@ -358,11 +361,7 @@ class CapitalRankingsService:
         end_date=None,
         no_quant=False,
     ) -> dict:
-        try:
-            # 后台补数:榜单响应不等待全市场拉取,补上的数据下次刷新可见
-            auto_backfill_background(("moneyflow",))
-        except Exception:  # noqa: BLE001 — 自动补齐失败不阻断榜单
-            logger.warning("moneyflow_ranking auto backfill skipped")
+        coverage = self._ranking_coverage("moneyflow", date, days, mode, start_date, end_date)
         fetch_n = self._fetch_limit(top_n, no_quant)
         if mode == "aggregate" and start_date and end_date:
             as_of = end_date
@@ -374,7 +373,7 @@ class CapitalRankingsService:
                 sort_by="net_amount",
             )
             return self._envelope("moneyflow", mode, as_of, days, top_n, df, with_quotes,
-                                  start_date, end_date, no_quant=no_quant)
+                                  start_date, end_date, no_quant=no_quant, coverage=coverage)
         if mode == "aggregate":
             as_of = date or moneyflow_repo.latest_date(SNAPSHOT_TOP_N)
             df = (moneyflow_repo.get_aggregated(as_of, days=days, limit=fetch_n,
@@ -385,7 +384,7 @@ class CapitalRankingsService:
             df = (moneyflow_repo.get_ranking(as_of, limit=fetch_n, snapshot_top_n=SNAPSHOT_TOP_N)
                   if as_of else None)
         return self._envelope("moneyflow", mode, as_of, days, top_n, df, with_quotes,
-                              no_quant=no_quant)
+                              no_quant=no_quant, coverage=coverage)
 
     def dragon_tiger_ranking(
         self,
@@ -398,11 +397,7 @@ class CapitalRankingsService:
         end_date=None,
         no_quant=False,
     ) -> dict:
-        try:
-            # 后台补数:榜单响应不等待全市场拉取,补上的数据下次刷新可见
-            auto_backfill_background(("dragon_tiger",))
-        except Exception:  # noqa: BLE001 — 自动补齐失败不阻断榜单
-            logger.warning("dragon_tiger_ranking auto backfill skipped")
+        coverage = self._ranking_coverage("dragon_tiger", date, days, mode, start_date, end_date)
         fetch_n = self._fetch_limit(top_n, no_quant)
         if mode == "aggregate" and start_date and end_date:
             as_of = end_date
@@ -413,7 +408,7 @@ class CapitalRankingsService:
                 sort_by="l_buy",
             )
             return self._envelope("dragon_tiger", mode, as_of, days, top_n, df, with_quotes,
-                                  start_date, end_date, no_quant=no_quant)
+                                  start_date, end_date, no_quant=no_quant, coverage=coverage)
         if mode == "aggregate":
             as_of = date or dragon_tiger_list_repo.latest_date()
             df = (dragon_tiger_list_repo.get_aggregated(as_of, days=days, top_n=fetch_n)
@@ -422,7 +417,20 @@ class CapitalRankingsService:
             as_of = date or dragon_tiger_list_repo.latest_date()
             df = dragon_tiger_list_repo.get_top_n(as_of, fetch_n) if as_of else None
         return self._envelope("dragon_tiger", mode, as_of, days, top_n, df, with_quotes,
-                              no_quant=no_quant)
+                              no_quant=no_quant, coverage=coverage)
+
+    def _ranking_coverage(self, kind, date, days, mode, start_date, end_date):
+        try:
+            if mode == "aggregate" and start_date and end_date:
+                return self._backfill_history(kind, start_date=start_date, end_date=end_date)
+            if date:
+                if mode == "aggregate" and days > 1:
+                    return self._backfill_history(kind, date=date, days=days)
+                return self._backfill_history(kind, start_date=date, end_date=date)
+            auto_backfill_background((kind,))
+        except Exception:  # noqa: BLE001 — 历史补数失败时依然读取原数据
+            logger.warning("capital %s backfill skipped", kind, exc_info=True)
+        return None
 
     def stock_capital_summary(
         self,
@@ -454,6 +462,10 @@ class CapitalRankingsService:
                 auto_backfill_if_stale()
             except Exception:  # noqa: BLE001 — 自动补齐失败不阻断个股查询
                 logger.warning("stock_capital_summary auto backfill skipped: %s", code)
+        coverage = {}
+        if use_range or date or end_date:
+            for kind in _PROVIDER_START:
+                coverage[kind] = self._ranking_coverage(kind, date or end_date, days, "aggregate", start_date, end_date)
         moneyflow = self._stock_moneyflow_section(
             ts_code,
             date=date,
@@ -470,33 +482,10 @@ class CapitalRankingsService:
             end_date=end_date,
             with_quotes=with_quotes,
         )
-        # 显式指定日期/区间且本地无数据时，尝试按窗口补齐后重查一次
-        if not (moneyflow.get("row") or dragon_tiger.get("row")) and (
-            use_range or date
-        ):
-            try:
-                refreshed = self._auto_backfill_window(
-                    date=date, days=days, start_date=start_date, end_date=end_date,
-                )
-                if refreshed:
-                    moneyflow = self._stock_moneyflow_section(
-                        ts_code,
-                        date=date,
-                        days=days,
-                        start_date=start_date,
-                        end_date=end_date,
-                        with_quotes=with_quotes,
-                    )
-                    dragon_tiger = self._stock_dragon_tiger_section(
-                        ts_code,
-                        date=date,
-                        days=days,
-                        start_date=start_date,
-                        end_date=end_date,
-                        with_quotes=with_quotes,
-                    )
-            except Exception:  # noqa: BLE001 — 窗口补齐失败不影响降级展示
-                logger.warning("stock_capital_summary window backfill skipped: %s", code)
+        for section in (moneyflow, dragon_tiger):
+            if status := coverage.get(section["kind"]):
+                section["coverage"] = status
+                section["reason"] = status["reason"] or section["reason"]
         has_rows = bool(moneyflow.get("row") or dragon_tiger.get("row"))
         latest_dates = [
             d for d in (moneyflow.get("latest_date"), dragon_tiger.get("latest_date")) if d
@@ -511,80 +500,89 @@ class CapitalRankingsService:
             "end_date": end_date,
             "as_of": end_date or date or (max(latest_dates) if latest_dates else None),
             "data_status": "fresh" if has_rows else "unavailable",
-            "reason": None if has_rows else "资金榜单暂无该股记录。可先在资金榜单页补偿最近交易日。",
+            "reason": None if has_rows else "所选区间暂无该股资金榜单记录。",
             "moneyflow": moneyflow,
             "dragon_tiger": dragon_tiger,
         }
 
-    def _auto_backfill_window(self, *, date=None, days=5, start_date=None, end_date=None) -> bool:
-        """按请求窗口补齐缺失交易日（显式日期/区间场景）。
-
-        与 auto_backfill_if_stale 共用冷却(按 kind 分桶)与锁:查询路径上自动补齐,
-        避免用户手动去资金榜单页点「补偿数据」。返回是否触发过补齐。
-        """
+    def _backfill_history(self, kind, *, date=None, days=1, start_date=None, end_date=None):
         from data_store import tushare_client
-        if not tushare_client.available():
-            return False
-        window = self._request_window(days, date, start_date, end_date)
+
+        first_available = _PROVIDER_START[kind]
+        source = _PROVIDER_NAME[kind]
+        start, end = _to_iso(start_date), _to_iso(end_date or date)
+        status = {"provider": source, "provider_start": first_available, "requested_days": 0,
+                  "stored_days": 0, "reason": None}
+        if end and end < first_available:
+            status["reason"] = f"{source}的来源覆盖从 {first_available} 起。所选日期早于该来源的覆盖。"
+            return status
+
+        online = tushare_client.available()
+        lower = max(start, first_available) if start_date and end_date else start_date
+        window = self._request_window(days, date, lower, end_date, allow_network=online)
+        today = _dt.date.today().strftime("%Y%m%d")
+        floor = first_available.replace("-", "")
+        window = [d for d in window if d >= floor and (d < today or d == today and _publish_cutoff_passed())]
         if not window:
-            return False
-        if not _publish_cutoff_passed():
-            today = _dt.date.today().strftime("%Y%m%d")
-            window = [d for d in window if str(d) != today]
-        if not window:
-            return False
-        now = time.time()
-        missing_by_kind: dict[str, list[str]] = {}
-        for kind in ("moneyflow", "dragon_tiger"):
-            if (now - _auto_backfill_last_ts.get(kind, 0.0)) < AUTO_BACKFILL_COOLDOWN_SECS:
-                continue
-            covered = _covered_dates(kind, window)
-            missing = [d for d in window if _to_iso(d) not in covered]
-            if missing:
-                missing_by_kind[kind] = missing
-        if not missing_by_kind:
-            return False
-        with _auto_backfill_lock:
-            # 冷却在锁内再验一次(并发窗口保护),并按 kind 各自记账。
-            planned = {k: v[:AUTO_BACKFILL_MAX_FETCH] for k, v in missing_by_kind.items()
-                       if (now - _auto_backfill_last_ts.get(k, 0.0)) >= AUTO_BACKFILL_COOLDOWN_SECS}
-            for kind in planned:
-                _auto_backfill_last_ts[kind] = now
-        if not planned:
-            return False
-        try:
-            for kind, missing in planned.items():
-                self.backfill(kinds=(kind,), dates=missing)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("window backfill failed: %s", exc)
-            return False
+            status["reason"] = ("所选区间暂无可确认的已披露交易日。" if online else
+                                "所选区间暂无本地交易日历。配置 TuShare 后可补历史榜单。")
+            return status
+
+        covered = _covered_dates(kind, window)
+        missing = [d for d in window if _to_iso(d) not in covered]
+        if missing and online:
+            clock = time.monotonic()
+            with _auto_backfill_lock:
+                for key, expires in list(_history_attempts.items()):
+                    if expires <= clock:
+                        del _history_attempts[key]
+                planned = [d for d in missing if (kind, d) not in _history_attempts][:AUTO_BACKFILL_MAX_FETCH]
+                for d in planned:
+                    _history_attempts[kind, d] = clock + AUTO_BACKFILL_COOLDOWN_SECS
+            if planned:
+                self.backfill(kinds=(kind,), dates=planned)
+                covered = _covered_dates(kind, window)
+
+        status["requested_days"], status["stored_days"] = len(window), len(covered)
+        notes = []
+        if start and start < first_available:
+            notes.append(f"{source}的来源覆盖从 {first_available} 起。")
+        if len(covered) < len(window):
+            notes.append(f"所选区间有 {len(covered)}/{len(window)} 个交易日已入库。")
+            if not online:
+                notes.append("配置 TuShare 后可继续补历史榜单。")
+        status["reason"] = "".join(notes) or None
+        return status
 
     @staticmethod
-    def _request_window(days: int, date=None, start_date=None, end_date=None) -> list[str]:
-        """请求窗口对应的交易日列表（YYYYMMDD，最新在前，去重后截断到 days 个）。
-
-        返回 YYYYMMDD 与 tushare backfill 的 dates 参数口径一致
-        （fetcher 直接传给 pro.moneyflow_dc / top_list 的 trade_date）。
-        """
-        from data_store import tushare_client
-        as_of_iso = _to_iso(end_date or date or "")
-        start_iso = _to_iso(start_date) if start_date else ""
-        end_iso = _to_iso(end_date) if end_date else ""
-        # 取足够多的交易日，再按窗口过滤
-        raw = tushare_client.recent_trade_dates(max(days * 2 + 4, 30)) or []  # YYYYMMDD
-        if start_iso and end_iso:
-            window = [d for d in raw if start_iso <= _to_iso(d) <= end_iso]
-        else:
-            cutoff = as_of_iso or (_to_iso(raw[0]) if raw else "")
-            window = [d for d in raw if _to_iso(d) <= cutoff] if cutoff else []
-        seen: set[str] = set()
-        out: list[str] = []
-        for d in window:
-            if d not in seen:
-                seen.add(d)
-                out.append(d)
-        return out[: max(int(days), 1)]
+    def _request_window(days: int, date=None, start_date=None, end_date=None, *, allow_network=True) -> list[str]:
+        """Return requested sessions in YYYYMMDD, newest first."""
+        full_range = bool(start_date and end_date)
+        try:
+            last = min(_dt.date.fromisoformat(_to_iso(end_date or date)), _dt.date.today())
+            first = (_dt.date.fromisoformat(_to_iso(start_date)) if full_range else
+                     last - _dt.timedelta(days=max(days * 2 + 8, 35)))
+        except (ValueError, OverflowError):
+            return []
+        if first > last:
+            return []
+        start, end = first.strftime("%Y%m%d"), last.strftime("%Y%m%d")
+        cached = calendar_repo.open_days()
+        window = {d for d in cached if start <= d <= end}
+        if allow_network:
+            if not cached:
+                window.update(market_daily_fetch.open_days(start, end))
+            else:
+                if start < cached[0] and (full_range or len(window) < days):
+                    previous = (_dt.date.fromisoformat(_to_iso(cached[0])) - _dt.timedelta(days=1)).strftime("%Y%m%d")
+                    window.update(market_daily_fetch.open_days(start, min(end, previous)))
+                if end > cached[-1]:
+                    following = (_dt.date.fromisoformat(_to_iso(cached[-1])) + _dt.timedelta(days=1)).strftime("%Y%m%d")
+                    window.update(market_daily_fetch.open_days(max(start, following), end))
+        if not window and first == last and first.weekday() < 5 and not (cached and cached[0] <= start <= cached[-1]):
+            window.add(start)  # The requested single day's feed can verify it directly.
+        result = sorted(window, reverse=True)
+        return result if full_range else result[:days]
 
     @staticmethod
     def _fetch_limit(top_n, no_quant) -> int:
@@ -601,7 +599,7 @@ class CapitalRankingsService:
             return {"codes": set(), "as_of": None, "available": False}
 
     def _envelope(self, kind, mode, as_of, days, top_n, df, with_quotes,
-                  start_date=None, end_date=None, no_quant=False) -> dict:
+                  start_date=None, end_date=None, no_quant=False, coverage=None) -> dict:
         quant_info = self._quant_code_info() if no_quant else None
         quant_codes = (quant_info or {}).get("codes") or set()
         rows = self._normalize(df)
@@ -625,6 +623,8 @@ class CapitalRankingsService:
             "end_date": end_date,
             "top_n": top_n,
             "count": len(rows),
+            "coverage": coverage,
+            "reason": (coverage or {}).get("reason") or ("所选区间暂无榜单记录。" if coverage and not rows else None),
             "rows": rows,
             "windows": windows,
             "no_quant": bool(no_quant),

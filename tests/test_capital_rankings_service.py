@@ -22,10 +22,11 @@ def conn(tmp_path, monkeypatch):
 
     _getter = lambda: c  # noqa: E731
     from data_store import (
-        connection, moneyflow_repo, dragon_tiger_list_repo, dragon_tiger_repo, sync_log_repo,
+        calendar_repo, connection, moneyflow_repo, dragon_tiger_list_repo, dragon_tiger_repo, sync_log_repo, tushare_client,
     )
-    for mod in (connection, moneyflow_repo, dragon_tiger_list_repo, dragon_tiger_repo, sync_log_repo):
+    for mod in (calendar_repo, connection, moneyflow_repo, dragon_tiger_list_repo, dragon_tiger_repo, sync_log_repo):
         monkeypatch.setattr(mod, "get_conn", _getter)
+    monkeypatch.setattr(tushare_client, "available", lambda: False)
     yield c
 
 
@@ -713,18 +714,60 @@ def test_auto_backfill_if_stale_skips_when_tushare_unavailable(conn, monkeypatch
     assert res["reason"] == "tushare_unavailable"
 
 
-def test_request_window_returns_yyyymmdd_filtered_by_range(monkeypatch):
+def test_request_window_returns_yyyymmdd_filtered_by_range(conn, monkeypatch):
     """_request_window 返回 YYYYMMDD 且按显式区间过滤。"""
-    from data_store import tushare_client
+    from data_store import calendar_repo, market_daily_fetch
     from webui.services.capital_rankings_service import CapitalRankingsService
-    monkeypatch.setattr(tushare_client, "recent_trade_dates", lambda *a, **k: [
-        "20260605", "20260604", "20260603", "20260602",
-    ])
+    calendar_repo.upsert(["20071231", "20080102", "20080103", "20080104", "20080107"])
+    calls = []
+    monkeypatch.setattr(market_daily_fetch, "open_days", lambda start, end: calls.append((start, end)) or ["20071226", "20071227"])
     svc = CapitalRankingsService()
-    win = svc._request_window(10, start_date="2026-06-03", end_date="2026-06-04")
-    assert win == ["20260604", "20260603"]
-    win2 = svc._request_window(2, date="2026-06-04")
-    assert win2 == ["20260604", "20260603"]
+    assert svc._request_window(1, start_date="2008-01-02", end_date="2008-01-04") == [
+        "20080104", "20080103", "20080102",
+    ]
+    assert not calls
+    assert svc._request_window(2, date="2008-01-04") == ["20080104", "20080103"]
+    assert not calls
+    assert svc._request_window(2, date="2007-12-27") == ["20071227", "20071226"]
+    assert calls[0][1] == "20071227"
+
+
+def test_historical_dragon_tiger_ranking_backfills_exact_days_and_reads_sqlite(conn, monkeypatch):
+    from data_store import calendar_repo, tushare_client
+    from webui.services import capital_rankings_service as capital
+
+    calendar_repo.upsert(["20080102", "20080103", "20080104", "20080107"])
+    _seed_dragon_tiger([{"trade_date": "2008-01-02", "ts_code": "600001.SH", "name": "甲", "l_buy": 11}])
+    monkeypatch.setattr(tushare_client, "available", lambda: True)
+    monkeypatch.setattr(capital, "_history_attempts", {})
+    calls = []
+    service = _svc()
+
+    def backfill(*, kinds, dates):
+        calls.append((kinds, dates))
+        _seed_dragon_tiger([
+            {"trade_date": capital._to_iso(day), "ts_code": "600001.SH", "name": "甲", "l_buy": 5}
+            for day in dates
+        ])
+
+    monkeypatch.setattr(service, "backfill", backfill)
+    monkeypatch.setattr(capital, "auto_backfill_background", lambda *_: pytest.fail("Historical queries never fetch recent days"))
+    args = {"mode": "aggregate", "start_date": "2008-01-02", "end_date": "2008-01-07", "with_quotes": False}
+    report = service.dragon_tiger_ranking(**args)
+    again = service.dragon_tiger_ranking(**args)
+    assert calls == [(('dragon_tiger',), ["20080107", "20080104", "20080103"])]
+    assert report == again and report["rows"][0]["list_count"] == 4
+    assert report["coverage"]["stored_days"] == 4 and report["reason"] is None
+
+
+def test_moneyflow_before_coverage_does_not_substitute_a_recent_date(conn, monkeypatch):
+    from data_store import tushare_client
+
+    _seed_moneyflow([{"trade_date": "2026-06-08", "ts_code": "600001.SH", "name": "甲", "net_amount": 20}])
+    monkeypatch.setattr(tushare_client, "available", lambda: pytest.fail("Provider cannot cover this date"))
+    result = _svc().moneyflow_ranking(date="2008-01-02", with_quotes=False)
+    assert result["as_of"] == "2008-01-02"
+    assert result["rows"] == [] and "2023-09-11" in result["reason"]
 
 
 # ---------- 按需自动补齐:缺口判据(残缺日/当日/分 kind 冷却) ----------

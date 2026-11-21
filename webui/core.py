@@ -55,6 +55,7 @@ else:
 from webui.services.background_jobs import BackgroundJobService
 from webui.services.analysis_jobs import AnalysisJobRequestParser, normalize_stock_codes, safe_int
 from webui.services.configuration_service import RuntimeConfigurationService
+from webui.services.daily_history import last_closed_day, parse_day
 from webui.services.http_client import request_text
 from webui.services.job_store import JobStore
 from webui.services.kline_service import StockKlineService
@@ -770,19 +771,38 @@ def load_data_files():
     return price_bars_repo.datasets()
 
 
-def load_data_file(file_path):
+def load_data_file(file_path, *, start=None, end=None):
     """Read a SQLite series, filling a symbol request through the quote service first."""
     match = re.fullmatch(r'sqlite:([a-z_]+):([A-Za-z0-9.]+):(1d|5m|15m|30m|60m)', str(file_path))
     if not match:
         return None, '请选择 SQLite 行情序列，或输入股票代码自动补库'
     source, symbol, frequency = match.groups()
-    end = STOCK_KLINE_SERVICE._clock().date().isoformat()
+    requested_range = bool(start or end)
+    try:
+        lower = parse_day(start) if start else None
+        upper = parse_day(end) if end else STOCK_KLINE_SERVICE._clock().date()
+        if lower and lower > upper:
+            return None, '开始日期不能晚于结束日期'
+    except ValueError as exc:
+        return None, str(exc)
+    if requested_range:
+        upper = min(upper, last_closed_day(STOCK_KLINE_SERVICE._clock()))
+    if lower and lower > upper:
+        return None, '该区间没有已收盘行情'
+    start = lower.isoformat() if lower else None
+    end = upper.isoformat()
+    coverage_note = None
     try:
         if source == 'auto':
             if not re.fullmatch(r'[0-9]{6}', symbol):
                 return None, '请输入六位股票代码'
             code = symbol
-            _, selected, _ = STOCK_KLINE_SERVICE.history(code, frequency, end=end)
+            if start:
+                _, selected, coverage_note = STOCK_KLINE_SERVICE._range_history(code, frequency, start, end)
+            else:
+                _, selected, coverage_note = STOCK_KLINE_SERVICE.history(code, frequency, end=end)
+            if selected == 'sqlite':
+                return None, coverage_note or '该区间未取得已收盘行情'
             source = selected.removeprefix('sqlite:')
             if source != 'ohlcv':
                 symbol = STOCK_KLINE_SERVICE.sina_symbol_for_code(code)
@@ -790,17 +810,17 @@ def load_data_file(file_path):
                     symbol = f'{code}.{symbol[:2].upper()}'
 
         if source == 'ohlcv' and re.fullmatch(r'[0-9]{6}', symbol):
-            df = ohlcv_repo.load_dataframe(symbol, frequency, end=end)
+            df = ohlcv_repo.load_dataframe(symbol, frequency, start=start, end=end)
         elif source == 'market_daily' and frequency == '1d' and re.fullmatch(r'[0-9]{6}\.(SH|SZ|BJ)', symbol):
             code, exchange = symbol.split('.')
-            df = pd.DataFrame(price_bars_repo.market_history(exchange.lower() + code, end=end))
+            df = pd.DataFrame(price_bars_repo.market_history(exchange.lower() + code, start=start, end=end))
         elif source in ('sina', 'tencent') and re.fullmatch(r'(sh|sz|bj)[0-9]{6}', symbol):
-            df = pd.DataFrame(price_bars_repo.read(source, symbol, frequency, end=end))
+            df = pd.DataFrame(price_bars_repo.read(source, symbol, frequency, start=start, end=end))
         else:
             return None, '找不到指定的 SQLite 行情序列'
 
         if df.empty:
-            return None, 'SQLite 中暂时没有该标的、频率的已收盘行情，可稍后重试补库'
+            return None, coverage_note or 'SQLite 中暂时没有该标的、频率的已收盘行情，可稍后重试补库'
 
         columns = ['open', 'high', 'low', 'close', 'volume', 'amount']
         df = df.rename(columns={'date': 'timestamps'})[['timestamps', *columns]]
@@ -815,7 +835,7 @@ def load_data_file(file_path):
         if df['timestamps'].duplicated().any():
             return None, '行情时间重复，无法建立预测窗口'
 
-        df.attrs.update(dataset=f'sqlite:{source}:{symbol}:{frequency}', frequency=frequency)
+        df.attrs.update(dataset=f'sqlite:{source}:{symbol}:{frequency}', frequency=frequency, coverage_note=coverage_note)
         return df, None
     except (OSError, ValueError, sqlite3.Error, pd.errors.DatabaseError) as exc:
         logger.warning('Prediction SQLite read failed: %s', exc)
@@ -3816,8 +3836,8 @@ def _market_cloud_payload(force_refresh=False, limit=5000, trade_date=None):
     }
 
 
-def _get_stock_kline_payload(stock_code, period='daily', limit=120, *, end=None):
-    return STOCK_KLINE_SERVICE.get_payload(stock_code, period=period, limit=limit, end=end)
+def _get_stock_kline_payload(stock_code, period='daily', limit=120, *, start=None, end=None):
+    return STOCK_KLINE_SERVICE.get_payload(stock_code, period=period, limit=limit, start=start, end=end)
 
 
 def _load_batch_summary():

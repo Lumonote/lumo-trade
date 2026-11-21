@@ -22,6 +22,38 @@ def test_clean_values_and_future_dates():
     assert clean_series(rows, "2026-10-31") == [{"date": "2026-10-01", "value": 2}]
 
 
+def test_fred_history_backfills_old_range_to_sqlite_and_reuses_overlap(isolated_price_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(service, 'baseline', lambda: {'as_of': '2026-10-31', 'series': {
+        'us10y': [{'date': '2014-01-02', 'value': 3}]}})
+
+    def fetch(url, **kwargs):
+        calls.append(url)
+        return 'observation_date,DGS10\n1998-09-22,4.73\n1998-09-23,.\n1998-09-24,4.69\n1999-05-01,99\n'
+
+    monkeypatch.setattr(service, 'request_text', fetch)
+    params = {'factor': 'us10y', 'equity': 'shcomp', 'start': '1998-09-21', 'end': '1998-09-25'}
+    first = service.history(**params)
+    assert first['rows'] == [{'date': '1998-09-22', 'value': 4.73}, {'date': '1998-09-24', 'value': 4.69}]
+    assert 'cosd=1998-09-21&coed=1998-09-25' in calls[0]
+    assert service.history(**{**params, 'start': '1998-09-22', 'end': '1998-09-24'})['rows'] == first['rows']
+    assert len(calls) == 1
+    assert service._history_cache('us10y')[0] == first['rows']
+
+
+def test_invalid_fred_response_is_retryable_and_displays_only_real_local_data(isolated_price_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(service, 'baseline', lambda: {'as_of': '2026-10-31', 'series': {
+        'us10y': [{'date': '2014-01-02', 'value': 3}]}})
+    monkeypatch.setattr(service, 'request_text', lambda url, **kw: calls.append(url) or '<html>failed</html>')
+    params = {'factor': 'us10y', 'equity': 'shcomp', 'start': '2008-01-02', 'end': '2014-01-02'}
+    result = service.history(**params)
+    assert result['rows'] == [{'date': '2014-01-02', 'value': 3}]
+    assert '暂不可用' in result['message']
+    service.history(**params)
+    assert len(calls) == 2
+
+
 def test_foreign_data_uses_strictly_prior_observation_and_rate_bp():
     prices = series(8)
     factors = series(8, value=lambda i: 2 + i / 100)

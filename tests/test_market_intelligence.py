@@ -340,7 +340,7 @@ def test_market_cloud_cache_is_shared_across_limits(monkeypatch):
     assert fetched == [5000, 6000, 6000]
 
 
-def test_market_cloud_trade_date_uses_tushare_history_only(monkeypatch):
+def test_market_cloud_trade_date_uses_tushare_history_only(monkeypatch, isolated_price_db):
     """指定交易日查询应精确读取该日 TuShare 日线，且不混入实时行情回退。"""
 
     calls = {"daily": [], "trade_cal": 0}
@@ -397,6 +397,9 @@ def test_market_cloud_trade_date_uses_tushare_history_only(monkeypatch):
     assert [row["trade_date"] for row in rows] == ["20260617", "20260617"]
     assert {row["source"] for row in rows} == {"tushare_market_cloud"}
     assert {row["code"] for row in rows} == {"600519", "300750"}
+    reopened = MarketIntelligenceService()
+    monkeypatch.setattr(reopened, 'fetch_tushare_market_cloud_stocks', lambda **_: pytest.fail('history already persisted'))
+    assert reopened.fetch_market_cloud_stocks(limit=100, trade_date='2026-06-17') == rows
 
 
 def _stale_tushare_cloud_rows():

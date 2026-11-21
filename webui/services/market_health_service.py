@@ -14,10 +14,11 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from analysis.market_health import (INDEXES, breadth_history, build_health, build_intraday_health, ice_history,
-                                    market_snapshot, merge_ice_history, merge_observations, normalize_bars, number)
+                                    index_metrics, market_snapshot, merge_ice_history, merge_observations,
+                                    normalize_bars, number)
 from analysis.market_health_fusion import build_fusion
 from data_store import kv_repo, price_bars_repo
-from webui.services import market_ice_service
+from webui.services import daily_history, market_ice_service
 from webui.services.http_client import request_json, request_text
 
 NAMESPACE = "market_health"
@@ -46,6 +47,49 @@ def read_baseline():
 def read_state():
     cached = kv_repo.get(NAMESPACE, "snapshot")
     return cached[0] if cached else read_baseline()
+
+
+def index_history(symbol, start="", end="", *, breadth=False):
+    """Retrieve closed candles for the chart without changing the live health snapshot."""
+    if symbol not in INDEXES:
+        raise ValueError("不支持的指数代码")
+    current = now()
+    today = current.date()
+    try:
+        end_day = daily_history.parse_day(end) if end else today
+        start_day = daily_history.parse_day(start) if start else end_day - dt.timedelta(days=366)
+    except OverflowError:
+        raise ValueError("日期格式应为 YYYY-MM-DD") from None
+    if start_day > end_day:
+        raise ValueError("开始日期不能晚于结束日期")
+
+    start, end = start_day.isoformat(), end_day.isoformat()
+    state = read_state()
+    last_close = daily_history.last_closed_day(current).isoformat()
+    snapshot = [r for r in normalize_bars(state.get("bars", {}).get(symbol, []))
+                if r["date"] <= min(end, last_close) and not r.get("provisional")]
+    warmup = 249  # The first visible day's MA250 needs 249 preceding sessions.
+    before = [r for r in snapshot if r["date"] < start]
+    inside = [r for r in snapshot if r["date"] >= start]
+    if len(before) >= warmup and inside and inside[-1]["date"] == end:
+        rows, source, message = before[-warmup:] + inside, "sqlite:market_health", None
+    else:
+        rows, source, message = daily_history.load_range(symbol, start, end, warmup=warmup, now=current)
+        if len(inside) > sum(start <= r["date"] <= end for r in rows):
+            rows, source = before[-warmup:] + inside, "sqlite:market_health"
+            message = "当前显示快照中已保存的行情，区间可能不完整"
+
+    visible = {r["date"] for r in rows if start <= r["date"] <= end}
+    chart = index_metrics(symbol, rows if visible else [])
+    result = {**chart, "source": source, "message": message, "start": start, "end": end}
+    if breadth and symbol == "sh000001":
+        observations = merge_ice_history(state.get("observations", []),
+                                         market_ice_service.history(), state.get("ice_history", []))
+        if rows and visible:
+            computed = market_ice_service.saved_market_observations([r['date'] for r in rows], visible, observations)
+            observations = merge_ice_history(computed, observations)
+        result["observations"] = [r for r in observations if r["as_of"] in visible and not r.get("provisional")]
+    return result
 
 
 def latest_job(jobs):

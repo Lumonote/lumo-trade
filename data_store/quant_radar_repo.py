@@ -241,6 +241,18 @@ def date_bounds():
     return row[0], row[1]
 
 
+def latest_in_range(start: str, end: str) -> List[Dict[str, Any]]:
+    """Each stock's latest actual observation within the selected dates."""
+    rows = get_conn().execute('''
+        WITH latest AS (SELECT code, MAX(trade_date) AS trade_date FROM quant_radar_stock_daily
+                        WHERE trade_date BETWEEN ? AND ? GROUP BY code)
+        SELECT q.code,q.trade_date,q.name,q.industry,q.activity,q.direction,q.changes_bull,q.changes_bear
+        FROM latest JOIN quant_radar_stock_daily q USING (code, trade_date)
+        ORDER BY q.trade_date DESC, q.activity DESC, q.code
+    ''', (start, end))
+    return [dict(row) for row in rows]
+
+
 def list_dates(limit: int = 120) -> List[str]:
     """有按日榜单数据的日期(最新在前)。"""
     rows = get_conn().execute(

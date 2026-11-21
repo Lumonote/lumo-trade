@@ -17,7 +17,7 @@ from analysis.panic_indicator import panic_from_bars, panic_indicator
 from data_store import kv_repo, ohlcv_repo, price_bars_repo
 from data_store.connection import get_conn
 from webui.services.analysis_jobs import normalize_stock_codes, safe_int
-from webui.services.daily_history import fetch_tencent
+from webui.services.daily_history import fetch_tencent, last_closed_day, load_range, parse_day
 from webui.services.http_client import request_json
 
 
@@ -321,12 +321,31 @@ class StockKlineService:
             return []
         return self.history(codes[0], period, safe_int(limit, 120, minimum=1, maximum=1023) or 120)[0]
 
+    def _range_history(self, code, period, start, end):
+        freq = self.FREQUENCIES[period]
+        symbol = self.sina_symbol_for_code(code)
+
+        def local_rows(lower, upper):
+            frame = ohlcv_repo.load_dataframe(code, freq, start=lower, end=upper)
+            return self.frame_to_kline_records(frame, None, period, upper)
+
+        if freq == '1d':
+            rows, source, message = load_range(symbol, start, end, warmup=249, now=self._clock(), local_rows=local_rows)
+            return self.parse_sina_klines(rows), source, message
+
+        upper = min(end, last_closed_day(self._clock()).isoformat())
+        options = [(price_bars_repo.read('sina', symbol, freq, start=start, end=upper), 'sqlite:sina'),
+                   (local_rows(start, upper), 'sqlite:ohlcv')]
+        rows, source = max(options, key=lambda item: len(item[0]))
+        message = ('历史分钟线使用已入库数据。' if rows else '该区间没有已入库的分钟线，可切换到日线查询。')
+        return self.parse_sina_klines(rows), source, message
+
     def get_payload(
         self,
         stock_code: str,
         period: str = 'daily',
         limit: int | str = 120,
-        *, end: str | None = None,
+        *, start: str | None = None, end: str | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
         codes = normalize_stock_codes([stock_code])
         if not codes:
@@ -337,18 +356,24 @@ class StockKlineService:
         normalized_period = str(period or 'daily')
         if normalized_period not in self.FREQUENCIES:
             return None, 'Unsupported K-line period'
-        if end:
-            try:
-                if datetime.date.fromisoformat(end).isoformat() != end:
-                    raise ValueError
-            except (ValueError, TypeError):
-                return None, 'Invalid K-line end date (YYYY-MM-DD)'
+        try:
+            if end:
+                parse_day(end)
+            if start:
+                last = end or self._clock().date().isoformat()
+                if parse_day(start) > parse_day(last):
+                    return None, '开始日期不能晚于结束日期'
+        except ValueError as exc:
+            return None, str(exc)
 
-        records, source, detail = self.history(code, normalized_period, normalized_limit, end=end)
+        if start:
+            records, source, detail = self._range_history(code, normalized_period, start, last)
+        else:
+            records, source, detail = self.history(code, normalized_period, normalized_limit, end=end)
         daily = self.FREQUENCIES[normalized_period] == '1d'
         if records:
-            message = f'补数未完整，展示已入库的 {len(records)} 根，截至 {records[-1]["date"]}。' if detail or (normalized_limit and len(records)<normalized_limit) else None
-            quote_block = self._overlay_realtime(records, code) if daily and not end and source == 'sqlite:sina' else None
+            message = detail if start else (f'补数未完整，展示已入库的 {len(records)} 根，截至 {records[-1]["date"]}。' if detail or (normalized_limit and len(records)<normalized_limit) else None)
+            quote_block = self._overlay_realtime(records, code) if daily and not start and not end and source == 'sqlite:sina' else None
             name = (quote_block or {}).get('name') or ''
             return {
                 'code': code,
@@ -374,6 +399,6 @@ class StockKlineService:
             'available': False,
             'records': [],
             'panic': panic_indicator(),
-            'message': 'SQLite 尚无该区间的同频行情；本次未补到数据，稍后会重试。',
+            'message': detail if start else 'SQLite 尚无该区间的同频行情；本次未补到数据，稍后会重试。',
             'detail': detail,
         }, None

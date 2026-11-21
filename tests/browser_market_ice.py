@@ -1,12 +1,14 @@
 """Display real Robyn health payloads with an isolated SQLite observation gap."""
+from unittest.mock import patch
+
 from playwright.sync_api import expect
 
 from market_browser_harness import HEALTH, URL, market_page
 
 
 with market_page() as (page, read, _):
-    from data_store import kv_repo
-    from webui.services import market_health_service, market_ice_service
+    from data_store import kv_repo, price_bars_repo
+    from webui.services import daily_history, market_health_service, market_ice_service
 
     state = market_health_service.read_baseline()
     rows = state['bars']['sh000001']
@@ -41,5 +43,38 @@ with market_page() as (page, read, _):
     expect(chart.locator('.lp-readout')).to_contain_text('当日无有效广度观测')
     plot.hover(position={'x': 0, 'y': 25})
     expect(chart.locator('.lp-hover-date')).to_have_text(days[0])
+
+    older = ("2008-01-02", "2008-01-03", "2008-01-04")
+    price_bars_repo.store("tencent", "sh000001", "1d", [
+        {"date": day, "open": 5000, "high": 5100, "low": 4990, "close": 5070, "volume": 100}
+        for day in older
+    ])
+    requested = []
+
+    def from_sqlite(symbol, start, end, *, warmup, now):
+        requested.append((symbol, start, end))
+        return price_bars_repo.read("tencent", symbol, start=start, end=end), "sqlite:tencent", None
+
+    with patch.object(daily_history, "load_range", side_effect=from_sqlite, create=True):
+        chart.get_by_label('K线起点').fill(older[0])
+        chart.get_by_label('K线终点').fill(older[-1])
+        chart.get_by_role('button', name='查询').click()
+        expect(chart.locator('.lp-meta')).to_contain_text(f"{older[0]} 至 {older[-1]}")
+        expect(chart.locator('[data-ice-point]')).to_have_count(0)
+        plot.press('Home')
+        expect(chart.locator('.lp-readout')).to_contain_text(older[0])
+        expect(chart.locator('.lp-readout')).to_contain_text('当日无有效广度观测')
+
+        page.get_by_role('tab', name='指数趋势').click()
+        index_chart = page.locator('#mhIndexChart')
+        index_chart.get_by_label('K线起点').fill(older[0])
+        index_chart.get_by_label('K线终点').fill(older[-1])
+        index_chart.get_by_role('button', name='查询').click()
+        expect(index_chart.locator('.lp-meta')).to_contain_text(f"{older[0]} 至 {older[-1]}")
+        assert requested == [("sh000001", older[0], older[-1])] * 2, requested
+
+        page.reload(wait_until="domcontentloaded")
+        expect(page.locator('#mhIndexChart .lp-meta')).to_contain_text(f"{older[0]} 至 {older[-1]}", timeout=20000)
+
     assert not errors, errors
     print('ice_chart_sqlite_points_range_keyboard_and_mouse_passed')
