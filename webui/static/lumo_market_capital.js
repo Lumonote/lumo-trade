@@ -5,6 +5,8 @@
   const chartDate=window.LumoMarketChartDate;
   const $=id=>document.getElementById(id);
   const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const dateText=v=>window.LumoDate?.format(v)||String(v??"");
+  const dateOnly=v=>window.LumoDate?.date(v)||String(v??"");
   const num=(v,d=1)=>v==null||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d});
   const money=v=>v==null?"—":`${v>0?"+":""}${num(v/(Math.abs(v)>=1e8?1e8:Math.abs(v)>=1e4?1e4:1),2)}${Math.abs(v)>=1e8?"亿":Math.abs(v)>=1e4?"万":"元"}`;
   const pct=v=>v==null?"—":`${num(v)}%`;
@@ -117,7 +119,7 @@
   }
   function renderFinance(data) {
     const s=data.summary||{},c=data.coverage;
-    $("mfMeta").textContent=`两融披露 ${data.as_of||"未取得"} · 个股 ${c.stocks}只 · 模型有效 ${c.model}只 · 采集 ${data.updated_at||"尚未更新"}`;
+    $("mfMeta").textContent=`两融披露 ${dateOnly(data.as_of)||"未取得"} · 个股 ${c.stocks}只 · 模型有效 ${c.model}只 · 采集 ${dateText(data.updated_at)||"尚未更新"}`;
     $("mfDisclosure").textContent=data.disclosure;$("mfModelNote").textContent=data.model_note;
     $("mfSummary").innerHTML=`<div class="mh-kpis">${kpi("沪深融资余额",money(s.rzye),"两所同日完整汇总 / 含非股票标的")}${kpi("融资净买入",money(s.net_buy),`买入 ${money(s.rzmre)} / 偿还 ${money(s.rzche)}`)}${kpi("融券余额",money(s.rqye),"金额口径，不累加不同证券的数量")}${kpi("模型有效覆盖",`${c.model} / ${c.stocks}`,`对应融资余额 ${money(c.model_balance)}`)}</div>`;
     $("mfTrend").innerHTML=head("融资余额与净买入趋势",`${data.history.length}个有效披露日 · 单位亿元`)+chart(data.history,[{key:"rzye",label:"融资余额"}],"两融余额趋势")+`<p class="mc-foot">最近五个有效披露日净额：${data.history.slice(-5).map(r=>`${esc(r.date)} ${money(r.net_buy)}`).join(" / ")||"未取得"}</p>`;
@@ -164,7 +166,7 @@
     const sectorNames=selectedSector?new Set([...Array.from(sectorSelect.options,o=>o.value).filter(Boolean),...data.sectors.map(r=>r.name)]):new Set(data.sectors.map(r=>r.name));
     sectorSelect.replaceChildren(new Option("全部行业 / 跟踪指数",""),...[...sectorNames].sort((a,b)=>a.localeCompare(b,"zh-CN")).map(name=>new Option(name,name)));
     sectorSelect.value=selectedSector;
-    $("mpMeta").textContent=`查询 ${data.start||"未取得"} 至 ${data.as_of||"未取得"} · ${kind[1]} · 采集 ${data.updated_at||"尚未采集"}`;
+    $("mpMeta").textContent=`查询 ${dateOnly(data.start)||"未取得"} 至 ${dateOnly(data.as_of)||"未取得"} · ${kind[1]} · 采集 ${dateText(data.updated_at)||"尚未采集"}`;
     $("mpBoundary").textContent=[kind[3],data.coverage_note].filter(Boolean).join(" ");$("mpDisclosure").textContent=data.disclosure;$("mpRankTitle").textContent=`${kind[1]} · ${participant==="national"?"持仓披露查询":participant==="quant"?"疑似行为观测":"买卖与资金去向"}`;
     if(data.excluded_nonstock)$("mpBoundary").textContent+=` A股榜已排除 ${data.excluded_nonstock} 条非A股记录（含可转债、优先股、B股等）。`;
     const missingMeta=data.metadata_coverage||{};

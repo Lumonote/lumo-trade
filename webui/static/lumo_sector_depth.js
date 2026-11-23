@@ -5,6 +5,8 @@
   if (!root) return;
   const $=id=>document.getElementById(id);
   const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const dateText=v=>window.LumoDate?.format(v)||String(v??"");
+  const dateOnly=v=>window.LumoDate?.date(v)||String(v??"");
   const num=(v,d=1)=>v==null || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d});
   const pct=v=>v==null ? "—" : `${num(v)}%`;
   const money=v=>v==null ? "—" : `${v>0?"+":""}${num(v/1e8,2)}亿`;
@@ -32,7 +34,7 @@
     const rows=filtered(),all=group(),positive=all.filter(r=>r.net>0),leader=[...positive].sort((a,b)=>b.net-a.net)[0];
     const sustained=[...positive].filter(r=>r.positive5>=4&&r.flow5>0&&r.excess5>0).sort((a,b)=>(b.score??-1)-(a.score??-1))[0];
     const live=(data.live?.rows||[]).filter(r=>r.type===$("sdType").value).sort((a,b)=>(b.net??-Infinity)-(a.net??-Infinity)).slice(0,20);
-    $("sdLive").innerHTML=live.length?`<article class="mh-box"><div class="mh-box-head"><div><h3>最新资金观测 · ${esc(data.live.source)}</h3><p>按源报价时点展示；下方持续性排名独立采用已披露收盘日。</p></div></div><div class="mh-table-wrap"><table><thead><tr><th>板块</th><th>最新净额</th><th>净占比</th><th>实际报价时间 / 类型</th></tr></thead><tbody>${live.map(r=>`<tr><td>${esc(r.name)}</td><td>${money(r.net)}</td><td>${pct(r.rate)}</td><td>${esc(r.quote_at)} · ${esc(r.timing)}</td></tr>`).join("")}</tbody></table></div></article>`:"";
+    $("sdLive").innerHTML=live.length?`<article class="mh-box"><div class="mh-box-head"><div><h3>最新资金观测 · ${esc(data.live.source)}</h3><p>按源报价时点展示；下方持续性排名独立采用已披露收盘日。</p></div></div><div class="mh-table-wrap"><table><thead><tr><th>板块</th><th>最新净额</th><th>净占比</th><th>实际报价时间 / 类型</th></tr></thead><tbody>${live.map(r=>`<tr><td>${esc(r.name)}</td><td>${money(r.net)}</td><td>${pct(r.rate)}</td><td>${esc(dateText(r.quote_at)||"未取得")} · ${esc(r.timing)}</td></tr>`).join("")}</tbody></table></div></article>`:"";
     $("sdSummary").innerHTML=`<div class="mh-kpis">${kpi("当日净流入最强",leader?.name||"无正流入板块",leader?`${money(leader.net)} · ${data.as_of}`:"按真实净额筛选")}${kpi("持续共振候选",sustained?.name||"本轮无符合项",sustained?`五日${sustained.positive5}/5日流入 · 跑赢沪深300 ${pct(sustained.excess5)}`:"五日≥4日流入、五日净额及相对收益均为正")}${kpi("正流入板块",`${positive.length} / ${all.length}`,`${$("sdType").value}内部比较 · 成分可能重叠`)}${kpi("历史完整度",`${data.calendar?.length||0}个交易日`,`${data.calendar?.[0]||"未取得"} 至 ${data.as_of||"未取得"}`)}</div>`;
     $("sdRank").innerHTML=`<div class="mh-box-head"><div><h3>资金去向 · ${esc($("sdType").value)}</h3><p>${esc(data.as_of||"未取得")} 已披露收盘资金 · 点击板块穿透成分与持续性 · 当前${rows.length}项</p></div></div><div class="mh-table-wrap sd-rank-wrap"><table><thead><tr><th>板块 / 阶段</th><th>净额 / 排名</th><th>净占比</th><th>五日净额</th><th>二十日净额</th><th>五日正流入</th><th>连续流入</th><th>五日跑赢沪深300</th><th>持续性刻度</th><th>承接强度</th></tr></thead><tbody>${rows.map(r=>`<tr class="${r.code===selected?"sd-selected":""}"><td><button type="button" class="mh-inline-link" data-sd-code="${esc(r.code)}">${esc(r.name)}</button><small>${esc(r.code)} · ${esc(r.phase)}</small></td><td class="${tone(r.net)}">${money(r.net)}<small>第${r.rank}/${r.universe} · 五日名次变动 ${r.rank_change5==null?"—":`${r.rank_change5>0?"+":""}${r.rank_change5}`}</small></td><td>${pct(r.rate)}</td><td class="${tone(r.flow5)}">${money(r.flow5)}</td><td class="${tone(r.flow20)}">${money(r.flow20)}</td><td>${r.positive5==null?"窗口缺日":`${r.positive5}/5日`}</td><td>${r.streak}日</td><td class="${tone(r.excess5)}">${pct(r.excess5)}</td><td>${num(r.persistence,0)}/100</td><td>${num(r.score,0)}/100</td></tr>`).join("")||'<tr><td colspan="10">当前筛选没有匹配项，可取消“仅当日净流入”查看流出与退潮板块。</td></tr>'}</tbody></table></div>`;
     $("sdRank").insertAdjacentHTML("beforeend",'<p class="mh-note">短历史或窗口缺日显示“—”，不补零、不计算该窗口。持续性刻度使用完整五日证据；二十日净额单独要求完整二十日，不因五日有效而补齐。</p>');
@@ -76,7 +78,7 @@
     clearTimeout(poll);
     try {
       const value=await api("/api/market-health/sectors"),changed=!data||value.updated_at!==data.updated_at;data=value;error();
-      $("sdMeta").textContent=`资金实际披露日 ${data.as_of||"未取得"} · ${data.as_of===data.today?"今日收盘数据":"历史披露数据，非今日盘中"} · 来源 ${data.source||"现有配置接口"} · 采集 ${data.updated_at||"尚未完成"}`;
+      $("sdMeta").textContent=`资金实际披露日 ${dateOnly(data.as_of)||"未取得"} · ${data.as_of===data.today?"今日收盘数据":"历史披露数据，非今日盘中"} · 来源 ${data.source||"现有配置接口"} · 采集 ${dateText(data.updated_at)||"尚未完成"}`;
       const job=data.job,busy=job&&["queued","running"].includes(job.status);
       $("sdRefresh").disabled=Boolean(busy);$("sdExport").disabled=!data.rows.length;
       $("sdStatus").textContent=busy?`板块研究更新中 ${job.progress||0}% · ${job.logs?.at(-1)||"准备历史回补"}`:job?.status==="failed"?job.error:[data.live?.note,...(data.errors||[])].filter(Boolean).join("；");

@@ -5,6 +5,8 @@
   if (!root) return;
   const $=id=>document.getElementById(id), form=$("grFilters");
   const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const dateText=v=>window.LumoDate?.format(v)||String(v??"");
+  const dateOnly=v=>window.LumoDate?.date(v)||String(v??"");
   const n=(v,d=2)=>v==null||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d});
   const pct=v=>v==null?"—":n(v*100,1)+"%";
   let payload=null, pool="near", page=1, tab="stocks", direction="desc", controller=null, timer=null, pollTimer=null, selected=null, bootstrapped=false;
@@ -40,7 +42,7 @@
   }
   function renderMeta() {
     const s=payload.summary||{},years=payload.forecast_years||[];
-    $("grMeta").textContent=payload.ready?`行情 ${payload.as_of} 收盘 · 财报 ${payload.report_date||"待补齐"} · 预期 ${years.length?years.join(" / "):"待补齐"} · 快照 ${String(payload.generated_at||"").slice(0,16).replace("T"," ")}`:"尚未建立研究快照";
+    $("grMeta").textContent=payload.ready?`行情 ${dateOnly(payload.as_of)||"未取得"} 收盘 · 财报 ${dateOnly(payload.report_date)||"待补齐"} · 预期 ${years.length?years.join(" / "):"待补齐"} · 快照 ${dateText(payload.generated_at)||"未取得"}`:"尚未建立研究快照";
     if($("refreshMeta"))$("refreshMeta").textContent="成长研究 · 本地快照";
     $("grCoverage").innerHTML=[
       ["行情样本",s.total,"有正价格的沪深京A股"],
@@ -54,7 +56,7 @@
     const groups=[["near","新质成长＋低位/支撑",s.near_growth],["all","全市场",s.total],["actual","实际高增长",s.actual_high],["future","未来高增长",s.future_high],...Object.entries(payload.groups||{}).filter(([k])=>k!=="other").map(([k,label])=>[k,label,s.groups?.[k]])];
     $("grGroups").innerHTML=groups.map(([key,label,count])=>`<button type="button" data-gr-pool="${esc(key)}" class="${pool===key?"active":""}" aria-pressed="${pool===key}">${esc(label)}<b>${n(count||0,0)}</b></button>`).join("");
     fillOptions("industry",payload.industries||[],"全部行业");fillOptions("theme",payload.themes||[],"全部方向");
-    $("grCriteria").innerHTML=(payload.criteria||[]).map(line=>`<p>${esc(line)}</p>`).join("")+`<p>本期财报缓存：${esc(payload.financial_updated_at||"尚未取得")}；盈利预测缓存：${esc(payload.forecasts_updated_at||"尚未取得")}。板块比较采用全市场可比正EPS预测样本中位数，不等于板块总体利润增速。</p><p>来源：本地行情快照、<a href="https://data.eastmoney.com/bbsj/" target="_blank" rel="noopener">东方财富财报</a>、<a href="https://data.eastmoney.com/report/profitforecast.jshtml" target="_blank" rel="noopener">盈利预测</a>。概念标签还需核实主营收入。</p>`;
+    $("grCriteria").innerHTML=(payload.criteria||[]).map(line=>`<p>${esc(line)}</p>`).join("")+`<p>本期财报缓存：${esc(dateText(payload.financial_updated_at)||"尚未取得")}；盈利预测缓存：${esc(dateText(payload.forecasts_updated_at)||"尚未取得")}。板块比较采用全市场可比正EPS预测样本中位数，不等于板块总体利润增速。</p><p>来源：本地行情快照、<a href="https://data.eastmoney.com/bbsj/" target="_blank" rel="noopener">东方财富财报</a>、<a href="https://data.eastmoney.com/report/profitforecast.jshtml" target="_blank" rel="noopener">盈利预测</a>。概念标签还需核实主营收入。</p>`;
   }
   function stockTable() {
     const rows=payload.stocks||[],years=payload.forecast_years||[];

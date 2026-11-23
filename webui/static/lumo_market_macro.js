@@ -4,6 +4,8 @@
   const root=document.getElementById("mhView-macro");if(!root)return;
   const chartDate=window.LumoMarketChartDate;
   const $=id=>document.getElementById(id),esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const dateText=v=>window.LumoDate?.format(v)||String(v??"");
+  const dateOnly=v=>window.LumoDate?.date(v)||String(v??"");
   const num=(v,d=2)=>v==null||!Number.isFinite(Number(v))?"—":Number(v).toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d});
   const pct=v=>v==null?"—":`${v>0?"+":""}${num(v)}%`,tone=v=>v>0?"mh-positive":v<0?"mh-negative":"mh-neutral";
   const empty=message=>`<p class="mm-unavailable">${esc(message)}</p>`;
@@ -175,7 +177,7 @@
       $("mmCycleError").hidden=true;renderCycle(c,true,start);
     }catch(err){if(id===cycleRequest){$("mmCycleError").textContent=err.message;$("mmCycleError").hidden=false;}}};
   function render(){const d=state.data,r=d.relationship;resetCycle();state.factors=d.factors;if($("mmFactor").options.length===1)factors();
-    $("mmMeta").textContent=`研究快照 ${d.as_of} · 读取时间 ${d.updated_at||"尚未采集"} · 指标各自保留实际数据日`;
+    $("mmMeta").textContent=`研究快照 ${dateOnly(d.as_of)||"未取得"} · 读取时间 ${dateText(d.updated_at)||"尚未采集"} · 指标各自保留实际数据日`;
     $("mmMetrics").innerHTML=d.metrics.map(m=>`<button type="button" class="mm-metric" data-mm-factor="${m.key}" ${m.frequency==="quarterly"?'disabled title="季频环境指标，暂不参与日/月频相关研究"':""} aria-pressed="${m.key===d.factor}"><span>${esc(m.name)}</span><strong>${num(m.value,m.key==="usdcny"?4:2)} <span style="display:inline">${esc(m.unit)}</span></strong><small>观测 ${esc(m.period||m.date||"未取得")}</small><small>${m.published_on?`刊载 ${esc(m.published_on)}`:m.frequency==="monthly"||m.frequency==="quarterly"?"原始发布日期未提供":"观测日不等于精确发布时间"}${m.age_days>60?` · 距今${m.age_days}天`:""}</small></button>`).join("");
     $("mmInsights").innerHTML=head("当前研究线索","先看数据是否同频，再看政策是否传导到信用、需求和盈利。")+`<ul class="mm-brief">${d.insights.map(n=>`<li>${esc(n)}</li>`).join("")}</ul>`;
     const factor=d.metrics.find(m=>m.key===d.factor),asset=d.chart.asset,last=asset.at(-1)?.date,first=asset[0]?.date;

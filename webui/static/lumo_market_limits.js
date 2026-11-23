@@ -5,6 +5,8 @@
   if (!root) return;
   const $ = id => document.getElementById(id);
   const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const dateText = v => window.LumoDate?.format(v) || String(v ?? "");
+  const dateOnly = v => window.LumoDate?.date(v) || String(v ?? "");
   const num = (v, d=0) => v == null ? "—" : Number(v).toLocaleString("zh-CN", {maximumFractionDigits:d});
   const pct = v => v == null ? "—" : `${num(v,2)}%`;
   const money = v => v == null ? "—" : `${num(v / 1e8,3)}亿`;
@@ -30,7 +32,7 @@
   }
   function tags(pattern) {
     const p = pattern || {};
-    return `<div class="ml-tags">${(p.tags || []).map(t => `<span class="ml-tag" title="${esc(t.evidence)}">${esc(t.label)}</span>`).join("") || `<small>${esc(p.as_of ? (p.status === "已计算" ? "无命中形态" : p.status) : p.status || "待补日K")}</small>`}</div><small>${esc(p.as_of || "未取得形态日期")} · ${esc(p.status || "待补")}</small>`;
+    return `<div class="ml-tags">${(p.tags || []).map(t => `<span class="ml-tag" title="${esc(t.evidence)}">${esc(t.label)}</span>`).join("") || `<small>${esc(p.as_of ? (p.status === "已计算" ? "无命中形态" : p.status) : p.status || "待补日K")}</small>`}</div><small>${esc(dateOnly(p.as_of) || "未取得形态日期")} · ${esc(p.status || "待补")}</small>`;
   }
   const link = (kind, r) => `<button type="button" class="mh-inline-link" data-ml-kind="${kind}" data-ml-code="${esc(r.code)}">${esc(r.name)} ${esc(r.code)}</button>`;
   function summary(events) {
@@ -113,7 +115,7 @@
       if (id!==sequence) return;
       data = value; requested = {start:value.start,end:value.end}; error();
       $("mlStart").value = data.start; $("mlEnd").value = data.end; remember();
-      $("mlMeta").textContent = `${data.start} 至 ${data.end} · 实际收盘数据截至 ${data.as_of||"未取得"} · ${data.updated_at?`更新 ${data.updated_at}`:"尚无快照"}`;
+      $("mlMeta").textContent = `${dateOnly(data.start)} 至 ${dateOnly(data.end)} · 实际收盘数据截至 ${dateOnly(data.as_of)||"未取得"} · ${data.updated_at?`更新 ${dateText(data.updated_at)}`:"尚无快照"}`;
       $("mlStatus").textContent = [data.message,`完整日数据 ${data.daily.filter(r=>r.available).length}/${data.calendar.length}个交易日`,data.pattern_coverage?`形态已计算 ${data.pattern_coverage.computed}/${data.pattern_coverage.total}项`:"",data.unmapped_events?`${data.unmapped_events}条事件尚未关联板块`:"",...(data.notes||[]),"形态筛选匹配个股或其所属板块；标签日期见各行。"].filter(Boolean).join("；");
       const chosen = $("mlPattern").value;
       $("mlPattern").innerHTML = '<option value="">全部形态</option>'+(data.pattern_catalog||[]).map(p=>`<option value="${esc(p.key)}">${esc(p.label)}</option>`).join("");
