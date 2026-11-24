@@ -128,6 +128,80 @@ def market_snapshot(rows):
             "mv_weighted_chg": sum(w*v for w, v in weights)/sum(w for w, _ in weights) if weights else None}
 
 
+def market_internals(quotes, *, shares_per_unit=1, yuan_per_unit=1):
+    """Calculate breadth, TRIN and turnover from (price, reference, volume[, amount, exchange])."""
+    up_volumes, down_volumes, amounts = [], [], []
+    up_amounts, down_amounts, returns = [], [], []
+    amounts_by_exchange = defaultdict(list)
+    exchange_count, missing_by_exchange = defaultdict(int), defaultdict(int)
+    flat = inactive = missing_price = missing_volume = missing_amount = universe = 0
+    for price, reference, volume, *amount_fields in quotes:
+        universe += 1
+        price, reference, volume = map(number, (price, reference, volume))
+        amount = number(amount_fields[0]) if amount_fields else None
+        exchange = amount_fields[1] if len(amount_fields) > 1 else None
+        exchange_count[exchange] += 1
+        if amount is not None and amount > 0:
+            amount_yuan = amount * yuan_per_unit
+            amounts.append(amount_yuan)
+            amounts_by_exchange[exchange].append(amount_yuan)
+        elif volume != 0 or amount not in (None, 0):
+            missing_amount += 1
+            missing_by_exchange[exchange] += 1
+        if volume == 0:
+            inactive += 1
+        elif volume is None or volume < 0:
+            missing_volume += 1
+        elif price is None or price <= 0 or reference is None or reference <= 0:
+            missing_price += 1
+        else:
+            returns.append(100 * (price - reference) / reference)
+            if price > reference:
+                up_volumes.append(volume * shares_per_unit)
+                if amount is not None and amount > 0:
+                    up_amounts.append(amount * yuan_per_unit)
+            elif price < reference:
+                down_volumes.append(volume * shares_per_unit)
+                if amount is not None and amount > 0:
+                    down_amounts.append(amount * yuan_per_unit)
+            else:
+                flat += 1
+    up, down = len(up_volumes), len(down_volumes)
+    directional = up + down
+    up_volume, down_volume = math.fsum(up_volumes), math.fsum(down_volumes)
+    exchange_turnover = {exchange: math.fsum(amounts_by_exchange[exchange])
+                         if exchange_count[exchange] and not missing_by_exchange[exchange] else None
+                         for exchange in ("SH", "SZ", "BJ")}
+    sh, sz = exchange_turnover["SH"], exchange_turnover["SZ"]
+    breadth = 100 * up / directional if directional else None
+    volume_share = 100 * up_volume / (up_volume + down_volume) if directional and not missing_volume else None
+    amount_missing = directional - len(up_amounts) - len(down_amounts)
+    up_amount, down_amount = math.fsum(up_amounts), math.fsum(down_amounts)
+    amount_complete = directional and not amount_missing and not missing_volume
+    amount_share = 100 * up_amount / (up_amount + down_amount) if amount_complete else None
+    return {
+        "universe": universe, "eligible": directional + flat, "directional": directional,
+        "up": up, "down": down, "flat": flat, "inactive": inactive,
+        "missing_price": missing_price, "missing_volume": missing_volume,
+        "breadth_pct": breadth, "net_advances": up - down,
+        "median_return_pct": median(returns) if returns else None,
+        "up_volume_shares": up_volume, "down_volume_shares": down_volume,
+        "trin": (down_volume / down) / (up_volume / up) if up and down and not missing_volume else None,
+        "up_volume_pct": volume_share, "volume_breadth_gap_pp": volume_share - breadth if volume_share is not None else None,
+        "up_amount_yuan": up_amount if amount_complete else None,
+        "down_amount_yuan": down_amount if amount_complete else None,
+        "up_amount_pct": amount_share, "amount_breadth_gap_pp": amount_share - breadth if amount_share is not None else None,
+        "amount_trin": (down_amount / down) / (up_amount / up) if amount_complete and up and down else None,
+        "directional_amount_sample": directional - amount_missing,
+        "up_top10_amount_pct": 100 * math.fsum(sorted(up_amounts, reverse=True)[:10]) / up_amount
+        if amount_complete and up >= 10 else None,
+        "turnover_yuan": math.fsum(amounts) if universe and not missing_amount else None,
+        "exchange_turnover_yuan": exchange_turnover,
+        "sh_sz_turnover_yuan": sh + sz if sh is not None and sz is not None else None,
+        "turnover_sample": len(amounts), "missing_amount": missing_amount,
+    }
+
+
 def breadth_snapshot(histories, as_of):
     """仅同交易日且历史完整的样本；每项分别记录真实分母。"""
     counts, hits, dd = {}, {}, []

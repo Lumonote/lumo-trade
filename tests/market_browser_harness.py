@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 URL = "http://kronos.test"
 HEALTH = "/api/market-health"
-READS = {HEALTH + suffix for suffix in ("", "/index-history", "/correlation", "/financing", "/participants", "/participants/history",
+READS = {HEALTH + suffix for suffix in ("", "/index-history", "/daily-structure", "/correlation", "/financing", "/participants", "/participants/history",
                                          "/macro", "/macro/cycle", "/macro/history", "/macro/events", "/macro/status",
                                          "/sectors", "/limits", "/limits/detail")}
 PAGES = {"/desktop/market_health", "/desktop/workbench"}

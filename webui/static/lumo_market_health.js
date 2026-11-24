@@ -11,7 +11,11 @@
   const textDates = v => window.LumoDate?.formatText(v) || String(v ?? "");
   const num = (v, d = 1) => v == null || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("zh-CN", {minimumFractionDigits:d, maximumFractionDigits:d});
   const pct = v => v == null ? "—" : `${num(v)}%`;
+  const breadthPct = v => v == null ? "—" : `${num(v,2)}%`;
   const signed = v => v == null ? "—" : `${v > 0 ? "+" : ""}${num(v)}%`;
+  const turnover = v => v == null ? "—" : `${num(v/1e8,2)} 亿元`;
+  const pp = v => v == null ? "—" : `${v > 0 ? "+" : ""}${num(v,2)} 个百分点`;
+  const countFields = [["上涨家数","up"],["下跌家数","down"],["平盘家数","flat"]];
   const tone = v => v == null || v === 0 ? "mh-neutral" : v > 0 ? "mh-positive" : "mh-negative";
   const badge = (text, cls = "") => `<span class="mh-badge ${cls}">${esc(text)}</span>`;
   const stat = (label, value, note, valueClass = "") => `<div class="mh-kpi"><span>${esc(label)}</span><strong class="${esc(valueClass)}">${esc(value)}</strong><small>${esc(note)}</small></div>`;
@@ -21,8 +25,12 @@
   let symbol = q.get("index") || "sh000001";
   const indexWindow = {window:['60','120','250','custom'].includes(q.get('window')) ? q.get('window') : 'all', from:q.get('indexFrom'), to:q.get('indexTo')};
   const iceWindow = {window:'all'};
+  const dailyStart = q.get("dailyStart") || "", dailyEnd = q.get("dailyEnd") || "";
+  const daily = {draft:{start:dailyStart,end:dailyEnd}, query:dailyStart ? {start:dailyStart,end:dailyEnd} : null,
+    report:null, selected:"", status:"", loading:false, requestId:0, backfill:null, autoFill:null};
   let payload = null, envelope = null, pollTimer = null, liveTimer = null, requestId = 0, ruleFilter = "all", ruleSearch = "", horizon = 60, autoSession = null;
   let viewMode=q.get("view") === "close" ? "close" : "latest";
+  let autoStructure = false, lastStructureRequest = 0;
 
   function error(message = "") { $("mhError").hidden = !message; $("mhError").textContent = message; }
   function remember() {
@@ -34,6 +42,9 @@
       if (indexWindow.window==='custom' && v) next.searchParams.set(k,v); else next.searchParams.delete(k);
     }
     next.searchParams.set("view",viewMode);
+    for (const [key,value] of [["dailyStart",daily.query?.start],["dailyEnd",daily.query?.end]]) {
+      if (value) next.searchParams.set(key,value); else next.searchParams.delete(key);
+    }
     if (section === "correlation") next.searchParams.set("networkSection", corrSection);
     history.replaceState(null, "", next);
   }
@@ -57,6 +68,7 @@
       else if (corrSection !== "correlation" && !corrSectionHome) mountCorrelationSection();
     }
     remember();
+    if (section === "breadth" && daily.query && !daily.report && !daily.loading && !daily.status) searchDaily(daily.query);
   }
   function boxHead(title, description = "", extra = "") {
     return `<div class="mh-box-head"><div><h3>${esc(title)}</h3>${description ? `<p>${esc(description)}</p>` : ""}</div>${extra}</div>`;
@@ -88,6 +100,7 @@
   }
   function renderOverview() {
     const t = payload.temperature, b = payload.breadth || {}, m = payload.market?.values || {}, fusion=payload.fusion;
+    const internals = payload.market_internals?.current;
     $("mhView-overview").innerHTML = `
       <div class="mh-hero-grid">
         <article class="mh-box mh-temperature">${boxHead("市场温度", "低值偏悲观，高值偏热", badge(`覆盖 ${num(t.coverage*100,0)}%`))}
@@ -95,7 +108,7 @@
           <div class="mh-scale" style="--position:${t.score ?? 50}%"><i></i><i></i><i></i><i></i><i></i>${t.score == null ? "" : "<b></b>"}</div>
           <div class="mh-scale-labels"><span>极度悲观</span><span>中性</span><span>过热</span></div>
           <small>广度、动量、年线与估值共同计分。缺失权重超过40%时暂不输出温度。</small>
-          <p><button type="button" class="mh-inline-link mh-select-index" data-mh-go="breadth">查看情绪冰点与指数 K 线 →</button></p>
+          <p><button type="button" class="mh-inline-link mh-select-index" data-mh-go="breadth">查询每日市场数据 →</button></p>
         </article>
         <article class="mh-box"><div class="mh-state-head"><span class="mh-eyebrow">七维综合研判</span>${badge(`证据覆盖 ${num((fusion?.coverage || 0)*100,0)}%`, fusion?.complete ? "" : "warn")}</div>
           <p class="mh-state-title">${esc(fusion?.title || payload.stage)}</p>
@@ -105,9 +118,13 @@
       </div>
       <div class="mh-kpis">
         ${stat("MA250广度", pct(b.above_ma250), `${b.as_of || "未取得"} · 样本${num(b.sample,0)}只`)}
-        ${stat("上涨家数占比", pct(m.up_ratio), `${num(m.up,0)} 涨 / ${num(m.down,0)} 跌 · ${payload.market?.as_of || "未取得"}`)}
+        ${stat("市场广度 / 阿姆斯指数", `${breadthPct(internals?.breadth_pct)} / ${num(internals?.trin,3)}`, internals ? `${dateOnly(internals.as_of)} · ${internalsStatus(internals)}` : "完整更新后获取沪深京 A 股数据")}
         ${stat("正PB中位数", `${num(m.pb_median,3)} 倍`, `破净率 ${pct(m.below_pb1_ratio)} · ${payload.market?.as_of || "未取得"}`)}
         ${stat("小盘－大盘20日收益差", signed(payload.style_spread), "中证1000减沪深300 · 正值小盘占优")}
+      </div>
+      <div class="mh-kpis" aria-label="沪深京 A 股市场成交">
+        ${countFields.map(([label,key]) => stat(label, num(internals?.[key],0), `较上日收盘 ${signed(internals?.vs_previous?.[`${key}_pct`])}`)).join("")}
+        ${stat(internals?.provisional ? "盘中累计成交额" : "每日成交额", turnover(internals?.turnover_yuan), turnoverNote(internals))}
       </div>
       <div class="mh-grid">${signalSummary("bottom")}${signalSummary("top")}</div>
       <article class="mh-box mh-space">${boxHead("七维证据矩阵", "按实际数据日期、覆盖与权重得出结果", '<button type="button" class="mh-inline-link mh-select-index" data-mh-go="cross">期货 / 两融 / 量化详情 →</button>')}${fusionTable()}</article>
@@ -177,23 +194,38 @@
   }
   function updateRuleTables() { for (const type of ["bottom","top"]) $(`mhRules-${type}`).innerHTML = ruleTable(type); }
 
-  function chart(rows, keys, title) {
-    const valid = rows.filter(r => keys.some(k => r[k] != null));
-    if (valid.length < 2) return '<div class="mh-empty">至少需要两期有效观测才能绘制趋势</div>';
+  function chart(rows, keys, title, {keepGaps = false, describe} = {}) {
+    const valid = rows.filter(r => keys.some(k => Number.isFinite(r[k])));
+    if (valid.length < (keepGaps ? 1 : 2)) return '<div class="mh-empty">等待有效观测</div>';
+    const points = keepGaps ? rows : valid;
     const width = 1000, height = 310, left = 62, right = 24, top = 18, bottom = 38;
     const values = valid.flatMap(r => keys.map(k => r[k])).filter(v => v != null && Number.isFinite(v));
     let lo = Math.min(...values), hi = Math.max(...values), span = hi-lo || Math.abs(hi)*.05 || 1;
     lo -= span*.1; hi += span*.1; span = hi-lo;
-    const x = i => left+i*(width-left-right)/(valid.length-1), y = v => top+(hi-v)*(height-top-bottom)/span;
+    const positions = points.map((row,i) => row.time ?? i);
+    const timeSpan = positions.at(-1) - positions[0];
+    const x = i => timeSpan ? left+(positions[i]-positions[0])*(width-left-right)/timeSpan : (left+width-right)/2;
+    const y = v => top+(hi-v)*(height-top-bottom)/span;
     const grid = Array.from({length:5}, (_,i) => { const v = lo+span*i/4; return `<line class="mh-chart-grid" x1="${left}" x2="${width-right}" y1="${y(v)}" y2="${y(v)}"/><text x="${left-10}" y="${y(v)+4}" text-anchor="end">${num(v,Math.abs(v)>100 ? 0 : 1)}</text>`; }).join("");
-    const ticks = Array.from({length:5}, (_,i) => { const at = Math.round(i*(valid.length-1)/4); return `<text class="mh-date-tick" x="${x(at)}" y="${height-10}" text-anchor="middle">${esc(valid[at].date)}</text>`; }).join("");
+    const tickIndices = new Set(Array.from({length:5}, (_,i) => Math.round(i*(points.length-1)/4)));
+    const ticks = [...tickIndices].map(at => `<text class="mh-date-tick" x="${x(at)}" y="${height-10}" text-anchor="middle">${esc(points[at].date)}</text>`).join("");
     const lines = keys.map((key, n) => {
       let started = false;
-      const path = valid.map((r,i) => { if (r[key] == null) { started=false; return ""; } const point=`${started?"L":"M"}${x(i).toFixed(1)},${y(r[key]).toFixed(1)}`;started=true;return point; }).join(" ");
-      return `<path class="${["mh-chart-line","mh-chart-ma","mh-chart-long"][n] || "mh-chart-line"}" d="${path}"/>`;
+      const dots = [];
+      const path = points.map((r,i) => {
+        if (!Number.isFinite(r[key])) { started=false; return ""; }
+        if (r.breakBefore) started = false;
+        const px = x(i).toFixed(1), py = y(r[key]).toFixed(1);
+        if (keepGaps) dots.push(`<circle cx="${px}" cy="${py}" r="2.4"/>`);
+        const point = `${started?"L":"M"}${px},${py}`;
+        started = true;
+        return point;
+      }).join(" ");
+      const style = ["mh-chart-line","mh-chart-ma","mh-chart-long"][n] || "mh-chart-line";
+      return `<path class="${style}" d="${path}"/>${dots.length ? `<g class="${style}">${dots.join("")}</g>` : ""}`;
     }).join("");
     const layout = {width,height,left,right:width-right,top,bottom:height-bottom};
-    const hits = chartDate.hits(valid.map((r,i) => ({x:x(i),date:r.date})),layout);
+    const hits = chartDate.hits(points.map((r,i) => ({x:x(i),date:r.date,title:describe?.(r)})),layout);
     return chartDate.render("mh-chart",title,layout,grid+ticks+lines+hits);
   }
   function renderIndices() {
@@ -211,14 +243,192 @@
       loadRange:bounds=>window.LumoPriceChart.indexRange(r.symbol,bounds)});
     $("mhIndexSelect").addEventListener("change", e => { symbol=e.target.value;remember();renderIndices(); });
   }
+  function internalsStatus(row) {
+    if (row.as_of !== payload.as_of) return "前次收盘";
+    return row.provisional ? "盘中采样" : "收盘";
+  }
+  function turnoverNote(row, field = "turnover") {
+    const previous = row?.vs_previous?.[field];
+    if (row?.[`${field}_yuan`] == null) return "待补成交额";
+    if (row.provisional) return previous?.progress_pct == null ? "上日全天成交额待补" : `占上日全天 ${breadthPct(previous.progress_pct)}`;
+    if (previous?.change_pct == null) return "上日可比成交额待补";
+    const state = {expansion:"放量", contraction:"缩量", flat:"基本持平"}[previous.state];
+    return `较上一交易日 ${signed(previous.change_pct)} · ${state}`;
+  }
+  function countChanges(row) {
+    return countFields.map(([,key]) => signed(row?.vs_previous?.[`${key}_pct`])).join(" / ");
+  }
+  function renderTurnoverChart(history) {
+    const label = "沪深两市每日成交额（亿元）";
+    const rows = history.map(r => ({date: dateOnly(r.as_of), row:r,
+      total: r.sh_sz_turnover_yuan == null ? null : r.sh_sz_turnover_yuan/1e8,
+      sh: r.exchange_turnover_yuan?.SH == null ? null : r.exchange_turnover_yuan.SH/1e8,
+      sz: r.exchange_turnover_yuan?.SZ == null ? null : r.exchange_turnover_yuan.SZ/1e8}));
+    const latest = [...rows].reverse().find(r => r.total != null)?.row;
+    const describe = ({date,total,sh,sz,row}) => `${date} · 沪深合计 ${num(total,2)} · 沪市 ${num(sh,2)} · 深市 ${num(sz,2)} 亿元 · ${turnoverNote(row,"sh_sz_turnover")}`;
+    return `<article class="mh-box mh-space" id="mhTurnoverChart">${boxHead(label, latest ? `${dateOnly(latest.as_of)} · ${turnover(latest.sh_sz_turnover_yuan)} · ${turnoverNote(latest,"sh_sz_turnover")}` : "等待沪深 A 股收盘数据")}
+      <div class="mh-chart-legend"><span><i></i>沪深合计</span><span><i></i>沪市</span><span><i></i>深市</span></div>
+      ${chart(rows,["total","sh","sz"],label,{keepGaps:true,describe})}</article>`;
+  }
+  function renderDirectionAnalysis(row) {
+    if (!row) return "";
+    const breadth = row.breadth_pct;
+    const participation = breadth == null ? "等待有效涨跌样本。" : `上涨股占涨跌股 ${breadthPct(breadth)}，${breadth === 50 ? "两组家数相同" : breadth > 50 ? "上涨家数较多" : "下跌家数较多"}。`;
+    const concentration = row.amount_breadth_gap_pp == null ? "上涨组与下跌组的成交额待补齐。" :
+      `上涨股贡献 ${breadthPct(row.up_amount_pct)} 的涨跌组成交额，份额较其家数占比 ${pp(row.amount_breadth_gap_pp)}。`;
+    const meanAmount = row.amount_trin == null ? "" : `上涨股单股成交额为下跌股的 ${num(1/row.amount_trin,2)} 倍。`;
+    const meanVolume = row.trin == null ? "" : `上涨股单股成交股数为下跌股的 ${num(1/row.trin,2)} 倍。`;
+    const limits = row.limits;
+    const limitText = !limits ? "涨跌停待获取实际限价。" : limits.estimated ?
+      `近涨停 ${num(limits.up,0)} 只，近跌停 ${num(limits.down,0)} 只（按涨跌幅估算）。` :
+      `涨停 ${num(limits.up,0)} 只，跌停 ${num(limits.down,0)} 只。实际限价覆盖 ${num(limits.covered,0)} 只，另有 ${num(limits.unverified,0)} 只待核验。`;
+    return `<div class="mh-table-wrap"><table aria-label="上涨家数、成交额与成交股数对照"><thead><tr><th>涨跌组结构</th><th>上涨组</th><th>下跌组</th><th>上涨组份额</th><th>较上涨广度</th><th>TRIN</th></tr></thead><tbody>
+      <tr><th>家数</th><td>${num(row.up,0)}</td><td>${num(row.down,0)}</td><td>${breadthPct(breadth)}</td><td>—</td><td>—</td></tr>
+      <tr><th>成交额</th><td>${turnover(row.up_amount_yuan)}</td><td>${turnover(row.down_amount_yuan)}</td><td>${breadthPct(row.up_amount_pct)}</td><td>${pp(row.amount_breadth_gap_pp)}</td><td>${num(row.amount_trin,3)}</td></tr>
+      <tr><th>成交股数</th><td>${num(row.up_volume_shares,0)}</td><td>${num(row.down_volume_shares,0)}</td><td>${breadthPct(row.up_volume_pct)}</td><td>${pp(row.volume_breadth_gap_pp)}</td><td>${num(row.trin,3)}</td></tr></tbody></table></div>
+      <p class="mh-note">${esc(participation + concentration + meanAmount + meanVolume)} ${esc(turnoverNote(row))}。</p>
+      <p class="mh-note">净上涨家数 ${num(row.net_advances,0)} · 个股涨跌中位数 ${signed(row.median_return_pct)} · 上涨组前 10 只成交额占比 ${breadthPct(row.up_top10_amount_pct)}。${esc(limitText)}</p>`;
+  }
+  function renderIntradayStructure(points) {
+    const title = "盘中量价结构（%）";
+    const rows = points.map((r,i) => {
+      const time = Date.parse(r.captured_at);
+      return {date:dateText(r.captured_at).slice(11), time, breadth:r.breadth_pct, amount:r.up_amount_pct, volume:r.up_volume_pct,
+        breakBefore:i > 0 && time - Date.parse(points[i-1].captured_at) > 600000};
+    });
+    const describe = r => `${r.date} · 上涨家数 ${breadthPct(r.breadth)} · 上涨股成交额 ${breadthPct(r.amount)} · 上涨股成交股数 ${breadthPct(r.volume)}`;
+    const busy = ["queued","running"].includes(payload.job?.status);
+    return `<article class="mh-box mh-space" id="mhIntradayStructure">${boxHead(title, `${dateOnly(payload.as_of)} · ${num(points.length,0)} 次分页快照`)}
+      <div class="mh-controls"><button type="button" id="mhStructureRefresh" class="button secondary" ${busy ? "disabled" : ""}>采集量价快照</button><label><input type="checkbox" id="mhStructureAuto" ${autoStructure ? "checked" : ""}> 交易时段每 3 分钟采样</label></div>
+      <div class="mh-chart-legend"><span><i></i>上涨家数占比</span><span><i></i>上涨股成交额占比</span><span><i></i>上涨股成交股数占比</span></div>
+      ${chart(rows,["breadth","amount","volume"],title,{keepGaps:true,describe})}</article>`;
+  }
+  function renderMarketInternals() {
+    const {current} = payload.market_internals || {};
+    const trinNote = !current ? "等待有效价量样本" : current.missing_volume ? "部分股票缺少有效成交量" :
+      current.trin == null ? "需要同时有上涨股和下跌股" : current.trin < 1 ? "上涨股平均成交量更大" :
+      current.trin > 1 ? "下跌股平均成交量更大" : "两组平均成交量相同";
+    const fields = current ? [
+      ["上涨家数 / 下跌家数 / 平盘家数", countFields.map(([,key]) => num(current[key],0)).join(" / "), `较上日收盘 ${countChanges(current)}`],
+      [current.provisional ? "盘中累计成交额" : "每日成交额", turnover(current.turnover_yuan), turnoverNote(current)],
+      ["上涨股 / 下跌股成交量（股）", `${num(current.up_volume_shares,0)} / ${num(current.down_volume_shares,0)}`],
+      ["有效样本 / 行情股票数", `${num(current.eligible,0)} / ${num(current.universe,0)}`,
+        current.universe ? `涨跌分类覆盖 ${breadthPct(100*current.eligible/current.universe)} · 涨跌组成交额样本 ${num(current.directional_amount_sample,0)} 只` : ""],
+      ["有效成交额 / 缺有效成交额", `${num(current.turnover_sample,0)} / ${num(current.missing_amount,0)} 只`],
+      ["零成交 / 缺价格或昨收 / 缺有效成交量", `${num(current.inactive,0)} / ${num(current.missing_price,0)} / ${num(current.missing_volume,0)}`],
+    ] : [];
+    const time = current?.sample_started_at ? ` · 采集 ${dateText(current.sample_started_at)} 至 ${dateText(current.captured_at)}` : "";
+    const previous = current?.vs_previous;
+    const comparisonBasis = previous?.as_of ? ` · 对照 ${dateOnly(previous.as_of)} 收盘${previous.source ? ` · ${previous.source}` : "待补"}` : "";
+    return `<article class="mh-box mh-space" id="mhMarketInternals">${boxHead("市场广度与量价结构", "沪深京 A 股 · 按行情价相对参考昨收分组", current ? badge(`${dateOnly(current.as_of)} · ${internalsStatus(current)}`, current.as_of !== payload.as_of ? "warn" : "") : badge("待补数据", "warn"))}
+      <dl class="mh-detail-list"><div><dt>市场广度 · 上涨家数占比</dt><dd>${breadthPct(current?.breadth_pct)}</dd><small>上涨家数 ÷（上涨家数 + 下跌家数）</small></div>
+        <div><dt>阿姆斯指数 · TRIN</dt><dd>${num(current?.trin,3)}</dd><small>${esc(trinNote)}</small></div>
+        ${fields.map(([key,value,note]) => `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd>${note ? `<small>${esc(note)}</small>` : ""}</div>`).join("")}</dl>
+      <p class="mh-note">${current ? esc(`${current.source}${time}${comparisonBasis}`) : "点击完整更新获取盘中快照及已披露日线。"}</p>
+      ${renderDirectionAnalysis(current)}
+      <p class="mh-note">各份额仅比较上涨、下跌两组。TRIN 为下跌组单股均值除以上涨组单股均值。收盘成交额变动达到 +1% 为放量，达到 −1% 为缩量。资金净流入需用带买卖方向的成交数据判断。</p></article>`;
+  }
+  function renderDailyData() {
+    const today = dateOnly(payload.generated_at);
+    return `<article class="mh-box mh-space" id="mhDailyData">${boxHead("每日数据查询", "选择交易日查看单日明细，填写结束日期可查询区间。")}
+      <form class="mh-controls" id="mhDailyForm">
+        <label for="mhDailyStart">交易日 / 起始日期</label><input type="date" id="mhDailyStart" name="start" value="${esc(daily.draft.start)}" max="${esc(today)}" required>
+        <label for="mhDailyEnd">结束日期（可选）</label><input type="date" id="mhDailyEnd" name="end" value="${esc(daily.draft.end)}" max="${esc(today)}">
+        <button type="submit" class="button">查询</button><button type="button" id="mhDailyReset" class="button secondary">最近 20 日</button>
+        <button type="button" id="mhDailyBackfill" class="button secondary">补采所选日期</button>
+      </form><p class="mh-note" role="status" id="mhDailyStatus"></p><div id="mhDailyResults"></div>
+      <div id="mhDailyDetail"></div></article><div id="mhDailyTurnover"></div>`;
+  }
+  function dailyRows() {
+    return daily.report?.rows || payload.market_internals?.history || [];
+  }
+  function renderDailyDetail() {
+    const slot = $("mhDailyDetail");
+    if (!slot) return;
+    const row = dailyRows().find(r => r.as_of === daily.selected);
+    slot.innerHTML = row?.source ? `<h4>${esc(dateOnly(row.as_of))} 收盘明细</h4>${renderDirectionAnalysis(row)}` : "";
+  }
+  function updateDailyBackfillButton(job = payload?.job) {
+    const button = $("mhDailyBackfill");
+    if (button) button.disabled = !daily.report?.rows.length || daily.loading || Boolean(daily.backfill) || ["queued","running"].includes(job?.status);
+  }
+  function renderDailyResults() {
+    if (!$("mhDailyResults")) return;
+    const rows = dailyRows();
+    const covered = daily.report?.covered ?? payload.market_internals?.covered ?? 0;
+    const range = daily.report ? `${daily.report.start}${daily.report.start === daily.report.end ? "" : ` 至 ${daily.report.end}`}` : "最近 20 个交易日";
+    $("mhDailyStatus").textContent = [daily.status, range, `${covered} / ${rows.length} 个交易日有记录`, daily.report?.message].filter(Boolean).join(" · ");
+    updateDailyBackfillButton();
+    $("mhDailyResults").innerHTML = rows.length ? `<div class="mh-table-wrap"><table aria-label="每日收盘记录"><thead><tr><th>交易日</th><th>涨 / 跌 / 平</th><th>上涨广度</th><th>TRIN（股数 / 金额）</th><th>上涨组成交占比（股数 / 金额）</th><th>沪深京成交额</th><th>沪深成交额</th><th>来源</th></tr></thead><tbody>
+      ${[...rows].reverse().map(r => `<tr><td>${r.source ? `<button type="button" class="mh-inline-link mh-select-index" data-mh-daily-day="${esc(r.as_of)}">${esc(dateOnly(r.as_of))}</button>` : esc(dateOnly(r.as_of))}</td>
+        <td>${r.eligible == null ? "—" : `${countFields.map(([,key]) => num(r[key],0)).join(" / ")}<small>较上日 ${countChanges(r)}</small>`}</td><td>${breadthPct(r.breadth_pct)}</td><td>${num(r.trin,3)} / ${num(r.amount_trin,3)}</td><td>${breadthPct(r.up_volume_pct)} / ${breadthPct(r.up_amount_pct)}</td>
+        <td>${turnover(r.turnover_yuan)}<small>${esc(turnoverNote(r))}</small></td><td>${turnover(r.sh_sz_turnover_yuan)}<small>${esc(turnoverNote(r,"sh_sz_turnover"))}</small></td><td>${esc(r.source || "待补日线")}</td></tr>`).join("")}</tbody></table></div>` : "";
+    renderDailyDetail();
+    $("mhDailyTurnover").innerHTML = renderTurnoverChart(rows);
+  }
+  async function searchDaily(query, {notice = "", fill = false} = {}) {
+    const id = ++daily.requestId;
+    daily.autoFill = null;
+    daily.loading = true;
+    daily.status = "正在查询每日数据";
+    renderDailyResults();
+    try {
+      const report = await request(`/api/market-health/daily-structure?${new URLSearchParams(query)}`);
+      if (id !== daily.requestId) return;
+      daily.query = query;
+      daily.report = report;
+      daily.selected = report.start === report.end ? report.start : "";
+      daily.status = notice;
+      remember();
+      if (fill && report.pending) {
+        daily.autoFill = query;
+        if (["queued","running"].includes(payload.job?.status)) daily.status = "等待当前更新结束后补采";
+      }
+    } catch (e) {
+      if (id === daily.requestId) daily.status = e.message;
+    } finally {
+      if (id === daily.requestId) {
+        daily.loading = false;
+        renderDailyResults();
+      }
+    }
+    if (id === daily.requestId && daily.autoFill && !["queued","running"].includes(payload.job?.status)) backfillDaily();
+  }
+  async function backfillDaily() {
+    if (!daily.query || daily.backfill) return;
+    const query = daily.query;
+    daily.autoFill = null;
+    daily.backfill = {id:null, query};
+    daily.status = "正在提交补采任务";
+    renderDailyResults();
+    try {
+      const {job} = await request("/api/market-health/daily-structure/refresh", {method:"POST",body:JSON.stringify(query)});
+      if (job.params?.mode !== "daily" || job.params.start !== query.start || job.params.end !== (query.end || query.start)) {
+        payload.job = job;
+        renderJob(job);
+        daily.autoFill = daily.query === query ? query : null;
+        throw new Error("等待当前更新结束后补采");
+      }
+      daily.backfill.id = job.id;
+      daily.status = "正在补采所选日期";
+      payload.job = job;
+      renderJob(job);
+      await load(true);
+    } catch (e) {
+      daily.backfill = null;
+      daily.status = e.message;
+    }
+    renderDailyResults();
+  }
   function renderBreadth() {
     const b = payload.breadth || {}, m = payload.market?.values || {};
+    const internals = payload.market_internals || {};
     const c = payload.ice_coverage;
     const coverage = !c ? '' : `近期快照收盘观测 ${num(c.covered,0)} / ${num(c.total,0)} 个交易日` + (c.missing
       ? ` · 待补 ${num(c.missing,0)} 日（最早 ${dateOnly(c.first_missing) || "未取得"}） · ${c.running ? '正在补采' : c.retry_at ? '下次重试 '+window.LumoDate.formatEpoch(c.retry_at) : '等待补采'}` : ' · 无缺口');
     const barSpecs = [["站上MA20",b.above_ma20],["站上MA60",b.above_ma60],["站上MA250",b.above_ma250],["创60日收盘新低",b.newlow60],["创60日收盘新高",b.newhigh60]];
     const details = [["正PB中位数",`${num(m.pb_median,3)} 倍`],["正PE中位数",`${num(m.pe_median,2)} 倍`],["正PB样本破净率",pct(m.below_pb1_ratio)],["换手率中位数",pct(m.turnover_median)],["个股涨跌中位数",signed(m.chg_median)],["市值加权涨跌",signed(m.mv_weighted_chg)],["近涨停 / 近跌停",`${num(m.limit_up,0)} / ${num(m.limit_down,0)}`],["有效正PB / 正PE样本",`${num(m.pb_sample,0)} / ${num(m.pe_sample,0)}`]];
-    $("mhView-breadth").innerHTML = `<article class="mh-box mh-space">${boxHead("情绪冰点线 · 上证指数", "冰点代理：站上20日均线的样本占比 ≤20%。虚线为观察阈值，不等同于市场温度或反转确认。")}
+    $("mhView-breadth").innerHTML = `${renderDailyData()}${renderMarketInternals()}${renderIntradayStructure(internals.intraday_history || [])}<article class="mh-box mh-space">${boxHead("情绪冰点线 · 上证指数", "冰点代理：站上20日均线的样本占比 ≤20%。虚线为观察阈值，不等同于市场温度或反转确认。")}
       <p class="mh-note" id="mhIceCoverage" role="status">${esc(coverage)}</p><div id="mhIceChart"></div></article><div class="mh-grid"><article class="mh-box">${boxHead("价格广度", `分层样本 ${num(b.sample,0)} 只；不同指标分母可能不同`, dateState(b.as_of,b.captured_at,b.provisional))}
       <div class="mh-bars">${barSpecs.map(([label,v]) => `<div class="mh-bar-row"><span>${label}</span><div class="mh-bar-track" style="--position:${Math.max(0,Math.min(100,v??0))}%"><i></i></div><strong>${pct(v)}</strong></div>`).join("")}</div>
       <p class="mh-note">个股250日高点回撤中位：${signed(b.dd52_median)}。${esc(b.note || "基于分层抽样，并非全A完整逐股统计。")}</p>
@@ -229,6 +439,7 @@
       <article class="mh-box mh-space">${boxHead("广度观测记录", "完整更新回算最近5个交易日；同一窗口固定成分和分母，同日重复更新不增加连续天数")}
       <div class="mh-table-wrap"><table><thead><tr><th>日期</th><th>样本</th><th>MA20上方</th><th>MA250上方</th><th>60日新低 / 新高</th><th>高点回撤中位</th><th>数据口径 / 组号</th></tr></thead><tbody>${[...(payload.observations || [])].reverse().map(r => `<tr><td>${esc(r.as_of)}</td><td>${num(r.sample,0)}</td><td>${pct(r.above_ma20)}</td><td>${pct(r.above_ma250)}</td><td>${pct(r.newlow60)} / ${pct(r.newhigh60)}</td><td>${signed(r.dd52_median)}</td><td>${esc(r.method)}<small>${esc(r.cohort || "")}${r.backfilled ? " · 历史回算" : ""}</small></td></tr>`).join("") || '<tr><td colspan="7">尚无同日观测</td></tr>'}</tbody></table></div></article>
       <div class="mh-notice">观察“指数与个股背离”：比较大盘与小盘20日收益差、指数回撤和个股回撤中位。样本口径不同只能交叉观察，不能直接把差值解释成确定的补跌空间。</div>`;
+    renderDailyResults();
     window.LumoPriceChart.mount($("mhIceChart"),currentIndex('sh000001'),{state:iceWindow,
       observations:payload.ice_history ?? payload.observations ?? [],
       loadRange:bounds=>window.LumoPriceChart.indexRange('sh000001',bounds,{breadth:true})});
@@ -262,6 +473,7 @@
       <p>MA为收盘价简单均线；年线偏离=(收盘/MA250−1)×100；500日高点回撤=(当前收盘/近500日最高收盘−1)×100；RSI14采用Wilder递推平滑；波动率为最近20个对数日收益样本标准差×√250。</p>
       <p>年量比使用当日成交量/含当日在内250日均量；5日量比使用当日量/前5日均量。因子均为全天收盘口径，15:30前更新只采用已收盘的指数日线。</p>
       <p>市场和广度与上证基准日期不同时保留展示，但不参与当天温度、特征和确认。更新失败保留原快照及原日期；间隔超过4个自然日提示滞后，周末、节假日需结合最后交易日理解。</p>
+      <p>沪深京市场广度按有成交、有效参考昨收的个股计算，上涨家数除以涨跌家数之和。TRIN 比较下跌股与上涨股的平均成交股数。两项是独立量价观测，温度中的上涨家数比仍以全部有效涨跌幅样本为分母。</p>
       <p>广度按市值8层、每层最多50只沪深A股采样，从300根个股日线回算最近5个交易日，最早日也需250根历史。停牌缺日和短历史成分整个窗口排除，固定组不足200只则保留旧值。新浪未复权价格可能受除权干扰，抽样不包含北交所；估值使用全A正PE/PB有效样本。</p></article></div>
       <article class="mh-box mh-method">${boxHead("来源与研究边界")}
       <p>七维压力权重：指数25%、广度15%、估值10%、期指15%、两融10%、量化10%、资金15%。总有效权重至少65%、至少5维，并且期指／两融／量化都有效，才输出综合压力；其余状态明确为证据未齐。上一交易日的两融、席位与资金只按一半权重；量化仅用同日。</p>
@@ -279,6 +491,8 @@
     $("mhIndexRefresh").disabled = Boolean(busy);
     $("mhFullRefresh").disabled = Boolean(busy);
     $("mhCrossRefresh").disabled = Boolean(busy);
+    if ($("mhStructureRefresh")) $("mhStructureRefresh").disabled = Boolean(busy);
+    updateDailyBackfillButton(job);
     $("mhJob").hidden = !job;
     if (!job) return;
     const status = {queued:"已排队",running:"更新中",finished:"更新完成",failed:"更新失败"}[job.status] || job.status;
@@ -324,21 +538,37 @@
       if (id !== requestId) return;
       const old=payload;
       envelope=value;activatePayload();error();
-      const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message;
+      const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message && JSON.stringify(old.market_internals)===JSON.stringify(payload.market_internals);
       if (poll && unchanged) {
         if (JSON.stringify(old.ice_coverage)!==JSON.stringify(payload.ice_coverage) ||
             JSON.stringify(old.ice_history)!==JSON.stringify(payload.ice_history)) renderBreadth();
         renderJob(value.job);
       } else render();
+      if (daily.backfill?.id && value.job?.id === daily.backfill.id && ["finished","failed"].includes(value.job.status)) {
+        const matched = daily.query === daily.backfill.query;
+        daily.backfill = null;
+        const notice = value.job.error || value.job.result?.notes?.join(" · ") || "补采已结束";
+        if (matched) searchDaily(daily.query,{notice});
+        else { daily.status = ""; renderDailyResults(); }
+      }
       scheduleLive();
       const liveDay = value.live_status?.as_of;
       const session = liveDay || value.as_of || 'initial';
       const missingPreview = value.live_status?.available && (value.intraday?.market?.as_of !== liveDay || value.intraday?.breadth?.as_of !== liveDay);
       const missingClose = !value.live_status?.available && liveDay && liveDay > (value.as_of || '');
-      const needsFull = value.source === 'baseline' || !value.as_of || !value.fusion?.updated_at || missingPreview || missingClose;
-      if (autoSession !== session && needsFull && (!value.job || ['finished','failed'].includes(value.job.status))) {
+      const currentInternals = value.intraday || value;
+      const observation = currentInternals.market_internals?.current;
+      const missingInternals = observation?.as_of !== currentInternals.as_of || observation?.sh_sz_turnover_yuan === undefined;
+      const needsFull = value.source === 'baseline' || !value.as_of || !value.fusion?.updated_at || missingPreview || missingClose || missingInternals;
+      const idle = !value.job || ["finished","failed"].includes(value.job.status);
+      if (autoSession !== session && needsFull && idle) {
         autoSession = session;
         refresh('full');
+      } else if (idle && daily.autoFill === daily.query && daily.autoFill && !daily.loading) {
+        backfillDaily();
+      } else if (idle && autoStructure && section === "breadth" && viewMode === "latest" && !document.hidden && value.live_status?.structure_sampling_open) {
+        const newest = Date.parse(value.intraday?.market_internals?.intraday_history?.at(-1)?.captured_at) || 0;
+        if (Date.now() - Math.max(lastStructureRequest, newest) >= 180000) refresh("structure");
       }
     } catch (e) {
       error(`${e.message}。${payload ? "已有快照继续保留显示。" : "请点击顶部刷新重试。"}`);
@@ -348,9 +578,16 @@
   }
   async function refresh(mode) {
     if (mode === "full") document.dispatchEvent(new CustomEvent("market-health-full-refresh"));
+    if (mode === "structure") lastStructureRequest = Date.now();
     error();$("mhIndexRefresh").disabled=true;$("mhFullRefresh").disabled=true;$("mhCrossRefresh").disabled=true;
-    try { await load(false,true);const value=await request("/api/market-health/refresh",{method:"POST",body:JSON.stringify({mode})});renderJob(value.job);if (payload) payload.job=value.job;if (envelope) envelope.job=value.job; }
-    catch (e) { error(e.message);$("mhIndexRefresh").disabled=false;$("mhFullRefresh").disabled=false;$("mhCrossRefresh").disabled=false; }
+    if ($("mhStructureRefresh")) $("mhStructureRefresh").disabled = true;
+    try {
+      if (mode !== "structure") await load(false,true);
+      const value=await request("/api/market-health/refresh",{method:"POST",body:JSON.stringify({mode})});
+      if (payload) payload.job=value.job;
+      if (envelope) envelope.job=value.job;
+      renderJob(value.job);
+    } catch (e) { error(e.message);renderJob(payload?.job); }
   }
   $("mhTabs").addEventListener("click", e => { const b=e.target.closest("[data-mh-tab]");if (b) selectTab(b.dataset.mhTab); });
   $("mhTabs").addEventListener("keydown", e => {
@@ -363,6 +600,34 @@
     if (go) selectTab(go.dataset.mhGo,true);
     if (index) { symbol=index.dataset.mhIndex;renderIndices();selectTab("indices",true); }
     if (h) { horizon=Number(h.dataset.mhHorizon);renderHistory(); }
+    if (e.target.closest("#mhStructureRefresh")) refresh("structure");
+    const day = e.target.closest("[data-mh-daily-day]");
+    if (day) { daily.selected = day.dataset.mhDailyDay; renderDailyDetail(); }
+    if (e.target.closest("#mhDailyBackfill")) backfillDaily();
+    if (e.target.closest("#mhDailyReset")) {
+      daily.requestId++;
+      Object.assign(daily, {draft:{start:"",end:""}, query:null, report:null, selected:"", status:"", loading:false, autoFill:null});
+      remember();
+      if ($("mhDailyForm")) $("mhDailyForm").reset();
+      if ($("mhDailyStart")) $("mhDailyStart").value = "";
+      if ($("mhDailyEnd")) $("mhDailyEnd").value = "";
+      renderDailyResults();
+    }
+  });
+  root.addEventListener("submit", e => {
+    if (e.target.id !== "mhDailyForm") return;
+    e.preventDefault();
+    const query = {start:$("mhDailyStart").value,end:$("mhDailyEnd").value};
+    daily.draft = {...query};
+    searchDaily(query,{fill:true});
+  });
+  root.addEventListener("input", e => {
+    if (e.target.id === "mhDailyStart" || e.target.id === "mhDailyEnd") daily.draft[e.target.name] = e.target.value;
+  });
+  root.addEventListener("change", e => {
+    if (e.target.id !== "mhStructureAuto") return;
+    autoStructure = e.target.checked;
+    if (autoStructure) load(true);
   });
   $("mhIndexRefresh").addEventListener("click", () => refresh("indices"));
   $("mhLatestMode").addEventListener("click",()=>{viewMode="latest";activatePayload();render();remember();load(false,true);});

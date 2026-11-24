@@ -18,7 +18,7 @@ from analysis.market_health import (INDEXES, breadth_history, build_health, buil
                                     normalize_bars, number)
 from analysis.market_health_fusion import build_fusion
 from data_store import kv_repo, price_bars_repo
-from webui.services import daily_history, market_ice_service
+from webui.services import daily_history, market_ice_service, market_internals_service
 from webui.services.http_client import request_json, request_text
 
 NAMESPACE = "market_health"
@@ -90,6 +90,67 @@ def index_history(symbol, start="", end="", *, breadth=False):
             observations = merge_ice_history(computed, observations)
         result["observations"] = [r for r in observations if r["as_of"] in visible and not r.get("provisional")]
     return result
+
+
+def daily_structure_range(start, end="", *, current=None):
+    current = current or now()
+    first, last = daily_history.parse_day(start), daily_history.parse_day(end or start)
+    if first > last:
+        raise ValueError("开始日期不能晚于结束日期")
+    if last > current.date():
+        raise ValueError("结束日期不能晚于今天")
+    if (last - first).days > 365:
+        raise ValueError("单次查询最多 366 天，可分段查询")
+    return first, last
+
+
+def _daily_structure_calendar(state, first, last, current):
+    end = min(last, daily_history.last_closed_day(current))
+    if first > end:
+        return [], "所选日期的收盘数据尚待确认。"
+    start, stop = first.isoformat(), end.isoformat()
+    snapshot = [row["date"] for row in normalize_bars(state.get("bars", {}).get("sh000001", []))
+                if not row.get("provisional")]
+    prior = [day for day in snapshot if day < start]
+    if prior and snapshot[-1] >= stop:
+        return prior[-1:] + [day for day in snapshot if start <= day <= stop], None
+
+    lookback = first - dt.timedelta(days=min(first.toordinal() - 1, 35))
+    known = daily_history._known_sessions(lookback, end)
+    if known:
+        days, message = sorted(known), None
+    else:
+        rows, _, message = daily_history.load_range("sh000001", start, stop, warmup=1, now=current)
+        days = sorted(set(snapshot).union(row["date"] for row in rows if not row.get("provisional")))
+    prior = [day for day in days if day < start]
+    visible = [day for day in days if start <= day <= stop]
+    return prior[-1:] + visible, message
+
+
+def daily_structure(start, end="", *, state=None, current=None):
+    """Find dated closing observations and their immediately preceding session."""
+    current = current or now()
+    first, last = daily_structure_range(start, end, current=current)
+    start, end = first.isoformat(), last.isoformat()
+    state = state if state is not None else read_state()
+    days, calendar_note = _daily_structure_calendar(state, first, last, current)
+    closed_end = min(last, daily_history.last_closed_day(current)).isoformat()
+    saved = market_internals_service.recorded_days(start, closed_end) if start <= closed_end else []
+    calendar = sorted(set(days).union(saved))
+    raw = market_internals_service.read_history(calendar, recent=False)
+    calendar_complete = not calendar_note or not any(text in calendar_note for text in ("待补", "尚未"))
+    rows = [row for row in market_internals_service.compared_history(raw, calendar_complete=calendar_complete)
+            if start <= row["as_of"] <= end]
+    covered = sum(bool(row.get("source")) for row in rows)
+    if start == end and covered:
+        limits = market_internals_service.limit_counts(start)
+        if limits:
+            rows[0]["limits"] = limits
+    if not rows and not calendar_note:
+        calendar_note = "所选日期区间没有交易日。"
+    pending = sum(row.get("turnover_yuan") is None or row.get("sh_sz_turnover_yuan") is None for row in raw) if rows else 0
+    return {"start": start, "end": end, "rows": rows, "calendar": calendar, "covered": covered,
+            "missing": len(rows) - covered, "pending": pending, "message": calendar_note}
 
 
 def latest_job(jobs):
@@ -190,6 +251,8 @@ def query(jobs=None, refresh_live=False, force_live=False):
     today = current.date().isoformat()
     calendar = [r['date'] for r in normalize_bars(state.get('bars', {}).get('sh000001', []))
                 if not r.get('provisional') and (r['date'] < today or (r['date'] == today and current.time() >= dt.time(15, 30)))]
+    internals_history = market_internals_service.read_history(calendar)
+    result["market_internals"] = market_internals_service.view(internals_history, result["market"], result["as_of"])
     # The page opens/polls with live=1; plain GET remains an offline snapshot read.
     if refresh_live:
         market_ice_service.ensure(calendar, result['ice_history'], state.get('ice_sample') or state.get('breadth') or {})
@@ -203,6 +266,8 @@ def query(jobs=None, refresh_live=False, force_live=False):
     cached = kv_repo.get(NAMESPACE,"live_quotes")
     quotes = fetch_live_quotes(force=force_live) if refresh_live else cached[0] if cached else {}
     status = live_status(quotes,result["as_of"])
+    status["structure_sampling_open"] = bool(status["available"] and (
+        dt.time(9, 30) <= current.time() < dt.time(11, 30) or dt.time(13) <= current.time() < dt.time(15)))
     result["live_status"] = status
     result["confirmation_as_of"] = result["as_of"]
     result["intraday"] = None
@@ -221,6 +286,8 @@ def query(jobs=None, refresh_live=False, force_live=False):
             preview["updated_at"] = live.get("captured_at")
             preview["market"]["provisional"] = preview["market"].get("as_of") == preview["as_of"]
             preview["breadth"]["provisional"] = preview["breadth"].get("as_of") == preview["as_of"]
+            preview["market_internals"] = market_internals_service.view(
+                internals_history, preview["market"], preview["as_of"], provisional=True)
             result["intraday"] = preview
         else:
             status.update(available=False,message="已取得今日报价，但历史末日与报价昨收不一致；需更新指数历史后才能计算今日均线")
@@ -263,6 +330,13 @@ def indicator_timing(health, provisional):
         rows.append({"label":label,"as_of":data.get("as_of"),"data_at":data.get("captured_at") or data.get("as_of"),
                      "source":data.get("source") or data.get("method"),"kind":"今日盘中采样" if data.get("provisional") else "今日收盘" if data.get("as_of") == today else "旧日采样 / 非今日",
                      "note":f"采集区间 {data.get('sample_started_at')} 至 {data.get('captured_at')}，各股票为对应报价时刻" if data.get("provisional") else "按实际采样日展示，旧日期不计入今日规则"})
+    internals = (health.get("market_internals") or {}).get("current")
+    if internals:
+        day, start, finish = internals["as_of"], internals.get("sample_started_at"), internals.get("captured_at")
+        rows.append({"label": "市场广度 / TRIN / 成交额", "as_of": day, "data_at": finish or day,
+                     "source": internals["source"], "kind": "今日盘中采样" if internals["provisional"] else
+                     "今日收盘" if day == today else "上一收盘 / 非今日",
+                     "note": f"采集区间 {start} 至 {finish}，个股报价按分页取得" if start and finish else "按个股日线的实际交易日计算"})
     for dim in health["fusion"]["dimensions"]:
         if dim["key"] in ("trend","breadth","valuation"):
             continue
@@ -325,6 +399,8 @@ def fetch_market(expected_count=None):
                 minimum = max(3000, int((expected_count or 0)*.9))
                 if len(unique) < minimum:
                     raise ValueError(f"行情覆盖不足{minimum}只，保留已有全市场快照")
+                if len(unique) != len(rows):
+                    raise ValueError("全A行情分页存在重复或缺失代码，保留已有全市场快照")
                 return list(unique.values())
     raise ValueError("全A行情分页超过上限，保留已有快照")
 
@@ -438,9 +514,52 @@ def merge_indices(previous, incoming):
     return result, accepted
 
 
-def start_refresh(mode, jobs, index_loader):
-    if mode not in ("indices", "full", "cross"):
+def _collect_market_snapshot(closed_date, expected_count):
+    before = quote_date()
+    sample_start = now()
+    today = sample_start.date().isoformat()
+    intraday = before == today and before > closed_date
+    rows = fetch_market(expected_count=expected_count)
+    after = quote_date()
+    if before != after or after > today or (after > closed_date and not intraday):
+        raise ValueError("全市场报价交易日未获确认，保留原全市场快照")
+    values = market_snapshot(rows)
+    if values["total"] < 3000:
+        raise ValueError("有效正价格行情不足3000只，原全市场快照保留")
+    started, captured = sample_start.isoformat(), now().isoformat()
+    internals = market_internals_service.from_sina(rows, after, started=started, captured=captured, provisional=intraday)
+    if internals["universe"] < max(3000, int((expected_count or 0) * .9)):
+        raise ValueError("市场量价结构的 A 股代码覆盖不足，保留前次有效观测")
+    internals["limits"] = {"up": values["limit_up"], "down": values["limit_down"], "estimated": True}
+    market = {"as_of": after, "captured_at": captured, "sample_started_at": started,
+              "provisional": intraday, "values": values, "source": "新浪全A快照 · 指数完整报价校验交易日期"}
+    return rows, market, internals
+
+
+def _save_market_snapshot(state, market, internals):
+    date = market["as_of"]
+    if market["provisional"]:
+        hit = kv_repo.get(NAMESPACE, "intraday")
+        previous = hit[0] if hit and hit[0].get("as_of") == date else {}
+        live = {**previous, "as_of": date, "market": {**market, "internals": internals},
+                "captured_at": market["captured_at"]}
+        market_internals_service.save_intraday(internals)
+        kv_repo.set_(NAMESPACE, "intraday", live)
+        return live
+    sample_start = dt.datetime.fromisoformat(market["sample_started_at"])
+    if date < sample_start.date().isoformat() or sample_start.time() >= dt.time(15, 30):
+        market_internals_service.save_close(internals)
+    if date >= (state.get("market", {}).get("as_of") or ""):
+        state["market"] = market
+    return None
+
+
+def start_refresh(mode, jobs, index_loader, *, history_range=None):
+    if mode not in ("indices", "full", "cross", "structure", "daily"):
         raise ValueError("未知更新模式")
+    if mode == "daily":
+        first, last = daily_structure_range(*(history_range or ("", "")))
+        history_range = (first.isoformat(), last.isoformat())
     with _start_lock:
         active = latest_job(jobs)
         if active and active.get("status") in ("queued", "running"):
@@ -451,6 +570,33 @@ def start_refresh(mode, jobs, index_loader):
             jobs.update(job_id, status="running", started_at=now().isoformat(), progress=0)
             try:
                 state = read_state()
+                if mode == "daily":
+                    report = daily_structure(*history_range, state=state)
+                    if report["calendar"] and report["rows"]:
+                        def progress(index, total, date):
+                            jobs.update(job_id, progress=min(95, round(index * 95 / total)))
+                            jobs.append_log(job_id, f"补采 {date} 收盘日线（{index}/{total}）")
+
+                        note = market_internals_service.backfill(report["calendar"], None, recent=False, progress=progress)
+                    else:
+                        note = report["message"]
+                    jobs.update(job_id, status="finished", progress=100, finished_at=now().isoformat(),
+                                result={"notes": [note or "所选区间收盘数据已补采"], "partial": bool(note)})
+                    return
+                if mode == "structure":
+                    closed_date = build_health(state)["as_of"]
+                    if not closed_date:
+                        raise ValueError("需要先更新指数交易日")
+                    expected = (state.get("market", {}).get("values") or {}).get("total")
+                    jobs.append_log(job_id, "采集沪深京 A 股量价结构")
+                    _, market, internals = _collect_market_snapshot(closed_date, expected)
+                    live = _save_market_snapshot(state, market, internals)
+                    if live is None:
+                        state.update(updated_at=now().isoformat(), source="updated")
+                        kv_repo.set_(NAMESPACE, "snapshot", state)
+                    jobs.update(job_id, status="finished", progress=100, finished_at=now().isoformat(),
+                                result={"notes": [f"已采集 {market['as_of']} 量价结构，共 {internals['universe']} 只 A 股"]})
+                    return
                 quote_payload = fetch_live_quotes(force=True)
                 jobs.append_log(job_id, "更新七大指数日线（收盘口径）")
                 try:
@@ -492,24 +638,14 @@ def start_refresh(mode, jobs, index_loader):
                     state.update(source="updated",updated_at=now().isoformat(),notes=notes)
                     kv_repo.set_(NAMESPACE,"snapshot",state)
                 if mode == "full":
+                    closed_date = build_health(state)["as_of"]
+                    expected_count = (state.get("market", {}).get("values") or {}).get("total")
                     try:
-                        before = quote_date()
-                        intraday = before == now().date().isoformat() and before > build_health(state)["as_of"]
-                        started = now().isoformat()
-                        rows = fetch_market(expected_count=(state.get("market",{}).get("values") or {}).get("total"))
-                        after = quote_date()
-                        if before != after:
-                            raise ValueError("采集跨交易日，保留原全市场快照")
-                        values = market_snapshot(rows)
-                        if values["total"] < 3000:
-                            raise ValueError("有效正价格行情不足3000只，原全市场快照保留")
-                        market = {"as_of": after,"captured_at":now().isoformat(),"sample_started_at":started,
-                                  "provisional":intraday,"values":values,"source":"新浪全A快照 · 指数完整报价校验交易日期"}
-                        live = {"as_of":after,"market":market,"captured_at":now().isoformat()}
-                        if intraday:
-                            kv_repo.set_(NAMESPACE,"intraday",live)
-                        else:
-                            state["market"] = market
+                        rows, market, internals = _collect_market_snapshot(closed_date, expected_count)
+                        after, intraday = market["as_of"], market["provisional"]
+                        started = market["sample_started_at"]
+                        expected_count = internals["universe"]
+                        live = _save_market_snapshot(state, market, internals)
                         jobs.update(job_id, progress=35)
                         jobs.append_log(job_id, f"全A快照{len(rows)}只；开始400只分层广度采样")
                         calendar = [r["date"] for r in normalize_bars(state["bars"].get("sh000001",[])) if r["date"] <= after]
@@ -545,6 +681,14 @@ def start_refresh(mode, jobs, index_loader):
                         partial = True
                         source_failed = True
                         notes.append(str(exc) if isinstance(exc, ValueError) else f"全市场/广度更新失败（{type(exc).__name__}），原值及日期保留")
+                    jobs.update(job_id, progress=96)
+                    jobs.append_log(job_id, "补齐市场广度和 TRIN 收盘历史")
+                    closed_sessions = [r["date"] for r in normalize_bars(state["bars"].get("sh000001", []))
+                                       if r["date"] <= closed_date and not r.get("provisional")]
+                    history_note = market_internals_service.backfill(closed_sessions, expected_count)
+                    if history_note:
+                        source_failed = True
+                        notes.append(history_note)
                 elif mode == "indices":
                     notes.append("本轮更新实时指数与收盘历史；广度和估值另按采样日期展示，完整更新可补齐今日采样。")
                 else:
@@ -572,6 +716,9 @@ def start_refresh(mode, jobs, index_loader):
             finally:
                 close_conn()
 
-        job = jobs.start("market_health", {"mode": mode}, worker)
+        params = {"mode": mode}
+        if history_range:
+            params.update(start=history_range[0], end=history_range[1])
+        job = jobs.start("market_health", params, worker)
         kv_repo.set_(NAMESPACE, "latest_job", job["id"])
         return job

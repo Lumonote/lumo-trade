@@ -997,7 +997,32 @@ def market_health_refresh(request: Request) -> Response:
             data.get("mode", "full"), webui_core.JOB_SERVICE, webui_core._market_pulse_index_bars)
         return _json_response({"job": job}, status_code=202)
     except (ValueError, TypeError, AttributeError):
-        return _json_response({"error": "更新模式必须为 full、cross 或 indices"}, status_code=400)
+        return _json_response({"error": "更新模式必须为 full、cross、indices 或 structure"}, status_code=400)
+
+
+@_native_get("/api/market-health/daily-structure")
+def market_health_daily_structure(request: Request) -> Response:
+    try:
+        start = _query_value(request, "start", "")
+        end = _query_value(request, "end", "")
+        date = _query_value(request, "date", "")
+        if date and (start or end):
+            raise ValueError("请单独使用交易日或开始、结束日期")
+        return _json_response(market_health_service.daily_structure(date or start, end))
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
+
+
+@_native_post("/api/market-health/daily-structure/refresh")
+def market_health_daily_structure_refresh(request: Request) -> Response:
+    try:
+        data = _request_json(request)
+        job = market_health_service.start_refresh(
+            "daily", webui_core.JOB_SERVICE, webui_core._market_pulse_index_bars,
+            history_range=(data.get("start", ""), data.get("end", "")))
+        return _json_response({"job": job}, status_code=202)
+    except (ValueError, TypeError) as exc:
+        return _json_response({"error": str(exc)}, status_code=400)
 
 
 @_native_get("/api/market-health/sectors")

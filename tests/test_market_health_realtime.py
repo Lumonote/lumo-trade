@@ -155,7 +155,11 @@ def test_full_refresh_before_close_updates_today_sampling_without_overwriting_cl
     monkeypatch.setattr(service,"fetch_live_quotes",lambda **kwargs:{"quotes":q})
     monkeypatch.setattr(service.kv_repo,"set_",lambda ns,key,value:written.update({key:deepcopy(value)}))
     monkeypatch.setattr(service,"quote_date",lambda:"2026-10-23")
-    monkeypatch.setattr(service,"fetch_market",lambda **kwargs:[{"symbol":f"sh{i:06d}","trade":10,"changepercent":-1,"pb":2} for i in range(3200)])
+    monkeypatch.setattr(service,"fetch_market",lambda **kwargs:[
+        {"symbol":f"{exchange}{start+i:06d}","trade":10,"settlement":ref,
+         "volume":volume,"amount":volume*10,"changepercent":-1,"pb":2}
+        for exchange,start,ref,volume in (("sh",600000,9,200),("sz",0,11,100)) for i in range(2700)])
+    monkeypatch.setattr(service.market_internals_service,"backfill",lambda *args:None)
     def breadth(rows,day,progress,symbols,calendar,**kwargs):
         calls.append((day,calendar[-1],kwargs))
         return {**before["breadth"],"as_of":day,"observations":[{**o,"as_of":day} for o in before["observations"][-1:]]}
@@ -173,3 +177,8 @@ def test_full_refresh_before_close_updates_today_sampling_without_overwriting_cl
     assert written["snapshot"]["observations"]==before["observations"]
     assert written["intraday"]["market"]["as_of"]=="2026-10-23"
     assert written["intraday"]["breadth"]["provisional"] is True
+    internals = written["intraday"]["market"]["internals"]
+    assert (internals["breadth_pct"], internals["trin"], internals["provisional"]) == (50, .5, True)
+    assert internals["amount_trin"] == .5 and internals["sh_sz_turnover_yuan"] == 8100000
+    assert written["internals:intraday:2026-10-23"] == [internals]
+    assert not any(key.startswith(service.market_internals_service.CLOSE_PREFIX) for key in written)

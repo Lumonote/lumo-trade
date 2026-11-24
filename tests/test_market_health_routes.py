@@ -89,6 +89,29 @@ def test_refresh_uses_shared_jobs_and_rejects_bad_modes(runtime,monkeypatch):
     assert calls==[("cross",runtime.webui_core.JOB_SERVICE,runtime.webui_core._market_pulse_index_bars)]
 
 
+def test_daily_structure_search_preserves_missing_dates_and_adjacent_close(runtime):
+    from robyn.testing import TestClient
+    from analysis.market_health import market_internals
+    from webui.services import market_internals_service as internals
+
+    values = market_internals([(11, 10, 200, 2000, "SH"), (9, 10, 100, 900, "SZ")])
+    for day in ("2026-10-20", "2026-10-22"):
+        internals.save_close({**values, "as_of": day, "provisional": False, "source": internals.TUSHARE})
+
+    url = "/api/market-health/daily-structure"
+    with TestClient(runtime.app) as client:
+        result = client.get(url, query_params={"start": "2026-10-21", "end": "2026-10-22"}).json()
+        assert [row["as_of"] for row in result["rows"]] == ["2026-10-21", "2026-10-22"]
+        assert result["missing"] == result["pending"] == 1
+        single = client.get(url, query_params={"date": "2026-10-22"}).json()
+        assert len(single["rows"]) == 1 and single["rows"][0]["sh_sz_turnover_yuan"] == 2900
+        comparison = single["rows"][0]["vs_previous"]
+        assert comparison["as_of"] == "2026-10-21" and comparison["turnover"]["change_pct"] is None
+        weekend = client.get(url, query_params={"date": "2026-10-18"}).json()
+        assert weekend["rows"] == [] and "没有交易日" in weekend["message"]
+        assert client.get(url, query_params={"date": "2026-02-30"}).status_code == 400
+
+
 def test_invalid_refresh_body_is_400(runtime):
     from robyn.testing import TestClient
     with TestClient(runtime.app) as client:
