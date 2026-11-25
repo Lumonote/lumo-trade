@@ -300,15 +300,16 @@
   function refreshStatus(data,busy) {
     const job=data.job,params=job?.params,result=job?.result;
     const span=params?.participant?`${historyLabel(params.participant) || params.participant} ${params.start} 至 ${params.end} · `:"";
-    const notes=(result?.notes||data.errors||[]).join("；");
+    const messages=[...new Set([...(data.notes||[]),...(result?.notes||[]),...(data.errors||[]),...(result?.errors||[])].filter(Boolean))];
+    const withNotes=(status,shown=[])=>[status,messages.filter(note=>!shown.includes(note)).join("；")].filter(Boolean).join(" · ");
     const remaining=result?.remaining_days?` · 还有 ${result.remaining_days} 个交易日待检查` : "";
-    if(busy)return `${span}更新中 ${job.progress||0}% · ${job.logs?.at(-1)||"准备读取公开数据"}`;
-    if(job?.status==="failed")return span+(job.error||"更新失败");
+    if(busy){const progress=job.logs?.at(-1)||"准备读取公开数据";return withNotes(`${span}更新中 ${job.progress||0}% · ${progress}`,[progress]);}
+    if(job?.status==="failed")return withNotes(span+(job.error||"更新失败"),[job.error]);
     if(span&&job.status==="finished"&&result?.processed_days!=null){
-      return `${span}已处理 ${result.processed_days} 个交易日，其中 ${result.amount_days} 日有${params.participant==="etf"?"可估算净额":"新证据"}${remaining}${notes?` · ${notes}`:""}`;
+      return withNotes(`${span}已处理 ${result.processed_days} 个交易日，其中 ${result.amount_days} 日有${params.participant==="etf"?"可估算净额":"新证据"}${remaining}`);
     }
-    if(job?.status==="finished")return `更新完成${result?.as_of?` · 数据截至 ${result.as_of}`:""}${notes?` · ${notes}`:""}`;
-    return notes;
+    if(job?.status==="finished")return withNotes(`更新完成${result?.as_of?` · 数据截至 ${result.as_of}`:""}`);
+    return withNotes("");
   }
   async function load(kind,{fill=false}={}) {
     const s=state[kind],prefix=kind==="financing"?"mf":"mp",id=++s.id;clearTimeout(s.poll);error(prefix);

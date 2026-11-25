@@ -225,7 +225,7 @@ def financing(jobs=None, **params):
         history = margin_metrics(records)
         data = {"margin": records, "as_of": history[-1]["date"] if history else None, "sources": [], "errors": ["个股明细尚未采集；现有两融汇总保留原数据日，请更新两融研究"]}
     report = margin_report(data, window=window, deposit=deposit, warning=warning, closeout=closeout)
-    report.update(job=_status("financing", jobs), updated_at=data.get("updated_at"), sources=data.get("sources", []), errors=data.get("errors", []),
+    report.update(job=_status("financing", jobs), updated_at=data.get("updated_at"), sources=data.get("sources", []), errors=data.get("errors", []), notes=data.get("notes", []),
                   today=now().date().isoformat(), disclosure="交易所通常次日披露；深市周五数据可能在下周一更新。沪深汇总须两所同日完整。个股与ETF口径分别展示，融券数量不跨标的相加。行业为本次采集的当前股票分类。")
     return report
 
@@ -323,7 +323,7 @@ def _day(method, date, fields=None):
     key = f"raw:{method}:{date}"
     cached = _read(key)
     # 最新三个自然日重试披露修订；更早成功记录直接复用。
-    if cached is not None and date < (now().date() - dt.timedelta(days=3)).isoformat():
+    if cached is not None and date < (now().date() - dt.timedelta(days=3)).isoformat() and (method != "margin" or margin_metrics(cached)):
         return cached
     try:
         params = {"trade_date": date.replace("-", "")}
@@ -333,10 +333,14 @@ def _day(method, date, fields=None):
         if rows:
             # 丢弃pandas/numpy非原生值，NaN统一缺失。
             rows = [{k: (v if isinstance(v, str) else number(v)) for k, v in r.items()} for r in rows]
-            kv_repo.set_(NAMESPACE, key, rows)
+            # 单所披露不可覆盖已经取得的沪深完整汇总；交由采集层标记等待或失败。
+            if method != "margin" or margin_metrics(rows) or not margin_metrics(cached):
+                kv_repo.set_(NAMESPACE, key, rows)
             return rows
         if method == 'top_inst' and cached is None and date < now().date().isoformat():
             kv_repo.set_(NAMESPACE, key, [])  # Only a completed disclosure day can establish an empty partition.
+        if method == "margin":
+            return []  # 保留原缓存，由汇总采集区分待披露和缺失，不能用缓存掩盖本次空返回。
         return cached or []
     finally:
         close_conn()
@@ -590,33 +594,51 @@ def collect(kind, progress=lambda message: None):
     current = now()
     old = bundle(kind)
     result = dict(old)
-    result["sources"], result["errors"] = [], []
-    through = _publishable_day(current)
-    dates = _sse_open_days(current.date() - dt.timedelta(days=90), through)
+    result["sources"], result["errors"], result["notes"] = [], [], []
+    through = current.date() - dt.timedelta(days=1) if kind == "financing" else _publishable_day(current)
+    calendar = _sse_open_days(current.date() - dt.timedelta(days=90), current.date() if kind == "financing" else through)
+    dates = [d for d in calendar if d <= through.isoformat()]
     etf_previous = dates[-23] if len(dates) > 22 else None
     dates = dates[-22:]
     if len(dates) < 21:
         raise ValueError("交易日历不足21日，保留原研究")
+    pending_margin_day = None
+    if kind == "financing":
+        # margin 接口最晚次日 09:05 更新；深市周五等到下周一，节假日按交易日历顺延。
+        if not any(d > dates[-1] for d in calendar) or current.time() < dt.time(9, 5):
+            pending_margin_day = dates[-1]
+        if current.date().isoformat() in calendar:
+            result["notes"].append(f"{current.date().isoformat()} 两融数据待次日披露（休市顺延），当前按已披露交易日展示")
     stocks = _records("stock_basic", exchange="", list_status="L", fields="ts_code,name,industry,market")
     if not stocks:
         raise ValueError("股票分类未返回，保留原研究")
     result["stocks"] = stocks
     result["classification_at"] = current.date().isoformat()
 
-    def record(key, rows, failures=0, confirmed=()):
+    def record(key, rows, failures=0, confirmed=(), pending=()):
         prior = old.get(key, [])
         last = max([*(iso(r.get("trade_date")) or "" for r in rows), *confirmed], default="")
         prior_date = max((iso(r.get("trade_date")) or "" for r in prior), default="")
+        if key == "margin":
+            last = max((r["date"] for r in margin_metrics(rows)), default="")
+            prior_date = max((r["date"] for r in margin_metrics(prior)), default="")
         if (not rows and not confirmed) or last < prior_date:
             rows, last = prior, prior_date
             failures = max(1, failures)
         result[key] = rows
-        result["sources"].append({"key": key, "as_of": last or None, "rows": len(rows), "status": "部分失败 / 保留已有日期" if failures else "已读取", "failures": failures})
+        source = {"key": key, "as_of": last or None, "rows": len(rows), "status": "部分失败 / 保留已有日期" if failures else "已读取", "failures": failures}
+        if key == "margin":
+            source["pending_dates"] = sorted(pending)
+            if pending:
+                source["status"] += " / 等待沪深完整披露"
+                result["notes"].append(f"{', '.join(sorted(pending))} 两融汇总尚在披露时段，等待沪深两所完整数据")
+        result["sources"].append(source)
         if failures:
-            result["errors"].append(f"{key}有{failures}项读取失败或未披露；缺失不补零，已有数据保留原日期")
+            reason = "汇总不完整" if key == "margin" else "未披露"
+            result["errors"].append(f"{key}有{failures}项读取失败或{reason}；缺失不补零，已有数据保留原日期")
 
     def batch(key, method, wanted, fields=None):
-        rows, failures, confirmed = [], 0, []
+        rows, failures, confirmed, pending = [], 0, [], []
         prior = {}
         for r in old.get(key, []):
             prior.setdefault(iso(r.get("trade_date")), []).append(r)
@@ -628,16 +650,30 @@ def collect(kind, progress=lambda message: None):
                     batch_rows = future.result()
                 except Exception:
                     failures += 1
-                    rows.extend(_read(f"raw:{method}:{date}") or prior.get(date, []))
+                    fallback = _read(f"raw:{method}:{date}") or prior.get(date, [])
+                    if method == "margin" and not margin_metrics(fallback) and margin_metrics(prior.get(date)):
+                        fallback = prior[date]
+                    rows.extend(fallback)
                     continue
-                if not batch_rows and method == 'top_inst' and _read(f'raw:{method}:{date}') == []:
+                if method == "margin" and not margin_metrics(batch_rows):
+                    cached = _read(f"raw:{method}:{date}") or []
+                    fallback = prior.get(date, []) if margin_metrics(prior.get(date)) else cached
+                    complete_fallback = bool(margin_metrics(fallback))
+                    exchanges = {r.get("exchange_id") for r in batch_rows}
+                    if date == pending_margin_day and not complete_fallback and not {"SSE", "SZSE"}.issubset(exchanges):
+                        pending.append(date)
+                    else:
+                        failures += 1
+                    if complete_fallback:
+                        batch_rows = fallback
+                elif not batch_rows and method == 'top_inst' and _read(f'raw:{method}:{date}') == []:
                     confirmed.append(date)
                 elif not batch_rows:
                     failures += 1
                     batch_rows = prior.get(date, [])
                 rows.extend(batch_rows)
                 progress(f"{method}：{i}/{len(wanted)}个交易日")
-        record(key, rows, failures, confirmed)
+        record(key, rows, failures, confirmed, pending)
 
     if kind == "financing":
         batch("margin", "margin", dates)
@@ -764,7 +800,7 @@ def start_refresh(kind, jobs, *, participant="", start="", end=""):
                         result = collect_orders_range(params['participant'], params['start'], params['end'], report_progress)
                 else:
                     data = collect(kind, progress)
-                    result = {"as_of": data["as_of"], "notes": data["errors"] + data.get("etf_errors", [])}
+                    result = {"as_of": data["as_of"], "notes": data.get("notes", []), "errors": data["errors"] + data.get("etf_errors", [])}
                 jobs.update(job_id, status="finished", finished_at=now().isoformat(), progress=100, result=result)
             except Exception as exc:
                 # 外部异常可能包含请求体，不把Token或连接信息回显到界面。
