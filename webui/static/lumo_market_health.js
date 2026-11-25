@@ -30,7 +30,7 @@
     report:null, selected:"", status:"", loading:false, requestId:0, backfill:null, autoFill:null};
   let payload = null, envelope = null, pollTimer = null, liveTimer = null, requestId = 0, ruleFilter = "all", ruleSearch = "", horizon = 60, autoSession = null;
   let viewMode=q.get("view") === "close" ? "close" : "latest";
-  let autoStructure = false, lastStructureRequest = 0;
+  let autoStructure = false, lastStructureRequest = 0, autoInternalsSession = null;
 
   function error(message = "") { $("mhError").hidden = !message; $("mhError").textContent = message; }
   function remember() {
@@ -559,13 +559,17 @@
       const currentInternals = value.intraday || value;
       const observation = currentInternals.market_internals?.current;
       const missingInternals = observation?.as_of !== currentInternals.as_of || observation?.sh_sz_turnover_yuan === undefined;
-      const needsFull = value.source === 'baseline' || !value.as_of || !value.fusion?.updated_at || missingPreview || missingClose || missingInternals;
+      const needsFull = value.source === 'baseline' || !value.as_of || !value.fusion?.updated_at || missingPreview || missingClose;
+      const structureVisible = (section === "overview" || section === "breadth") && (viewMode === "latest" || !value.intraday);
       const idle = !value.job || ["finished","failed"].includes(value.job.status);
       if (autoSession !== session && needsFull && idle) {
         autoSession = session;
         refresh('full');
       } else if (idle && daily.autoFill === daily.query && daily.autoFill && !daily.loading) {
         backfillDaily();
+      } else if (idle && structureVisible && missingInternals && autoInternalsSession !== session) {
+        autoInternalsSession = session;
+        refresh("structure");
       } else if (idle && autoStructure && section === "breadth" && viewMode === "latest" && !document.hidden && value.live_status?.structure_sampling_open) {
         const newest = Date.parse(value.intraday?.market_internals?.intraday_history?.at(-1)?.captured_at) || 0;
         if (Date.now() - Math.max(lastStructureRequest, newest) >= 180000) refresh("structure");
