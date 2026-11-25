@@ -13,7 +13,7 @@
   <div id="mhError" class="mh-notice mh-error" role="alert" hidden></div>
   <div id="mhJob" class="mh-job" role="status" hidden></div>
   <nav id="mhTabs" class="mh-tabs" aria-label="体检分区" role="tablist">
-    {% for key, label in [('overview','综合总览'),('correlation','全市场关系网络'),('cross','跨市场研判'),('sectors','板块深度'),('limits','涨跌停'),('financing','融资风险'),('participants','谁买谁卖'),('macro','宏观经济'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
+    {% for key, label in [('overview','综合总览'),('correlation','全市场关系网络'),('cross','跨市场研判'),('derivatives','金融衍生品'),('sectors','板块深度'),('limits','涨跌停'),('financing','融资风险'),('participants','谁买谁卖'),('macro','宏观经济'),('signals','顶底信号'),('indices','指数趋势'),('breadth','广度与估值'),('confirmation','反转确认'),('history','历史对照'),('method','指标口径')] %}
     <button type="button" role="tab" id="mhTab-{{ key }}" aria-controls="mhView-{{ key }}" aria-selected="{{ 'true' if key == 'overview' else 'false' }}" tabindex="{{ '0' if key == 'overview' else '-1' }}" data-mh-tab="{{ key }}">{{ label }}</button>
     {% endfor %}
   </nav>
@@ -92,6 +92,7 @@
     </section>
   </section>
   <section id="mhView-cross" role="tabpanel" aria-labelledby="mhTab-cross" hidden></section>
+  <section id="mhView-derivatives" role="tabpanel" aria-labelledby="mhTab-derivatives" hidden></section>
   <section id="mhView-sectors" role="tabpanel" aria-labelledby="mhTab-sectors" hidden>
     <div class="mh-box mh-space"><div class="mh-box-head"><div><h3>追踪资金的去向与持续性</h3><p id="sdMeta">正在读取板块研究…</p></div><div class="mh-actions"><button class="button" id="sdRefresh" type="button">更新板块研究</button><button class="button secondary" id="sdExport" type="button" disabled>导出板块研究</button></div></div>
     <div class="mh-controls"><label for="sdType">板块类型</label><select id="sdType"><option>行业</option><option>概念</option></select><label for="sdSearch">搜索</label><input id="sdSearch" type="search" placeholder="板块名称或代码"><label for="sdSort">排序</label><select id="sdSort"><option value="net">当日净流入</option><option value="score">综合承接强度</option><option value="persistence">持续性刻度</option><option value="flow5">五日净额</option><option value="rate">净流入占比</option><option value="excess5">五日相对强度</option></select><label><input id="sdPositive" type="checkbox" checked> 仅当日净流入</label></div>

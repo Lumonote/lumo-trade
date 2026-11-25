@@ -25,9 +25,11 @@ def test_desktop_page_and_packaged_assets(runtime):
         response=client.get("/desktop/market_health")
         assert response.status_code==200
         assert 'id="marketHealthRoot"' in response.text and "跨市场研判" in response.text
-        for script in ("lumo_market_health.js", "lumo_market_capital.js", "lumo_market_macro.js"):
+        assert 'id="mhTab-derivatives"' in response.text and 'id="mhView-derivatives"' in response.text
+        assert response.text.index("lumo_market_derivatives.js") < response.text.index("lumo_market_health.js")
+        for script in ("lumo_market_health.js", "lumo_market_capital.js", "lumo_market_macro.js", "lumo_market_derivatives.js"):
             assert response.text.index("lumo_market_chart_date.js") < response.text.index(script)
-        for url in ("/static/lumo_market_chart_date.js","/static/lumo_market_health.js","/static/lumo_market_health.css","/static/research/ashare_bottom_20261022.html"):
+        for url in ("/static/lumo_market_chart_date.js","/static/lumo_market_health.js","/static/lumo_market_health.css","/static/lumo_market_derivatives.js","/static/lumo_market_derivatives.css","/static/research/ashare_bottom_20261022.html"):
             assert client.get(url).status_code==200
         assert "/desktop/market_health" in client.get("/desktop/features").text
 
@@ -45,6 +47,11 @@ def test_query_contains_all_dimensions_without_invented_cross_data(runtime):
     future=next(d for d in p["fusion"]["dimensions"] if d["key"]=="futures")
     assert len(future["details"]["basis"])==4
     assert all(r["basis_change"] is not None for r in future["details"]["basis"])
+    derivatives = p["fusion"]["derivatives"]
+    assert derivatives["as_of"] == p["as_of"]
+    assert [r["variety"] for r in derivatives["products"]] == ["IF", "IH", "IC", "IM"]
+    assert derivatives["summary"]["total"] == 4
+    assert all(r["position_date"] <= p["as_of"] for r in derivatives["products"] if r["position_date"])
 
 
 def test_deep_index_history_keeps_warmup_and_only_observed_closed_breadth(runtime, monkeypatch):

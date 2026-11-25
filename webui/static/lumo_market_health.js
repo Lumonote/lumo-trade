@@ -146,7 +146,7 @@
     $("mhView-cross").innerHTML=`<article class="mh-box mh-space">${boxHead(f?.title || "综合证据未齐", f?.method || "",badge(`压力 ${num(f?.pressure,0)}/100`))}${fusionTable()}
       ${(f?.conflicts || []).map(v=>`<div class="mh-notice">${esc(v)}</div>`).join("")}
       <p class="mh-note">压力高表示当前风险或出清压力强，压力低仅表示该维度压力较小，不能直接转换为见底概率或买入建议。缺失证据不会被置为0或50。</p></article>
-      <article class="mh-box mh-space">${boxHead("股指期货 · 基差与前20席位", "IF / IH / IC / IM；主力按成交量选择",'<a class="mh-inline-link" href="/desktop/futures">期货完整菜单 →</a>')}
+      <article class="mh-box mh-space">${boxHead("股指期货 · 基差与前20席位", "IF / IH / IC / IM；主力按成交量选择",'<button type="button" class="mh-inline-link mh-select-index" data-mh-go="derivatives">多空概览与衍生品分析 →</button>')}
         <div class="mh-table-wrap"><table><thead><tr><th>品种 / 主力</th><th>合约交易日</th><th>同日核验升贴水</th><th>同合约较上日</th><th>持仓量</th></tr></thead><tbody>${(futures.basis || []).map(r=>`<tr><td>${esc(r.variety)} / ${esc(r.contract || "—")}<small>${esc(r.source || "")}</small></td><td>${esc(dateOnly(r.date) || "—")}</td><td class="${tone(r.basis_pct)}">${signed(r.basis_pct)}</td><td>${r.basis_change == null ? "历史接口未返回可比数据" : `${num(r.basis_change*100,1)} bp`}<small>对比 ${esc(dateOnly(r.previous_date) || "—")}</small></td><td>${num(r.position,0)}</td></tr>`).join("") || '<tr><td colspan="5">等待现有期货接口返回行情；点击跨市场分析更新。</td></tr>'}</tbody></table></div>
         <div class="mh-table-wrap"><table><thead><tr><th>品种 / 席位日</th><th>前20多单</th><th>前20空单</th><th>净多头持仓</th><th>净多头增减</th><th>多空变化</th></tr></thead><tbody>${(futures.positions || []).map(r=>`<tr><td>${esc(r.variety)} / ${esc(dateOnly(r.date) || "—")}</td><td>${num(r.long,0)}</td><td>${num(r.short,0)}</td><td>${num(r.net,0)}</td><td>${num(r.net_change,0)}</td><td>${esc(r.signal || "—")}</td></tr>`).join("") || '<tr><td colspan="6">尚无可用席位缓存；未披露时保留原交易日。</td></tr>'}</tbody></table></div>${blockNote("futures")}
         ${(futures.errors || []).map(v=>`<p class="mh-note">${esc(v)}</p>`).join("")}</article>
@@ -492,6 +492,7 @@
     $("mhIndexRefresh").disabled = Boolean(busy);
     $("mhFullRefresh").disabled = Boolean(busy);
     $("mhCrossRefresh").disabled = Boolean(busy);
+    for (const button of root.querySelectorAll('[data-mh-derivatives-refresh]')) button.disabled = Boolean(busy || refreshing);
     if ($("mhStructureRefresh")) $("mhStructureRefresh").disabled = Boolean(busy);
     updateDailyBackfillButton(job);
     $("mhJob").hidden = !job;
@@ -520,6 +521,7 @@
     if ($("refreshMeta")) $("refreshMeta").textContent = `体检 · ${payload.as_of || "待更新"}`;
     if (!payload.indices.some(r => r.symbol === symbol)) symbol="sh000001";
     renderOverview();renderCross();renderSignals();renderIndices();renderBreadth();renderConfirmation();renderHistory();renderMethod();
+    if (window.LumoMarketDerivatives) $("mhView-derivatives").innerHTML = window.LumoMarketDerivatives.render(payload.fusion?.derivatives);
     updateCorrelationSummaries();
     $("mhLoading").hidden=true;root.setAttribute("aria-busy","false");$("mhExport").disabled=false;
     selectTab(section);renderJob(payload.job);
@@ -540,7 +542,7 @@
       if (id !== requestId) return;
       const old=payload;
       envelope=value;activatePayload();error();
-      const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message && old.live_status?.close_pending===payload.live_status?.close_pending && JSON.stringify(old.market_internals)===JSON.stringify(payload.market_internals);
+      const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message && old.live_status?.close_pending===payload.live_status?.close_pending && JSON.stringify(old.market_internals)===JSON.stringify(payload.market_internals) && JSON.stringify(old.fusion?.derivatives)===JSON.stringify(payload.fusion?.derivatives);
       if (poll && unchanged) {
         if (JSON.stringify(old.ice_coverage)!==JSON.stringify(payload.ice_coverage) ||
             JSON.stringify(old.ice_history)!==JSON.stringify(payload.ice_history)) renderBreadth();
@@ -599,6 +601,7 @@
     if (mode === "full") document.dispatchEvent(new CustomEvent("market-health-full-refresh"));
     if (mode === "structure") lastStructureRequest = Date.now();
     error();$("mhIndexRefresh").disabled=true;$("mhFullRefresh").disabled=true;$("mhCrossRefresh").disabled=true;
+    for (const button of root.querySelectorAll('[data-mh-derivatives-refresh]')) button.disabled = true;
     if ($("mhStructureRefresh")) $("mhStructureRefresh").disabled = true;
     try {
       if (mode !== "structure") await load(false,true);
@@ -607,7 +610,7 @@
       if (envelope) envelope.job=value.job;
       renderJob(value.job);
     } catch (e) { error(e.message);renderJob(payload?.job); }
-    finally { refreshing = false; }
+    finally { refreshing = false;renderJob(payload?.job); }
   }
   $("mhTabs").addEventListener("click", e => { const b=e.target.closest("[data-mh-tab]");if (b) selectTab(b.dataset.mhTab); });
   $("mhTabs").addEventListener("keydown", e => {
@@ -621,6 +624,7 @@
     if (index) { symbol=index.dataset.mhIndex;renderIndices();selectTab("indices",true); }
     if (h) { horizon=Number(h.dataset.mhHorizon);renderHistory(); }
     if (e.target.closest("#mhStructureRefresh")) refresh("structure");
+    if (e.target.closest("[data-mh-derivatives-refresh]")) refresh("cross");
     const day = e.target.closest("[data-mh-daily-day]");
     if (day) { daily.selected = day.dataset.mhDailyDay; renderDailyDetail(); }
     if (e.target.closest("#mhDailyBackfill")) backfillDaily();
@@ -664,7 +668,7 @@
   window.addEventListener("pagehide", () => {clearTimeout(pollTimer);clearTimeout(liveTimer);});
 
   const corrGroups = [
-    ["综合研判", [["overview", "综合总览"], ["cross", "跨市场研判"], ["macro", "宏观经济"]]],
+    ["综合研判", [["overview", "综合总览"], ["cross", "跨市场研判"], ["derivatives", "金融衍生品"], ["macro", "宏观经济"]]],
     ["指数与市场结构", [["indices", "指数趋势"], ["breadth", "广度与估值"], ["correlation", "技术指标关联"], ["limits", "涨跌停"]]],
     ["资金与板块", [["participants", "谁买谁卖"], ["financing", "融资风险"], ["sectors", "板块深度"]]],
     ["信号与验证", [["signals", "顶底信号"], ["confirmation", "反转确认"], ["history", "历史对照"], ["method", "指标口径"]]],
@@ -681,6 +685,7 @@
     const summaries = {
       overview: payload?.temperature?.score == null ? "" : `温度 ${num(payload.temperature.score, 0)}/100`,
       cross: payload?.fusion?.pressure == null ? "" : `综合压力 ${num(payload.fusion.pressure, 0)}/100`,
+      derivatives: payload?.fusion?.derivatives?.summary?.label || "",
       indices: shanghai?.ret20 == null ? "" : `上证20日 ${signed(shanghai.ret20)}`,
       breadth: breadth?.above_ma20 == null ? "" : `站上MA20 ${pct(breadth.above_ma20)}`,
       signals: payload?.signals ? `底部 ${payload.signals.bottom.hit}/12 · 顶部 ${payload.signals.top.hit}/12` : "",

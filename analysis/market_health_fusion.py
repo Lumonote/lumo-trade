@@ -5,6 +5,7 @@ import datetime as dt
 from statistics import mean
 
 from analysis.market_health import number
+from analysis.market_derivatives import build_derivatives
 
 WEIGHTS = {"trend": .25, "breadth": .15, "valuation": .10,
            "futures": .15, "leverage": .10, "quant": .10, "capital": .15}
@@ -240,4 +241,5 @@ def build_fusion(health, cross, bars):
     return {"title":title,"pressure":pressure,"coverage":round(coverage,3),"complete":not missing,"sufficient":sufficient,
             "dimensions":dims,"reasons":reasons,"conflicts":conflicts,"missing":missing,
             "cross_count":len(cross_used),"updated_at":cross.get("updated_at"),
+            "derivatives":build_derivatives(cross.get("futures", {}), as_of, calendar),
             "method":"七维经验压力刻度；≥65%有效权重、至少5维且期指/两融/量化都有效才输出；T−1席位/两融/资金权重减半，量化仅同日。"}

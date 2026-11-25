@@ -70,7 +70,7 @@ with market_page() as (page, read, out):
     check_drawing(page, "#corrOverview")
     evidence = page.locator("#corrSectionContent")
     panels = {
-        "overview": "七维证据矩阵", "cross": "股指期货", "sectors": "十日资金轮动路径",
+        "overview": "七维证据矩阵", "cross": "股指期货", "derivatives": "多空正在怎样变化", "sectors": "十日资金轮动路径",
         "limits": "完整日数据", "financing": "两融披露", "participants": "查询",
         "macro": "研究快照", "signals": "触发阈值", "indices": "指数指标矩阵",
         "breadth": "估值与交易结构", "confirmation": "底部反转", "history": "原报告历史条件对照",
@@ -126,4 +126,4 @@ with market_page() as (page, read, out):
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
     page.locator("#corrVisualization").screenshot(path=str(out / "correlation-mobile.png"))
     assert not errors, errors
-    print("Correlation checks passed (14 sections, shared controls, signal bias, text tree, mobile Canvas).")
+    print("Correlation checks passed (15 sections, shared controls, signal bias, text tree, mobile Canvas).")
