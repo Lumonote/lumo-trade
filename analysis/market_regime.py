@@ -17,8 +17,10 @@ IO 侧: 新浪指数日 K(OHLC)抓取 → SQLite ``market_daily`` 表持久化(S
 """
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -329,15 +331,19 @@ def load_index_bars_from_db(symbol: str, limit: int = 160) -> List[Dict[str, Any
     return bars
 
 
-def get_index_bars(symbols: Iterable[str], datalen: int = 160) -> Dict[str, List[Dict[str, Any]]]:
-    """批量取指数日 K: 新浪抓取 → 落库;失败回退读库。空结果的 symbol 不返回。"""
+def get_index_bars(symbols: Iterable[str], datalen: int = 160, *,
+                   allow_current_fallback: bool = True) -> Dict[str, List[Dict[str, Any]]]:
+    """批量取指数日 K: 新浪抓取 → 落库;收盘统计可排除未确认的今日缓存。"""
     result: Dict[str, List[Dict[str, Any]]] = {}
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
     for symbol in symbols:
         bars = fetch_index_daily(symbol, datalen=datalen)
         if bars:
             persist_index_bars(symbol, bars)
         else:
             bars = load_index_bars_from_db(symbol, limit=datalen)
+            if not allow_current_fallback:
+                bars = [bar for bar in bars if str(bar.get("day") or "")[:10] < today]
         if bars:
             result[symbol] = bars
     return result

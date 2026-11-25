@@ -220,7 +220,9 @@ def live_status(value, closed_date):
     benchmark = quotes.get("sh000001") or {}
     date = benchmark.get("as_of")
     status = {"quote_at":benchmark.get("quote_at"),"requested_at":value.get("fetched_at"),
-              "error":value.get("error"),"available":False,"as_of":date,"closed_as_of":closed_date}
+              "error":value.get("error"),"available":False,"as_of":date,"closed_as_of":closed_date,
+              "close_pending":bool(current.time() >= dt.time(15) and date == current.date().isoformat()
+                                   and date > str(closed_date or ""))}
     try:
         stamp = dt.datetime.fromisoformat(benchmark["quote_at"]).replace(tzinfo=ZoneInfo("Asia/Shanghai"))
         reference = current
@@ -228,7 +230,7 @@ def live_status(value, closed_date):
             reference = current.replace(hour=11,minute=30,second=0,microsecond=0)
         elif current.time() >= dt.time(15):
             reference = current.replace(hour=15,minute=0,second=0,microsecond=0)
-        fresh = -60 <= (reference-stamp).total_seconds() <= 300
+        fresh = stamp <= current+dt.timedelta(seconds=60) and (reference-stamp).total_seconds() <= 300
         status["available"] = date == current.date().isoformat() and fresh and date > str(closed_date or "")
         status["message"] = ("今日盘中预警；尚未收盘确认" if status["available"] and current.time() < dt.time(15) else
                              "今日最新报价；等待收盘日线入库确认" if status["available"] else
@@ -250,7 +252,7 @@ def query(jobs=None, refresh_live=False, force_live=False):
     current = now()
     today = current.date().isoformat()
     calendar = [r['date'] for r in normalize_bars(state.get('bars', {}).get('sh000001', []))
-                if not r.get('provisional') and (r['date'] < today or (r['date'] == today and current.time() >= dt.time(15, 30)))]
+                if not r.get('provisional') and (r['date'] < today or (r['date'] == today and current.time() >= dt.time(15)))]
     internals_history = market_internals_service.read_history(calendar)
     result["market_internals"] = market_internals_service.view(internals_history, result["market"], result["as_of"])
     # The page opens/polls with live=1; plain GET remains an offline snapshot read.
@@ -547,7 +549,7 @@ def _save_market_snapshot(state, market, internals):
         kv_repo.set_(NAMESPACE, "intraday", live)
         return live
     sample_start = dt.datetime.fromisoformat(market["sample_started_at"])
-    if date < sample_start.date().isoformat() or sample_start.time() >= dt.time(15, 30):
+    if date < sample_start.date().isoformat() or sample_start.time() >= dt.time(15):
         market_internals_service.save_close(internals)
     if date >= (state.get("market", {}).get("as_of") or ""):
         state["market"] = market
@@ -599,14 +601,18 @@ def start_refresh(mode, jobs, index_loader, *, history_range=None):
                     return
                 quote_payload = fetch_live_quotes(force=True)
                 jobs.append_log(job_id, "更新七大指数日线（收盘口径）")
+                requested_at = now()
                 try:
                     incoming = index_loader(INDEXES, datalen=1023) or {}
                 except Exception:
                     incoming = {}
-                # 当日未收盘K线不参与全天量比和确认判断。
-                if now().time() < dt.time(15, 30):
-                    incoming = {s: [b for b in rows if str(b.get("day") or b.get("date") or "")[:10] < now().date().isoformat()]
-                                for s, rows in incoming.items()}
+                # 按请求开始时间隔离未收盘K线；15点后接纳源返回的当日日线。
+                closed_day = requested_at.date()
+                if requested_at.time() < dt.time(15):
+                    closed_day -= dt.timedelta(days=1)
+                incoming = {s: [b for b in rows if not b.get("provisional")
+                                and str(b.get("day") or b.get("date") or "")[:10] <= closed_day.isoformat()]
+                            for s, rows in incoming.items()}
                 state["bars"], accepted = merge_indices(state.get("bars", {}), incoming)
                 if not accepted and (mode == "indices" or not build_health(state)["as_of"]):
                     raise ValueError("指数源未返回可用的新日线，原快照保留")

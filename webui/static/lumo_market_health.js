@@ -31,6 +31,7 @@
   let payload = null, envelope = null, pollTimer = null, liveTimer = null, requestId = 0, ruleFilter = "all", ruleSearch = "", horizon = 60, autoSession = null;
   let viewMode=q.get("view") === "close" ? "close" : "latest";
   let autoStructure = false, lastStructureRequest = 0, autoInternalsSession = null;
+  let closeSession = null, lastCloseRequest = 0, refreshing = false;
 
   function error(message = "") { $("mhError").hidden = !message; $("mhError").textContent = message; }
   function remember() {
@@ -513,7 +514,8 @@
     $("mhTimingBody").innerHTML=`<p class="mh-note">页面计算 ${esc(dateText(envelope.generated_at))}；实时请求 ${esc(dateText(status.requested_at) || "未请求")}。下面列的是统计输入的实际日期/时间，刷新时间不代表披露数据已更新。</p><div class="mh-table-wrap"><table><thead><tr><th>统计项目</th><th>实际数据日 / 行情时间</th><th>时点类型</th><th>来源与更新说明</th></tr></thead><tbody>${(payload.timing || []).map(r=>`<tr><td>${esc(r.label)}</td><td>${esc(dateText(r.data_at) || "未取得")}<small>交易日 ${esc(dateOnly(r.as_of) || "未取得")}</small></td><td>${badge(r.kind,/上一|非今日|历史|旧日/.test(r.kind) ? "warn" : "")}</td><td>${esc(r.source || "未取得")}<small>${esc(textDates(r.note))}</small></td></tr>`).join("")}</tbody></table></div>`;
   }
   function render() {
-    $("mhMeta").textContent = payload.provisional ? `今日盘中预警 · 指数行情 ${dateText(payload.quote_at)} · 收盘确认截至 ${dateOnly(payload.confirmation_as_of)}` : `收盘统计 ${dateOnly(payload.as_of) || "未取得"} · ${payload.source === "baseline" ? "研究基线" : "收盘快照"} · 今日实时行情另按源时间标记`;
+    const pendingClose = envelope.live_status?.close_pending;
+    $("mhMeta").textContent = payload.provisional ? `${pendingClose ? "今日最新报价 · 今日收盘数据待更新" : "今日盘中预警"} · 指数行情 ${dateText(payload.quote_at)} · 收盘确认截至 ${dateOnly(payload.confirmation_as_of)}` : `收盘统计 ${dateOnly(payload.as_of) || "未取得"} · ${payload.source === "baseline" ? "研究基线" : "收盘快照"} · ${pendingClose ? "今日收盘数据待更新" : "今日实时行情另按源时间标记"}`;
     renderTiming();
     if ($("refreshMeta")) $("refreshMeta").textContent = `体检 · ${payload.as_of || "待更新"}`;
     if (!payload.indices.some(r => r.symbol === symbol)) symbol="sh000001";
@@ -538,7 +540,7 @@
       if (id !== requestId) return;
       const old=payload;
       envelope=value;activatePayload();error();
-      const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message && JSON.stringify(old.market_internals)===JSON.stringify(payload.market_internals);
+      const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message && old.live_status?.close_pending===payload.live_status?.close_pending && JSON.stringify(old.market_internals)===JSON.stringify(payload.market_internals);
       if (poll && unchanged) {
         if (JSON.stringify(old.ice_coverage)!==JSON.stringify(payload.ice_coverage) ||
             JSON.stringify(old.ice_history)!==JSON.stringify(payload.ice_history)) renderBreadth();
@@ -555,15 +557,26 @@
       const liveDay = value.live_status?.as_of;
       const session = liveDay || value.as_of || 'initial';
       const missingPreview = value.live_status?.available && (value.intraday?.market?.as_of !== liveDay || value.intraday?.breadth?.as_of !== liveDay);
-      const missingClose = !value.live_status?.available && liveDay && liveDay > (value.as_of || '');
+      const missingClose = Boolean(value.live_status?.close_pending);
+      const missingCloseSamples = closeSession === liveDay && value.as_of === liveDay &&
+        (value.market?.as_of !== liveDay || value.breadth?.as_of !== liveDay || value.market?.provisional || value.breadth?.provisional);
+      const fullSession = missingCloseSamples ? `${session}:close` : session;
       const currentInternals = value.intraday || value;
       const observation = currentInternals.market_internals?.current;
       const missingInternals = observation?.as_of !== currentInternals.as_of || observation?.sh_sz_turnover_yuan === undefined;
-      const needsFull = value.source === 'baseline' || !value.as_of || !value.fusion?.updated_at || missingPreview || missingClose;
+      const needsFull = value.source === 'baseline' || !value.as_of || !value.fusion?.updated_at || missingPreview || missingCloseSamples;
       const structureVisible = (section === "overview" || section === "breadth") && (viewMode === "latest" || !value.intraday);
-      const idle = !value.job || ["finished","failed"].includes(value.job.status);
-      if (autoSession !== session && needsFull && idle) {
-        autoSession = session;
+      const idle = !refreshing && (!value.job || ["finished","failed"].includes(value.job.status));
+      if (missingClose && idle) {
+        if (closeSession !== session || Date.now() - lastCloseRequest >= 60000) {
+          const mode = closeSession === session ? "indices" : "full";
+          closeSession = session;
+          lastCloseRequest = Date.now();
+          autoSession = session;
+          refresh(mode);
+        }
+      } else if (autoSession !== fullSession && needsFull && idle) {
+        autoSession = fullSession;
         refresh('full');
       } else if (idle && daily.autoFill === daily.query && daily.autoFill && !daily.loading) {
         backfillDaily();
@@ -581,6 +594,8 @@
     }
   }
   async function refresh(mode) {
+    if (refreshing) return;
+    refreshing = true;
     if (mode === "full") document.dispatchEvent(new CustomEvent("market-health-full-refresh"));
     if (mode === "structure") lastStructureRequest = Date.now();
     error();$("mhIndexRefresh").disabled=true;$("mhFullRefresh").disabled=true;$("mhCrossRefresh").disabled=true;
@@ -592,6 +607,7 @@
       if (envelope) envelope.job=value.job;
       renderJob(value.job);
     } catch (e) { error(e.message);renderJob(payload?.job); }
+    finally { refreshing = false; }
   }
   $("mhTabs").addEventListener("click", e => { const b=e.target.closest("[data-mh-tab]");if (b) selectTab(b.dataset.mhTab); });
   $("mhTabs").addEventListener("keydown", e => {

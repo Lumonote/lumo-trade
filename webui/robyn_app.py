@@ -994,7 +994,7 @@ def market_health_refresh(request: Request) -> Response:
     try:
         data = _request_json(request)
         job = market_health_service.start_refresh(
-            data.get("mode", "full"), webui_core.JOB_SERVICE, webui_core._market_pulse_index_bars)
+            data.get("mode", "full"), webui_core.JOB_SERVICE, webui_core._market_health_index_bars)
         return _json_response({"job": job}, status_code=202)
     except (ValueError, TypeError, AttributeError):
         return _json_response({"error": "更新模式必须为 full、cross、indices 或 structure"}, status_code=400)

@@ -86,7 +86,17 @@ def test_refresh_uses_shared_jobs_and_rejects_bad_modes(runtime,monkeypatch):
     with TestClient(runtime.app) as client:
         response=client.post("/api/market-health/refresh",json_data={"mode":"cross"})
     assert response.status_code==202
-    assert calls==[("cross",runtime.webui_core.JOB_SERVICE,runtime.webui_core._market_pulse_index_bars)]
+    assert calls==[("cross",runtime.webui_core.JOB_SERVICE,runtime.webui_core._market_health_index_bars)]
+
+
+def test_close_index_loader_excludes_unconfirmed_current_cache(runtime, monkeypatch):
+    from analysis import market_regime
+
+    calls = []
+    monkeypatch.setattr(market_regime, "get_index_bars",
+                        lambda symbols, **kwargs: calls.append((symbols, kwargs)) or {})
+    assert runtime.webui_core._market_health_index_bars(["sh000001"], datalen=1023) == {}
+    assert calls == [(["sh000001"], {"datalen": 1023, "allow_current_fallback": False})]
 
 
 def test_daily_structure_search_preserves_missing_dates_and_adjacent_close(runtime):

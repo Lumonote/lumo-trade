@@ -267,6 +267,12 @@ def _market_pulse_index_bars(symbols, datalen=160):
     return market_regime.get_index_bars(symbols, datalen=datalen)
 
 
+def _market_health_index_bars(symbols, datalen=160):
+    from analysis import market_regime
+
+    return market_regime.get_index_bars(symbols, datalen=datalen, allow_current_fallback=False)
+
+
 def _market_pulse_index_quotes(symbols):
     from data_store.index_quote_fetch import fetch_index_quotes
 
