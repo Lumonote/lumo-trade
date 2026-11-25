@@ -89,11 +89,11 @@ jobs:
           # 需要在本地直接双击运行 .app 调试时，从 dmg 里拖出来即可。
           - os: macos-latest
             artifact-name: macOS-arm64
-            tauri-build-cmd: npm run desktop:build
+            tauri-build-cmd: npm run desktop:build -- --bundles app
             artifact-glob: "src-tauri/target/release/bundle/dmg/*.dmg"
           - os: macos-15-intel
             artifact-name: macOS-x64
-            tauri-build-cmd: npm run desktop:build
+            tauri-build-cmd: npm run desktop:build -- --bundles app
             artifact-glob: "src-tauri/target/release/bundle/dmg/*.dmg"
           # Windows 用 -vv 打开 tauri-bundler 的 debug 日志。
           # 原因：tauri-bundler 的 CommandExt::output_ok 在子进程失败时只报
@@ -205,6 +205,13 @@ jobs:
           # codesign 报 "no identity found" 导致 bundle 失败。
           APPLE_SIGNING_IDENTITY: "-"
 
+      - name: Create macOS disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bundle_dir=src-tauri/target/release/bundle
+          bash packaging/scripts/build_macos_dmg.sh "$bundle_dir/macos/Lumo Trade.app" "$bundle_dir/dmg"
+
       # 失败时把 WiX 中间产物留档：生成的 main.wxs 能直接看出是资源/组件渲染问题，
       # 还是环境问题（VBScript/ICE）。仅 Windows 产出 WiX 文件。
       - name: Upload WiX diagnostics on failure
@@ -241,7 +248,6 @@ jobs:
       #   2) 这里再用 tr 把任何换行折成空格，即使有人改回块标量也不会炸。
       # 另外 .app 是目录，cp 必须带 -R。
       - name: Collect artifacts
-        if: always()
         run: |
           mkdir -p artifacts
           shopt -s nullglob
@@ -259,7 +265,6 @@ jobs:
         shell: bash
 
       - name: Upload artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Lumo-${{ matrix.artifact-name }}-${{ env.PACKAGE_KIND }}
