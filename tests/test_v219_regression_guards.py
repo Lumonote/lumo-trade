@@ -1,4 +1,4 @@
-"""v2.1.9 上线验收反例固化测试。D-001 仍标为预期失败。"""
+"""v2.1.9 上线验收反例固化测试。"""
 from datetime import timedelta
 
 import pytest
@@ -8,8 +8,6 @@ from analysis.market_health_fusion import margin_metrics
 
 
 # ---------------------------------------------------------------- D-001
-@pytest.mark.xfail(strict=True,
-                   reason="D-001 P3: market_snapshot 缺 isinstance(r, dict) 防御，非 dict 元素抛 AttributeError")
 @pytest.mark.parametrize("bad", [["x"], [123], [None], [["nested"]]])
 def test_d001_market_snapshot_tolerates_non_dict_element(bad):
     # 健壮实现应跳过/清洗非 dict 元素，而不是让整个快照函数崩溃。

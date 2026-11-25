@@ -1,6 +1,76 @@
 /* 宏观描述研究；原始观测日期与采集时间分别显示，未知值不作零。 */
 (() => {
   "use strict";
+  const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const finite=v=>typeof v==="number"&&Number.isFinite(v);
+  const num=(v,d=2)=>finite(v)?v.toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d}):"—";
+  const groups={growth:["pmi","gdp","cpi","ppi"],liquidity:["m1","m2","social","social_stock","lpr1y","lpr5y","shibor3m"],external:["fed_upper","fed_lower","us10y","real10y","usd","usdcny","gold"],fiscal:["spending","local_new","local_refinance"],valuation:["equity_bond_spread"]};
+  function indicators(data){
+    if(data.briefing?.indicators)return data.briefing.indicators;
+    return (data.metrics||[]).map(m=>{
+      const age=m.date&&data.today?Math.floor((Date.parse(data.today)-Date.parse(m.date))/864e5):m.age_days;
+      const max=m.max_age??(m.frequency==="quarterly"?150:m.frequency==="monthly"?75:10);
+      const status=!finite(m.value)?"missing":!finite(age)||age>max?"stale":"fresh";
+      return {...m,group:Object.keys(groups).find(k=>groups[k].includes(m.key)),status,age_days:age,max_age_days:max,
+        status_label:status==="missing"?"未取得":status==="stale"?"待更新":"观察期内",change:null,change_label:"暂无可比上期"};
+    });
+  }
+  function filterIndicators(rows,group="all",status="all"){
+    return rows.filter(m=>(group==="all"||m.group===group)&&(status==="all"||status==="changed"&&finite(m.change)&&m.change!==0||status==="attention"&&m.status!=="fresh"));
+  }
+  function chartGroups(groups){
+    return groups.map(group=>({...group,rows:(group.rows||[]).filter(row=>{
+      if(!finite(row.value)||!/^\d{4}-\d{2}-\d{2}$/.test(row.date||""))return false;
+      const time=Date.parse(row.date);return Number.isFinite(time)&&new Date(time).toISOString().slice(0,10)===row.date;
+    })}));
+  }
+  function indicatorCards(rows,factor){
+    if(!rows.length)return '<p class="mm-unavailable">当前筛选没有匹配指标，可切换观察维度或状态。</p>';
+    return rows.map(m=>{
+      const status=["fresh","stale","missing"].includes(m.status)?m.status:"missing";
+      const delta=finite(m.change)?`${m.change>0?"+":""}${num(m.change)} ${m.change_unit||""}`:"—";
+      const label=m.change_label||(finite(m.change)?"较上期":"暂无可比上期");
+      return `<button type="button" class="mm-metric" data-mm-factor="${esc(m.key)}" data-mm-status="${status}" ${m.frequency==="quarterly"?'disabled title="季频环境指标，暂不参与日/月频相关研究"':""} aria-pressed="${m.key===factor}"><span class="mm-metric-title">${esc(m.name)}<span class="mm-freshness mm-${status}">${esc(m.status_label||status)}</span></span><strong>${num(m.value,m.key==="usdcny"?4:2)} <span style="display:inline">${esc(m.unit)}</span></strong><span class="mm-change">${esc(delta)}<small>${esc(label)}</small></span><small>观测 ${esc(m.period||m.date||"未取得")}</small><small>${m.published_on?`披露 ${esc(m.published_on)}`:m.frequency==="monthly"||m.frequency==="quarterly"?"原始发布日期未提供":"观测日不等于精确发布时间"}</small>${m.previous_date?`<small>对比观测 ${esc(m.previous_date)}</small>`:""}${m.interpretation?`<small class="mm-metric-meaning">${esc(m.interpretation)}</small>`:""}</button>`;
+    }).join("");
+  }
+  function overview(data){
+    const b=data.briefing,rows=indicators(data),c=b?.coverage||{total:rows.length,available:rows.filter(m=>m.status!=="missing").length,fresh:rows.filter(m=>m.status==="fresh").length,stale:rows.filter(m=>m.status==="stale").length,missing:rows.filter(m=>m.status==="missing").length};
+    const title=b?.summary?.title||"宏观证据与观察进度",text=b?.summary?.text||"查看原始观测与数据时点，再选择因子检验市场联动。";
+    return `<div class="mm-overview-copy"><span class="mh-eyebrow">环境观察 · 不作买卖评分</span><h3>${esc(title)}</h3><p>${esc(text)}</p><small>研究快照 ${esc(b?.as_of||data.as_of||"未取得")} · 时效评估 ${esc(b?.assessed_on||data.today||"未取得")}</small></div><div class="mm-coverage" aria-label="宏观数据覆盖"><div><strong>${num(c.available,0)}<small> / ${num(c.total,0)}</small></strong><span>指标有观测</span></div><div><strong>${num(c.fresh,0)}</strong><span>观察期内</span></div><div><strong>${num(c.stale,0)}</strong><span>待更新</span></div><div><strong>${num(c.missing,0)}</strong><span>未取得</span></div></div>`;
+  }
+  function dimensions(data){
+    const b=data.briefing,rows=indicators(data),byKey=new Map(rows.map(m=>[m.key,m]));
+    return (b?.dimensions||[]).map(d=>{
+      const tone=["positive","negative","neutral","unavailable"].includes(d.tone)?d.tone:"neutral";
+      return `<article class="mm-dimension mm-direction-${tone}" data-mm-dimension="${esc(d.key)}"><div class="mm-dimension-head"><h4>${esc(d.name)}</h4><span>${esc(d.label)}</span></div><p>${esc(d.summary)}</p><ul>${(d.evidence||[]).slice(0,2).map(v=>`<li>${esc(v)}</li>`).join("")}</ul>${(d.watch||[]).length?`<details><summary>需要确认的证据</summary><ul>${d.watch.map(v=>`<li>${esc(v)}</li>`).join("")}</ul></details>`:""}<div class="mm-factor-links">${(d.factor_keys||[]).filter(k=>byKey.has(k)&&byKey.get(k).frequency!=="quarterly").map(k=>`<button type="button" data-mm-factor="${esc(k)}">${esc(byKey.get(k).name)} <span aria-hidden="true">↗</span></button>`).join("")}</div></article>`;
+    }).join("");
+  }
+  function watchlist(data){
+    const b=data.briefing,byKey=new Map(indicators(data).map(m=>[m.key,m]));
+    return (b?.watchlist||[]).map(row=>{
+      const factor=byKey.get(row.factor_key);
+      const action=factor?.frequency==="quarterly"?'<p class="mm-subtle">季频环境指标，见指标观察台</p>':factor?`<button class="button secondary compact" type="button" data-mm-factor="${esc(row.factor_key)}">查看相关指标</button>`:"";
+      return `<article><h4>${esc(row.title)}</h4><p>${esc(row.reason)}</p>${action}</article>`;
+    }).join("");
+  }
+  const methodNotes=data=>(data.briefing?.notes||[]).length?`<h4>环境观察与时效</h4><ul>${data.briefing.notes.map(note=>`<li>${esc(note)}</li>`).join("")}</ul>`:"";
+  function appliedParameters(data,draft){
+    const params={...draft};
+    if(data)for(const key of ["equity","factor","frequency","window","lag"])params[key]=data[key];
+    return params;
+  }
+  function jobStatus(job,errors=[]){
+    if(!job)return {busy:false,text:"",state:"idle"};
+    if(["queued","running"].includes(job.status))return {busy:true,state:"running",text:`宏观公开数据更新中 ${num(finite(job.progress)?job.progress:0,0)}% · 已有研究保留原日期，完成后替换成功通道。`};
+    if(job.status==="failed")return {busy:false,state:"failed",text:job.error||"更新失败，原研究保留"};
+    if(job.status!=="finished")return {busy:false,state:"unknown",text:`更新状态待确认（${job.status||"未知"}）；已有研究保留原日期。`};
+    const notes=Array.isArray(job.result?.notes)?job.result.notes:errors;
+    return {busy:false,state:notes.length?"partial":"finished",text:`${notes.length?"部分更新完成":"更新完成"} · ${job.finished_at||""}${notes.length?` · ${notes.length} 项来源需关注：${notes.slice(0,3).join("；")}${notes.length>3?"；其余见研究口径与数据覆盖":""}`:""}`};
+  }
+  window.LumoMacroOverview={indicators,filterIndicators,indicatorCards,overview,dimensions,watchlist,jobStatus,chartGroups,methodNotes,appliedParameters};
+})();
+(() => {
+  "use strict";
   const root=document.getElementById("mhView-macro");if(!root)return;
   const chartDate=window.LumoMarketChartDate;
   const $=id=>document.getElementById(id),esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -13,9 +83,23 @@
   const stat=(title,value,note="")=>`<div class="mm-stat"><span>${esc(title)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></div>`;
   const link=(url,label)=>/^https:\/\//.test(url||"")?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`:esc(label);
   const eventPageSize=50;
-  const state={data:null,id:0,eventId:0,eventPage:0,filters:{category:"all",keyword:""},jobId:0,poll:null,started:false,sort:new Map(),tables:new Map(),factors:[],candle:null,candles:[],candleWidth:0,candleRequest:0};
+  const overview=window.LumoMacroOverview;
+  const state={data:null,id:0,eventId:0,eventPage:0,filters:{category:"all",keyword:""},jobId:0,poll:null,started:false,sort:new Map(),tables:new Map(),factors:[],candle:null,candles:[],candleWidth:0,candleRequest:0,refreshing:false,loading:false,reloadAfterQuery:false};
   const selected=()=>({equity:$("mmEquity").value,factor:$("mmFactor").value,frequency:$("mmFrequency").value,window:$("mmWindow").value,lag:$("mmLag").value,...state.filters});
   function error(message=""){$("mmError").hidden=!message;$("mmError").textContent=message;}
+  function renderMetrics(){
+    const d=state.data;if(!d)return;
+    const all=overview.indicators(d),rows=overview.filterIndicators(all,$("mmMetricGroup").value,$("mmMetricStatus").value);
+    $("mmMetrics").innerHTML=overview.indicatorCards(rows,d.factor);
+    $("mmMetricCount").textContent=`显示 ${rows.length} / ${all.length} 项`;
+  }
+  function renderAppliedQuery(){
+    const d=state.data,box=$("mmAppliedQuery");if(!d){box.textContent=state.loading?"正在读取研究…":"尚未应用研究条件。";return;}
+    const draft=selected(),pending=["equity","factor","frequency","window","lag"].some(k=>String(draft[k])!==String(d[k]));
+    const unit=d.frequency==="monthly"?"个月":"交易日";
+    box.dataset.pending=String(pending);
+    box.textContent=`已应用：${d.equity_name} × ${d.factor_name} · ${d.window}${unit} · ${d.lag?`因子领先 ${d.lag}${unit}`:"同期变化"}。${state.loading?"正在分析，结果返回前保留上述研究。":pending?"参数已修改，尚未应用。点击“分析联动”应用；下方仍为上述研究。":"下方图表、事件与导出对应此研究。"}`;
+  }
   async function api(url,opts={}){const response=await fetch(url,{...opts,headers:{"Content-Type":"application/json"}});const body=await response.json();if(!response.ok)throw new Error(body.error||"宏观研究读取失败");return body;}
   function download(name,content,type="application/json;charset=utf-8"){const url=URL.createObjectURL(new Blob([content],{type}));const a=document.createElement("a");a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   function orderedRows(id,columns,rows){const sort=state.sort.get(id),ordered=[...rows];if(sort)ordered.sort((a,b)=>{const key=columns[sort.index][1],x=typeof key==="function"?key(a):a[key],y=typeof key==="function"?key(b):b[key];if(x==null||y==null)return x==null?y==null?0:1:-1;return (typeof x==="number"&&typeof y==="number"?x-y:String(x).localeCompare(String(y),"zh-CN",{numeric:true}))*(sort.asc?1:-1);});return ordered;}
@@ -25,6 +109,7 @@
   function spark(values){if(values.length<2)return "";const lo=Math.min(...values),span=Math.max(...values)-lo||1;return `<svg viewBox="0 0 180 24" aria-hidden="true"><path d="${values.map((v,i)=>`${i?"L":"M"}${i*180/(values.length-1)},${22-(v-lo)/span*20}`).join(" ")}" fill="none" stroke="#8aa385" stroke-width="1.5"/></svg>`;}
   const monthIndex=date=>Number(date.slice(0,4))*12+Number(date.slice(5,7));
   function lineChart(groups,{dual=false,normalized=false,monthly=false}={}){
+    groups=overview.chartGroups(groups);
     const valid=groups.filter(s=>s.rows.length>(monthly?0:1));if(!valid.length)return empty("历史观测不足，尚不能绘图。");
     const dates=valid.flatMap(s=>s.rows.map(r=>Date.parse(r.date))),first=Math.min(...dates),last=Math.max(...dates);
     const layout={width:680,height:258,left:58,right:608,top:30,bottom:213};
@@ -178,7 +263,10 @@
     }catch(err){if(id===cycleRequest){$("mmCycleError").textContent=err.message;$("mmCycleError").hidden=false;}}};
   function render(){const d=state.data,r=d.relationship;resetCycle();state.factors=d.factors;if($("mmFactor").options.length===1)factors();
     $("mmMeta").textContent=`研究快照 ${dateOnly(d.as_of)||"未取得"} · 读取时间 ${dateText(d.updated_at)||"尚未采集"} · 指标各自保留实际数据日`;
-    $("mmMetrics").innerHTML=d.metrics.map(m=>`<button type="button" class="mm-metric" data-mm-factor="${m.key}" ${m.frequency==="quarterly"?'disabled title="季频环境指标，暂不参与日/月频相关研究"':""} aria-pressed="${m.key===d.factor}"><span>${esc(m.name)}</span><strong>${num(m.value,m.key==="usdcny"?4:2)} <span style="display:inline">${esc(m.unit)}</span></strong><small>观测 ${esc(m.period||m.date||"未取得")}</small><small>${m.published_on?`刊载 ${esc(m.published_on)}`:m.frequency==="monthly"||m.frequency==="quarterly"?"原始发布日期未提供":"观测日不等于精确发布时间"}${m.age_days>60?` · 距今${m.age_days}天`:""}</small></button>`).join("");
+    $("mmOverview").innerHTML=overview.overview(d);$("mmDimensions").innerHTML=overview.dimensions(d);
+    $("mmDimensions").hidden=!(d.briefing?.dimensions||[]).length;
+    $("mmWatchlist").innerHTML=overview.watchlist(d);$("mmWatchCount").textContent=`${(d.briefing?.watchlist||[]).length} 项`;
+    $("mmWatchlistPanel").hidden=!(d.briefing?.watchlist||[]).length;renderMetrics();renderAppliedQuery();
     $("mmInsights").innerHTML=head("当前研究线索","先看数据是否同频，再看政策是否传导到信用、需求和盈利。")+`<ul class="mm-brief">${d.insights.map(n=>`<li>${esc(n)}</li>`).join("")}</ul>`;
     const factor=d.metrics.find(m=>m.key===d.factor),asset=d.chart.asset,last=asset.at(-1)?.date,first=asset[0]?.date;
     $("mmTrend").innerHTML=head(`${d.equity_name} × ${d.factor_name}`,"双轴仅便于对照原始走势；统计使用变化量，不以曲线接近认定因果。")+lineChart([{name:d.equity_name,rows:asset},{name:`${d.factor_name} (${factor.unit})`,rows:d.chart.factor.filter(r=>(!first||r.date>=first)&&(!last||r.date<=last))}],{dual:true});
@@ -195,6 +283,7 @@
     renderScenario();
     const calendarRows=d.calendar.filter(r=>Number(r.date.slice(0,4))>=Number(d.today.slice(0,4))-1);$("mmCalendar").innerHTML=head("FOMC会议日历","官方日程，标记带经济预测的会议；计划日期可能调整。当前利率不代表期货隐含概率。")+table("calendar",[["会议结束日","date",r=>link(r.url,r.date)],["日程","days"],["经济预测",r=>r.sep?1:0,r=>r.sep?"含经济预测 SEP":"—"],["状态","status"]],calendarRows);
     $("mmMethod").innerHTML=`<p>${esc(d.alignment_note)}</p><ul>${d.limits.map(t=>`<li>${esc(t)}</li>`).join("")}</ul><p>日频利率使用基点变化、价格因子使用对数收益；月频同比因子使用百分点变化，PMI与金额使用原单位变化。月频按统计期配对，修订与公布滞后未还原。观察窗口按最近N个指数交易日或完整月份限定，缺失配对不向更早历史补满；日频最少60个、月频最少24个有效配对，无有效变化时不强行给数值。社融与债券金额有季节性，变化量相关未作季节调整。</p>${d.errors.length?`<p>来源读取情况：${d.errors.map(esc).join("；")}</p>`:""}`;
+    $("mmMethod").insertAdjacentHTML("beforeend",overview.methodNotes(d));
     $("mmSources").innerHTML=table("sources",[["通道","name"],["实际观测日","date"],["记录数","rows",r=>num(r.rows,0)],["状态","status"],["来源","source",r=>link(r.url,r.source)]],d.sources);
     $("mmExport").disabled=false;
   }
@@ -233,19 +322,21 @@
     if(state.data)state.data.scenario={...state.data.scenario,earnings:e,pe:p,discount_bp:bp,duration,identity_pct:a,duration_pct:b};
   }
   function renderJob(job){
-    const id=++state.jobId,busy=job&&["queued","running"].includes(job.status);clearTimeout(state.poll);
+    const id=++state.jobId,view=overview.jobStatus(job,state.data?.errors||[]);clearTimeout(state.poll);
     if(state.data)state.data.job=job;
-    $("mmRefresh").disabled=!!busy;$("mmJob").hidden=!job;$("mmJob").textContent=job?busy?`宏观公开数据更新中 ${num(job.progress||0,0)}% · 已有研究保留原日期，完成后替换成功通道。`:job.status==="failed"?job.error||"更新失败，原研究保留":`更新完成 · ${job.finished_at||""}`:"";
-    if(busy)state.poll=setTimeout(()=>pollStatus(id),3000);
+    $("mmRefresh").disabled=view.busy||state.refreshing;$("mmJob").hidden=!job;$("mmJob").textContent=view.text;$("mmJob").dataset.state=view.state;
+    if(view.busy)state.poll=setTimeout(()=>pollStatus(id),3000);
   }
   async function pollStatus(id){
     try{const {job}=await api("/api/market-health/macro/status");if(id!==state.jobId)return;
-      renderJob(job);if(job?.status==="finished")load();
+      renderJob(job);if(job?.status==="finished")load({useApplied:true});
     }catch(e){if(id===state.jobId){$("mmJob").textContent=`状态暂不可用，稍后重试：${e.message}`;state.poll=setTimeout(()=>pollStatus(id),7000);}}
   }
-  async function load(){
-    const id=++state.id,filters=state.filters,jobId=state.jobId;error();$("mmQueryButton").disabled=true;root.setAttribute("aria-busy","true");
-    try{const d=await api("/api/market-health/macro?"+new URLSearchParams(selected()));if(id!==state.id)return;
+  async function load({useApplied=false}={}){
+    if(useApplied&&state.loading){state.reloadAfterQuery=true;return;}
+    const params=useApplied?overview.appliedParameters(state.data,selected()):selected();
+    const id=++state.id,filters=state.filters,jobId=state.jobId;state.loading=true;renderAppliedQuery();error();$("mmQueryButton").disabled=true;root.setAttribute("aria-busy","true");
+    try{const d=await api("/api/market-health/macro?"+new URLSearchParams(params));if(id!==state.id)return;
       const first=filters===state.filters?d.events:null;d.events=null;
       if(jobId!==state.jobId)d.job=state.data?.job;
       state.data=d;render();if(jobId===state.jobId)renderJob(d.job);
@@ -256,7 +347,7 @@
         if(!d.job&&!state.autoFillAttempted){state.autoFillAttempted=true;$("mmRefresh").click();}
       }
     }catch(e){if(id===state.id)error(`${e.message}；已显示的研究与原日期保留。`);}
-    finally{if(id===state.id){root.setAttribute("aria-busy","false");$("mmQueryButton").disabled=false;}}
+    finally{if(id===state.id){state.loading=false;renderAppliedQuery();root.setAttribute("aria-busy","false");$("mmQueryButton").disabled=false;if(state.reloadAfterQuery){state.reloadAfterQuery=false;load({useApplied:true});}}}
   }
   $("mmQuery").addEventListener("submit",e=>{e.preventDefault();load();});
   $("mmEventQuery").addEventListener("submit",e=>{e.preventDefault();state.filters={category:$("mmCategory").value,keyword:$("mmKeyword").value.trim()};loadEvents();});
@@ -286,13 +377,24 @@
   };
   for(const type of ["pointerover","click"])$("mmCandlePlot").addEventListener(type,e=>{const mark=e.target.closest("[data-mm-candle]");if(mark)$("mmCandleDetail").textContent=candleDescription(state.candles[Number(mark.dataset.mmCandle)]);});
   new ResizeObserver(()=>{if($("mmCandlePlot").clientWidth>0&&$("mmCandlePlot").clientWidth!==state.candleWidth)renderCandlePlot();}).observe($("mmCandlePlot"));
-  $("mmFrequency").addEventListener("change",frequencyChanged);$("mmScenario").addEventListener("input",renderScenario);$("mmScenario").addEventListener("submit",e=>e.preventDefault());
-  $("mmRefresh").addEventListener("click",async()=>{error();++state.jobId;$("mmRefresh").disabled=true;try{const d=await api("/api/market-health/macro/refresh",{method:"POST",body:"{}"});renderJob(d.job);if(d.job?.status==="finished")load();}catch(e){error(e.message);$("mmRefresh").disabled=false;}});
+  $("mmFrequency").addEventListener("change",frequencyChanged);$("mmQuery").addEventListener("change",renderAppliedQuery);
+  for(const id of ["mmMetricGroup","mmMetricStatus"])$(id).addEventListener("change",renderMetrics);
+  $("mmMetricsToggle").addEventListener("click",()=>{const hide=!$("mmMetrics").hidden;$("mmMetrics").hidden=hide;$("mmMetricsToggle").textContent=hide?"展开指标":"收起指标";$("mmMetricsToggle").setAttribute("aria-expanded",String(!hide));});
+  $("mmScenario").addEventListener("input",renderScenario);$("mmScenario").addEventListener("submit",e=>e.preventDefault());
+  $("mmRefresh").addEventListener("click",async()=>{
+    if(state.refreshing||overview.jobStatus(state.data?.job).busy)return;
+    error();++state.jobId;state.refreshing=true;$("mmRefresh").disabled=true;
+    try{const d=await api("/api/market-health/macro/refresh",{method:"POST",body:"{}"});renderJob(d.job);if(d.job?.status==="finished")load({useApplied:true});}
+    catch(e){error(e.message);}
+    finally{state.refreshing=false;$("mmRefresh").disabled=overview.jobStatus(state.data?.job).busy;}
+  });
   document.addEventListener("market-health-full-refresh",()=>{if(state.started&&!$("mmRefresh").disabled)$("mmRefresh").click();});
   root.addEventListener("click",e=>{const sort=e.target.closest("[data-mm-sort]"),factor=e.target.closest("[data-mm-factor]");if(sort){const id=sort.dataset.mmSort,index=Number(sort.dataset.mmColumn),previous=state.sort.get(id),wrap=sort.closest(".mm-table"),left=wrap.scrollLeft,top=wrap.scrollTop;
     if(id==="events"){if($("mmExport").disabled)return;state.eventPage=0;eventControls(state.data.events,true);}
     state.sort.set(id,{index,asc:previous?.index===index?!previous.asc:true});const m=state.tables.get(id);wrap.outerHTML=table(id,m.columns,m.rows);const next=root.querySelector(`[data-mm-sort="${id}"][data-mm-column="${index}"]`);next.closest(".mm-table").scrollLeft=left;next.closest(".mm-table").scrollTop=top;next.focus({preventScroll:true});}
-    if(factor){const key=factor.dataset.mmFactor,spec=state.factors.find(r=>r.key===key);if(spec?.frequency==="quarterly")return;if(spec?.frequency==="monthly"&&$("mmFrequency").value!=="monthly"){$("mmFrequency").value="monthly";frequencyChanged();}$("mmFactor").value=key;load();}});
+    if(factor){const key=factor.dataset.mmFactor,spec=state.factors.find(r=>r.key===key);if(!spec||spec.frequency==="quarterly")return;if(spec.frequency==="monthly"&&$("mmFrequency").value!=="monthly"){$("mmFrequency").value="monthly";frequencyChanged();}$("mmFactor").value=key;load();}
+    const jump=e.target.closest("[data-mm-jump]");if(jump){const target=$(jump.dataset.mmJump);if(target&&root.contains(target)){target.scrollIntoView({block:"start",behavior:"auto"});target.focus({preventScroll:true});}}
+  });
   $("mmExport").addEventListener("click",()=>{if(state.data)download(`宏观经济_${state.data.as_of}.json`,JSON.stringify(state.data,null,2));});
   $("mmEventsCsv").addEventListener("click",()=>{const model=state.tables.get("events"),rows=model?orderedRows("events",model.columns,model.rows):[],cell=v=>`"${(typeof v==="string"?v.replace(/^[=+@\-\t\r]/,"'$&"):String(v??"")).replaceAll('"','""')}"`;download(`宏观事件_${state.data.as_of}.csv`,"\ufeff"+[["事件日","事件","观察起点","1日%","5日%","20日%","60日%","窗口重叠","来源"],...rows.map(r=>[r.date,r.title,r.anchor,...[1,5,20,60].map(n=>r.returns[String(n)]),r.overlap,r.url])].map(r=>r.map(cell).join(",")).join("\r\n"),"text/csv;charset=utf-8");});
   function start(){if(!state.started&&!root.hidden){state.started=true;load();}}

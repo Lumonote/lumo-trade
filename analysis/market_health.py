@@ -102,15 +102,17 @@ def index_metrics(symbol, bars, *, with_chart=True):
 
 
 def market_snapshot(rows):
-    rows = [r for r in rows if number(r.get("trade")) is not None and number(r.get("trade")) > 0]
+    from analysis.market_breadth import valuation_distribution
+    rows = [r for r in rows if isinstance(r, dict) and number(r.get("trade")) is not None and number(r.get("trade")) > 0]
     changes = [number(r.get("changepercent")) for r in rows]
     changes = [v for v in changes if v is not None and v >= -100]
-    pbs = [number(r.get("pb")) for r in rows if number(r.get("pb")) is not None and number(r.get("pb")) > 0]
-    pes = [number(r.get("per")) for r in rows if number(r.get("per")) is not None and number(r.get("per")) > 0]
+    distributions = {"pb": valuation_distribution([r.get("pb") for r in rows], kind="pb"),
+                     "pe": valuation_distribution([r.get("per") for r in rows], kind="pe")}
+    pb, pe = distributions["pb"], distributions["pe"]
     turns = [number(r.get("turnoverratio")) for r in rows if number(r.get("turnoverratio")) is not None]
     up, down = sum(v > 0 for v in changes), sum(v < 0 for v in changes)
     weights = [(number(r.get("mktcap")), number(r.get("changepercent"))) for r in rows]
-    weights = [(w, v) for w, v in weights if w is not None and w > 0 and v is not None]
+    weights = [(w, v) for w, v in weights if w is not None and w > 0 and v is not None and v >= -100]
     limits = []
     for row in rows:
         symbol = str(row.get("symbol", ""))
@@ -121,11 +123,13 @@ def market_snapshot(rows):
     return {"total": len(rows), "change_sample": len(changes), "up": up, "down": down, "flat": len(changes)-up-down,
             "up_ratio": up/len(changes)*100 if changes else None,
             "limit_up": sum(v >= t for v, t in limits), "limit_down": sum(v <= -t for v, t in limits),
-            "limits_estimated": True, "pb_median": median(pbs) if pbs else None, "pb_sample": len(pbs),
-            "pe_median": median(pes) if pes else None, "pe_sample": len(pes),
-            "below_pb1_ratio": sum(v < 1 for v in pbs)/len(pbs)*100 if pbs else None,
+            "limits_estimated": True, "pb_median": pb["quantiles"]["p50"], "pb_sample": pb["sample"],
+            "pe_median": pe["quantiles"]["p50"], "pe_sample": pe["sample"],
+            "below_pb1_ratio": pb["buckets"][0]["pct"],
             "turnover_median": median(turns) if turns else None, "chg_median": median(changes) if changes else None,
-            "mv_weighted_chg": sum(w*v for w, v in weights)/sum(w for w, _ in weights) if weights else None}
+            "mv_weighted_chg": sum(w*v for w, v in weights)/sum(w for w, _ in weights) if weights else None,
+            "weighted_sample": len(weights),
+            "valuation_distribution": distributions}
 
 
 def market_internals(quotes, *, shares_per_unit=1, yuan_per_unit=1):

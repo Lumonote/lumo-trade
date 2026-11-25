@@ -21,6 +21,7 @@ import httpx
 
 from analysis.market_health import number
 from analysis.market_cycle import cycle_report, flow_concentration
+from analysis.market_macro_briefing import reassess_briefing
 from analysis.market_health_fusion import iso
 from analysis.market_macro import (CN10Y_SOURCE, FRED, INDEXES, SPECS, SPREAD, build_events, build_research,
                                    clean_series, equity_bond_spread, scenario)
@@ -190,11 +191,17 @@ def query(jobs=None, *, equity="csi300", factor="real10y", window=252, lag=0, fr
     event_data = snap.events(equity, category, keyword)
     research = snap.research(equity=equity, factor=factor, window=int(window), lag=int(lag), frequency=frequency)
     research = deepcopy(research)
+    today = now().date().isoformat()
+    research["briefing"] = reassess_briefing(research["briefing"], today)
+    for meeting in research["calendar"]:
+        date = iso(meeting.get("date"))
+        meeting["status"] = ("日期待核验" if not date else "日期已过 / 不确认实际举行" if date < today else
+                             "今日计划 / 以官方公布为准" if date == today else "计划日期 / 可能调整")
     if factor in _ON_DEMAND_HISTORY:
         saved, _ = _history_cache(_history_key(factor, equity))
         research['chart']['factor_history'] = clean_series([*saved, *research['chart']['factor_history']])
     return {**research, **status(jobs), "events": event_data, "scenario": assumptions, "cycle": deepcopy(snap.cycle(equity)),
-            "snapshot_version": snap.version, "today": now().date().isoformat(), "available": bool(snap.data),
+            "snapshot_version": snap.version, "today": today, "available": bool(snap.data),
             "indexes": [{"key": k, "code": v[0], "name": v[1]} for k, v in INDEXES.items()],
             "factors": [{"key": k, **v} for k, v in SPECS.items()]}
 
@@ -627,6 +634,7 @@ def collect(progress=lambda message: None, old=None):
                 return {"name": name, "rows": rows}
             sector_tasks[("sectors", code)] = sector
     run(sector_tasks)
+    fresh_articles = {"fiscal": set(), "debt": set()}
     for group, parser in (("fiscal", parse_fiscal), ("debt", parse_debt)):
         articles = {r["url"].replace("http://", "https://", 1): {**r, "url": r["url"].replace("http://", "https://", 1)} for r in result[group]}
         # 已归档原文不重复请求；最新一期仍重取，以覆盖更正。
@@ -640,6 +648,7 @@ def collect(progress=lambda message: None, old=None):
                     parsed = parser(future.result(), item)
                     if parsed and parsed.get("published_on") and parsed["published_on"] <= end and parsed["date"] <= end:
                         articles[item["url"]] = parsed
+                        fresh_articles[group].add(id(parsed))
                     else:
                         failures += 1
                 except Exception:
@@ -651,6 +660,8 @@ def collect(progress=lambda message: None, old=None):
     for key, group, field in (("spending", "fiscal", "spending_yoy"), ("local_new", "debt", "new"), ("local_refinance", "debt", "refinance")):
         if result[group]:
             result["series"][key] = clean_series([{k: r.get(k) for k in ("date", "period", "published_on", "url")} | {"value": r.get(field)} for r in result[group]], end)
+            if any(id(r) in fresh_articles[group] and number(r.get(field)) is not None for r in result[group]):
+                fresh.add(("series", key))
     result["events"] = POLICIES + [{"date": r["published_on"], "category": "fiscal", "title": r["title"], "summary": f"统计期{r['period']}；数据披露事件，未视作新政策公告。", "url": r["url"], "source": "财政部", "date_kind": "原文/列表刊载日（取较晚值）"} for r in result["fiscal"] + result["debt"]]
     for key, spec in {**SPECS, "cn10y": CN10Y_SOURCE}.items():
         if key == SPREAD:  # 按研究指数动态计算，不是独立采集通道。

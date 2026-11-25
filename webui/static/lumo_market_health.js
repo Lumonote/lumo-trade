@@ -1,6 +1,63 @@
 /* 收盘体检：评分统一来自后端；日期、缺失与确认状态直接展示。 */
 (() => {
   "use strict";
+  const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const finite=v=>typeof v==="number"&&Number.isFinite(v);
+  const num=(v,d=1)=>finite(v)?v.toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d}):"—";
+  const pct=v=>finite(v)?`${num(v)}%`:"—";
+  const signed=(v,unit="%")=>finite(v)?`${v>0?"+":""}${num(v,2)}${unit}`:"—";
+  const trendKeys=[["above_ma20","站上MA20"],["above_ma60","站上MA60"],["above_ma250","站上MA250"],["newlow60","创60日收盘新低"],["newhigh60","创60日收盘新高"]];
+  const stamp=v=>`${v.as_of||"未取得日期"} · ${v.status==="missing"?"缺少观测":v.status==="stale"?v.provisional?"历史盘中":"历史收盘":v.provisional?"盘中观测":"收盘观测"}`;
+  const provenance=v=>[v.captured_at?`采集 ${window.LumoDate?.format(v.captured_at)||v.captured_at}`:"",v.source].filter(Boolean).join(" · ");
+  function report(payload){
+    if(payload.breadth_valuation)return payload.breadth_valuation;
+    const b=payload.breadth||{},market=payload.market||{},m=market.values||{};
+    const status=(date,exists)=>!exists?"missing":date===payload.as_of?"current":"stale";
+    return {as_of:payload.as_of,provisional:payload.provisional,summary:{title:"看清市场参与、趋势与估值覆盖",text:"各部分保留自己的观测日期；不同样本仅作交叉观察。"},
+      participation:{as_of:market.as_of,captured_at:market.captured_at,source:market.source,provisional:market.provisional,status:status(market.as_of,finite(m.change_sample)),sample:m.change_sample,up:m.up,down:m.down,flat:m.flat,up_ratio:m.up_ratio,net_advances:finite(m.up)&&finite(m.down)?m.up-m.down:null,median_return:m.chg_median,weighted_return:m.mv_weighted_chg,label:"实际涨跌分布",note:"上涨占比以有效涨跌幅样本为分母，包含平盘。"},
+      trend:{as_of:b.as_of,captured_at:b.captured_at,source:b.source,provisional:b.provisional,status:status(b.as_of,finite(b.sample)),sample:b.sample,cohort:b.cohort,method:b.method,label:"抽样趋势观察",note:b.note,comparison_note:"此快照未保存可比变化，不按混合样本推算。",rows:trendKeys.map(([key,label])=>({key,label,value:b[key],denominator:b.denominators?.[key],change_pp:null,comparable:false}))},
+      valuation:{as_of:market.as_of,captured_at:market.captured_at,source:market.source,provisional:market.provisional,status:status(market.as_of,finite(m.total)),total:m.total,pb:{median:m.pb_median,sample:m.pb_sample,distribution:null},pe:{median:m.pe_median,sample:m.pe_sample,distribution:null},below_pb1_ratio:m.below_pb1_ratio,note:"仅统计正值有效样本，不等于交易所加权平均估值。"},notes:[]};
+  }
+  function overview(r){
+    const p=r.participation||{},t=r.trend||{},v=r.valuation||{};
+    const ma20=t.rows?.find(row=>row.key==="above_ma20");
+    const card=(key,title,label,value,note,part)=>`<article class="mh-breadth-summary" data-mh-breadth-summary="${key}"><span>${esc(title)}</span><h4>${esc(label||"待补证据")}</h4><strong>${esc(value)}</strong><small>${esc(note)}</small><small class="mh-breadth-stamp">${esc(stamp(part))}</small>${provenance(part)?`<small>${esc(provenance(part))}</small>`:""}</article>`;
+    return `<span class="mh-eyebrow">市场结构 / 参与 · 趋势 · 估值</span><h3>${esc(r.summary?.title||"广度与估值观察")}</h3><p class="mh-note">${esc(r.summary?.text||"")} ${r.provisional?"盘中结果仍会变化，以收盘确认作跨日判断。":"收盘观测按各部分实际数据日展示。"}</p><div class="mh-breadth-summary-grid">${card("participation","市场参与度",p.label,`上涨 ${pct(p.up_ratio)}`,`涨 / 跌 / 平 ${num(p.up,0)} / ${num(p.down,0)} / ${num(p.flat,0)} · 有效 ${num(p.sample,0)} 只`,p)}${card("trend","趋势广度",t.label,`MA20上方 ${pct(ma20?.value)}`,`有效分母 ${num(ma20?.denominator,0)} 只 · ${t.comparison_note||"保留实际采样口径"}`,t)}${card("valuation","估值覆盖","正值样本的横截面",`PB ${num(v.pb?.sample,0)} / PE ${num(v.pe?.sample,0)}`,`行情样本 ${num(v.total,0)} 只 · 中位数不能代表全部股票`,v)}</div><p class="mh-note">${esc(p.note||"")}</p>`;
+  }
+  function trend(r){
+    const t=r.trend||{};
+    return `<div class="mh-box-head"><div><h3>价格广度</h3><p>${esc(stamp(t))} · 抽样 ${num(t.sample,0)} 只</p><p>${esc(provenance(t))}</p></div></div><div class="mh-breadth-bars">${(t.rows||[]).map(row=>{
+      const valid=finite(row.value)&&row.value>=0&&row.value<=100;
+      const compare=row.comparable&&finite(row.change_pp)?`较 ${t.previous_date||"可比收盘"} ${signed(row.change_pp," 个百分点")}`:"暂无可比收盘变化";
+      return `<div class="mh-breadth-bar" data-mh-breadth-key="${esc(row.key)}"><div class="mh-breadth-bar-label"><span>${esc(row.label)}</span><strong>${valid?pct(row.value):"—"}</strong></div><div class="mh-bar-track${valid?"":" mh-breadth-missing"}" ${valid?`style="--position:${row.value}%"`:'aria-label="数据缺失，不按零显示"'}>${valid?"<i></i>":""}</div><small>实际分母 ${num(row.denominator,0)} 只 · ${esc(compare)}</small></div>`;
+    }).join("")}</div><p class="mh-note">${esc(t.comparison_note||"")}</p><p class="mh-note">${esc(t.note||"")} 采样方法 ${esc(t.method||"未记录")} · 样本组 ${esc(t.cohort||"未记录")}</p>`;
+  }
+  function valuation(r,key="pb"){
+    key=key==="pe"?"pe":"pb";
+    const v=r.valuation||{},metric=v[key]||{},d=metric.distribution,label=key.toUpperCase();
+    const buttons=["pb","pe"].map(k=>`<button type="button" data-mh-valuation="${k}" aria-pressed="${key===k}">${k.toUpperCase()} 分布</button>`).join("");
+    const header=`<div class="mh-box-head"><div><h3>估值与交易结构</h3><p>${esc(stamp(v))} · 行情样本 ${num(v.total,0)} 只</p><p>${esc(provenance(v))}</p></div><div class="mh-segment" aria-label="估值指标切换">${buttons}</div></div><div class="mh-valuation-kpis"><div><span>正 ${label} 中位数</span><strong>${num(metric.median,key==="pb"?3:2)} <small>倍</small></strong></div><div><span>有效正值样本</span><strong>${num(metric.sample,0)} <small>只</small></strong></div><div><span>正值覆盖率</span><strong>${pct(metric.coverage_pct??d?.coverage_pct)}</strong></div></div>`;
+    const quantiles=d?`<p class="mh-note">横截面分位（非历史分位）</p><div class="mh-valuation-quantiles" aria-label="${label}分位数">${["p10","p25","p50","p75","p90"].map(q=>`<div><span>${q.toUpperCase()}</span><strong>${num(d.quantiles?.[q],key==="pb"?3:2)}</strong><small>倍</small></div>`).join("")}</div>`:"";
+    const histogram=d?`<div class="mh-valuation-buckets" aria-label="${label}正值样本分布">${(d.buckets||[]).map(bucket=>{
+      const valid=finite(bucket.pct)&&bucket.pct>=0&&bucket.pct<=100;
+      return `<div class="mh-valuation-bucket"><span>${esc(bucket.label)}</span><div class="mh-bar-track${valid?"":" mh-breadth-missing"}" ${valid?`style="--position:${bucket.pct}%"`:'aria-label="分桶占比缺失"'}>${valid?"<i></i>":""}</div><strong>${num(bucket.count,0)} <small>只 · ${pct(bucket.pct)}</small></strong></div>`;
+    }).join("")}</div><p class="mh-note">分布分母 ${num(d.sample,0)} 个正值 · 非正值 ${num(d.nonpositive,0)} 个 · 缺失 ${num(d.missing,0)} 个。分桶占比以正值样本为分母；覆盖率以行情样本为分母。区间左闭右开，首档仅包含大于零的值。</p>`:'<p class="mh-empty mh-valuation-empty">此快照未保存估值分布；保留已有中位数，更新完整统计后查看分位与分桶。</p>';
+    return header+quantiles+histogram+`<p class="mh-note">正PB样本破净率 ${pct(v.below_pb1_ratio)}。横截面分位描述同一快照内股票之间的分布，不等于历史分位或未来收益判断。${esc(v.note||"")}</p>`;
+  }
+  function recordRows(observations,t,scope){
+    const rows=scope==="all"?observations:observations.filter(row=>t.cohort&&t.method&&row.cohort===t.cohort&&row.method===t.method);
+    return [...rows].sort((a,b)=>String(b.as_of||"").localeCompare(String(a.as_of||"")));
+  }
+  function records(payload,r,scope="cohort"){
+    const t=r.trend||{},all=payload.observations||[],rows=recordRows(all,t,scope);
+    const buttons=[["cohort","当前同组"],["all","全部记录"]].map(([key,label])=>`<button type="button" data-mh-breadth-scope="${key}" aria-pressed="${scope===key}">${label}</button>`).join("");
+    const note=scope==="all"?"全部记录可能包含不同样本组、方法与盘中观测，不可直接连比。":t.cohort&&t.method?`当前组 ${t.cohort} · ${t.method}；同组仍需核验各项分母，盘中观测不代替收盘。`:"当前快照未保存样本组与方法，无法确认同组记录；可切换全部记录查看历史。";
+    return `<div class="mh-box-head"><div><h3>广度观测记录</h3><p>显示 ${rows.length} / ${all.length} 条 · 完整更新回算最近5个交易日</p></div><div class="mh-segment" aria-label="广度记录样本范围">${buttons}</div></div><p class="mh-note mh-breadth-record-note">${esc(note)}</p><div class="mh-table-wrap"><table><thead><tr><th>日期 / 时点</th><th>样本</th><th>MA20上方</th><th>MA250上方</th><th>60日新低 / 新高</th><th>高点回撤中位</th><th>数据口径 / 组号</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${esc(row.as_of)}<small>${row.provisional?"盘中观测":"收盘观测"}</small></td><td>${num(row.sample,0)}</td><td>${pct(row.above_ma20)}<small>分母 ${num(row.denominators?.above_ma20,0)}</small></td><td>${pct(row.above_ma250)}<small>分母 ${num(row.denominators?.above_ma250,0)}</small></td><td>${pct(row.newlow60)} / ${pct(row.newhigh60)}</td><td>${signed(row.dd52_median)}</td><td>${esc(row.method)}<small>${esc(row.cohort||"未记录")}${row.backfilled?" · 历史回算":""}</small></td></tr>`).join("")||`<tr><td colspan="7">${scope==="all"?"暂无观测记录":"暂无可确认的同组记录"}</td></tr>`}</tbody></table></div>`;
+  }
+  window.LumoBreadthView={report,overview,trend,valuation,records,recordRows};
+})();
+(() => {
+  "use strict";
   const root = document.getElementById("marketHealthRoot");
   if (!root) return;
   const chartDate = window.LumoMarketChartDate;
@@ -25,6 +82,7 @@
   let symbol = q.get("index") || "sh000001";
   const indexWindow = {window:['60','120','250','custom'].includes(q.get('window')) ? q.get('window') : 'all', from:q.get('indexFrom'), to:q.get('indexTo')};
   const iceWindow = {window:'all'};
+  const breadthView={valuation:"pb",scope:"cohort",details:{}},breadthRenderer=window.LumoBreadthView;
   const dailyStart = q.get("dailyStart") || "", dailyEnd = q.get("dailyEnd") || "";
   const daily = {draft:{start:dailyStart,end:dailyEnd}, query:dailyStart ? {start:dailyStart,end:dailyEnd} : null,
     report:null, selected:"", status:"", loading:false, requestId:0, backfill:null, autoFill:null};
@@ -422,23 +480,22 @@
     renderDailyResults();
   }
   function renderBreadth() {
-    const b = payload.breadth || {}, m = payload.market?.values || {};
+    const b = payload.breadth || {}, m = payload.market?.values || {}, report=breadthRenderer.report(payload);
     const internals = payload.market_internals || {};
     const c = payload.ice_coverage;
     const coverage = !c ? '' : `近期快照收盘观测 ${num(c.covered,0)} / ${num(c.total,0)} 个交易日` + (c.missing
       ? ` · 待补 ${num(c.missing,0)} 日（最早 ${dateOnly(c.first_missing) || "未取得"}） · ${c.running ? '正在补采' : c.retry_at ? '下次重试 '+window.LumoDate.formatEpoch(c.retry_at) : '等待补采'}` : ' · 无缺口');
-    const barSpecs = [["站上MA20",b.above_ma20],["站上MA60",b.above_ma60],["站上MA250",b.above_ma250],["创60日收盘新低",b.newlow60],["创60日收盘新高",b.newhigh60]];
-    const details = [["正PB中位数",`${num(m.pb_median,3)} 倍`],["正PE中位数",`${num(m.pe_median,2)} 倍`],["正PB样本破净率",pct(m.below_pb1_ratio)],["换手率中位数",pct(m.turnover_median)],["个股涨跌中位数",signed(m.chg_median)],["市值加权涨跌",signed(m.mv_weighted_chg)],["近涨停 / 近跌停",`${num(m.limit_up,0)} / ${num(m.limit_down,0)}`],["有效正PB / 正PE样本",`${num(m.pb_sample,0)} / ${num(m.pe_sample,0)}`]];
-    $("mhView-breadth").innerHTML = `${renderDailyData()}${renderMarketInternals()}${renderIntradayStructure(internals.intraday_history || [])}<article class="mh-box mh-space">${boxHead("情绪冰点线 · 上证指数", "冰点代理：站上20日均线的样本占比 ≤20%。虚线为观察阈值，不等同于市场温度或反转确认。")}
-      <p class="mh-note" id="mhIceCoverage" role="status">${esc(coverage)}</p><div id="mhIceChart"></div></article><div class="mh-grid"><article class="mh-box">${boxHead("价格广度", `分层样本 ${num(b.sample,0)} 只；不同指标分母可能不同`, dateState(b.as_of,b.captured_at,b.provisional))}
-      <div class="mh-bars">${barSpecs.map(([label,v]) => `<div class="mh-bar-row"><span>${label}</span><div class="mh-bar-track" style="--position:${Math.max(0,Math.min(100,v??0))}%"><i></i></div><strong>${pct(v)}</strong></div>`).join("")}</div>
-      <p class="mh-note">个股250日高点回撤中位：${signed(b.dd52_median)}。${esc(b.note || "基于分层抽样，并非全A完整逐股统计。")}</p>
-      <p class="mh-note">${Object.entries(b.denominators || {}).map(([k,v]) => `${esc(k)}：${num(v,0)}只`).join(" · ") || "原报告未保存逐指标分母；不推算精确抽样误差。"}</p></article>
-      <article class="mh-box">${boxHead("估值与交易结构", `有效交易个股 ${num(m.total,0)} 只 · ${esc(payload.market?.source || "未取得")}`,dateState(payload.market?.as_of,payload.market?.captured_at,payload.market?.provisional))}
-      <dl class="mh-detail-list">${details.map(([k,v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
-      <p class="mh-note">PE/PB仅统计正值有效样本，不能直接当作交易所加权平均估值。“近涨跌停”按板块/ST涨跌幅近似，未核验实际涨跌停价，不含新股特殊规则。</p></article></div>
-      <article class="mh-box mh-space">${boxHead("广度观测记录", "完整更新回算最近5个交易日；同一窗口固定成分和分母，同日重复更新不增加连续天数")}
-      <div class="mh-table-wrap"><table><thead><tr><th>日期</th><th>样本</th><th>MA20上方</th><th>MA250上方</th><th>60日新低 / 新高</th><th>高点回撤中位</th><th>数据口径 / 组号</th></tr></thead><tbody>${[...(payload.observations || [])].reverse().map(r => `<tr><td>${esc(r.as_of)}</td><td>${num(r.sample,0)}</td><td>${pct(r.above_ma20)}</td><td>${pct(r.above_ma250)}</td><td>${pct(r.newlow60)} / ${pct(r.newhigh60)}</td><td>${signed(r.dd52_median)}</td><td>${esc(r.method)}<small>${esc(r.cohort || "")}${r.backfilled ? " · 历史回算" : ""}</small></td></tr>`).join("") || '<tr><td colspan="7">尚无同日观测</td></tr>'}</tbody></table></div></article>
+    const participation=report.participation||{};
+    const details = [["换手率中位数",pct(m.turnover_median)],["个股涨跌中位数",signed(participation.median_return)],["市值加权涨跌",signed(participation.weighted_return)],["市值加权有效样本",`${num(participation.weighted_sample,0)} 只`],["市值加权 − 个股中位",pp(participation.weighted_gap_pp)],["近涨停 / 近跌停",`${num(m.limit_up,0)} / ${num(m.limit_down,0)}`]];
+    $("mhView-breadth").innerHTML = `<nav id="mhBreadthNav" class="mh-breadth-nav mh-space" aria-label="广度与估值内容导航">${[["mhBreadthOverview","概览"],["mhBreadthTrend","趋势广度"],["mhValuationDistribution","估值分布"],["mhBreadthDaily","每日统计"],["mhBreadthIce","情绪冰点"],["mhBreadthRecords","观测记录"]].map(([id,label])=>`<button type="button" data-mh-breadth-jump="${id}">${label}</button>`).join("")}</nav>
+      <article id="mhBreadthOverview" class="mh-box mh-space" tabindex="-1">${breadthRenderer.overview(report)}</article>
+      <div class="mh-grid"><article id="mhBreadthTrend" class="mh-box" tabindex="-1">${breadthRenderer.trend(report)}<p class="mh-note">个股250日高点回撤中位：${signed(b.dd52_median)}。</p></article>
+      <article class="mh-box"><div id="mhValuationDistribution" tabindex="-1">${breadthRenderer.valuation(report,breadthView.valuation)}</div><details class="mh-breadth-trading" data-mh-breadth-detail="trading" ${breadthView.details.trading?"open":""}><summary>交易结构补充</summary><p class="mh-note">涨跌观测 ${esc(participation.as_of||"未取得")} · ${participation.provisional?"盘中":"收盘"}；换手与近涨跌停 ${esc(payload.market?.as_of||"未取得")}。两种收益样本可能不同，差值只作描述性对照。</p><dl class="mh-detail-list">${details.map(([k,v])=>`<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl><p class="mh-note">${esc(participation.source||payload.market?.source || "未取得来源")}。“近涨跌停”按板块/ST涨跌幅近似，未核验实际涨跌停价，不含新股特殊规则。</p></details></article></div>
+      <div id="mhBreadthDaily" tabindex="-1">${renderDailyData()}</div>${renderMarketInternals()}${renderIntradayStructure(internals.intraday_history || [])}
+      <article id="mhBreadthIce" class="mh-box mh-space" tabindex="-1">${boxHead("情绪冰点线 · 上证指数", "冰点代理：站上20日均线的样本占比 ≤20%。虚线为观察阈值，不等同于市场温度或反转确认。")}
+      <p class="mh-note" id="mhIceCoverage" role="status">${esc(coverage)}</p><div id="mhIceChart"></div></article>
+      <article id="mhBreadthRecords" class="mh-box mh-space" tabindex="-1">${breadthRenderer.records(payload,report,breadthView.scope)}</article>
+      ${(report.notes||[]).length?`<details class="mh-box mh-space mh-breadth-method" data-mh-breadth-detail="method" ${breadthView.details.method?"open":""}><summary>样本、比较与估值口径</summary>${report.notes.map(note=>`<p class="mh-note">${esc(note)}</p>`).join("")}</details>`:""}
       <div class="mh-notice">观察“指数与个股背离”：比较大盘与小盘20日收益差、指数回撤和个股回撤中位。样本口径不同只能交叉观察，不能直接把差值解释成确定的补跌空间。</div>`;
     renderDailyResults();
     window.LumoPriceChart.mount($("mhIceChart"),currentIndex('sh000001'),{state:iceWindow,
@@ -542,7 +599,7 @@
       if (id !== requestId) return;
       const old=payload;
       envelope=value;activatePayload();error();
-      const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message && old.live_status?.close_pending===payload.live_status?.close_pending && JSON.stringify(old.market_internals)===JSON.stringify(payload.market_internals) && JSON.stringify(old.fusion?.derivatives)===JSON.stringify(payload.fusion?.derivatives);
+      const unchanged=old && old.as_of===payload.as_of && old.updated_at===payload.updated_at && old.fusion?.updated_at===payload.fusion?.updated_at && old.quote_at===payload.quote_at && old.live_status?.message===payload.live_status?.message && old.live_status?.close_pending===payload.live_status?.close_pending && JSON.stringify(old.market_internals)===JSON.stringify(payload.market_internals) && JSON.stringify(old.fusion?.derivatives)===JSON.stringify(payload.fusion?.derivatives) && JSON.stringify(old.breadth_valuation)===JSON.stringify(payload.breadth_valuation);
       if (poll && unchanged) {
         if (JSON.stringify(old.ice_coverage)!==JSON.stringify(payload.ice_coverage) ||
             JSON.stringify(old.ice_history)!==JSON.stringify(payload.ice_history)) renderBreadth();
@@ -625,6 +682,10 @@
     if (h) { horizon=Number(h.dataset.mhHorizon);renderHistory(); }
     if (e.target.closest("#mhStructureRefresh")) refresh("structure");
     if (e.target.closest("[data-mh-derivatives-refresh]")) refresh("cross");
+    const valuation=e.target.closest("[data-mh-valuation]"),scope=e.target.closest("[data-mh-breadth-scope]"),jump=e.target.closest("[data-mh-breadth-jump]");
+    if(valuation){breadthView.valuation=valuation.dataset.mhValuation==="pe"?"pe":"pb";$("mhValuationDistribution").innerHTML=breadthRenderer.valuation(breadthRenderer.report(payload),breadthView.valuation);root.querySelector(`[data-mh-valuation="${breadthView.valuation}"]`)?.focus({preventScroll:true});}
+    if(scope){breadthView.scope=scope.dataset.mhBreadthScope==="all"?"all":"cohort";$("mhBreadthRecords").innerHTML=breadthRenderer.records(payload,breadthRenderer.report(payload),breadthView.scope);root.querySelector(`[data-mh-breadth-scope="${breadthView.scope}"]`)?.focus({preventScroll:true});}
+    if(jump){const target=$(jump.dataset.mhBreadthJump);if(target&&root.contains(target)){target.scrollIntoView({block:"start",behavior:"auto"});target.focus({preventScroll:true});}}
     const day = e.target.closest("[data-mh-daily-day]");
     if (day) { daily.selected = day.dataset.mhDailyDay; renderDailyDetail(); }
     if (e.target.closest("#mhDailyBackfill")) backfillDaily();
@@ -648,6 +709,7 @@
   root.addEventListener("input", e => {
     if (e.target.id === "mhDailyStart" || e.target.id === "mhDailyEnd") daily.draft[e.target.name] = e.target.value;
   });
+  root.addEventListener("toggle", e=>{const key=e.target.dataset?.mhBreadthDetail;if(key)breadthView.details[key]=e.target.open;},true);
   root.addEventListener("change", e => {
     if (e.target.id !== "mhStructureAuto") return;
     autoStructure = e.target.checked;

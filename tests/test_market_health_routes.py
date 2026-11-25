@@ -52,6 +52,11 @@ def test_query_contains_all_dimensions_without_invented_cross_data(runtime):
     assert [r["variety"] for r in derivatives["products"]] == ["IF", "IH", "IC", "IM"]
     assert derivatives["summary"]["total"] == 4
     assert all(r["position_date"] <= p["as_of"] for r in derivatives["products"] if r["position_date"])
+    breadth = p["breadth_valuation"]
+    assert breadth["as_of"] == p["as_of"]
+    assert breadth["valuation"]["pb"]["median"] == p["market"]["values"]["pb_median"]
+    assert breadth["valuation"]["pb"]["distribution"] is None
+    assert len(breadth["trend"]["rows"]) == 5
 
 
 def test_deep_index_history_keeps_warmup_and_only_observed_closed_breadth(runtime, monkeypatch):
@@ -229,6 +234,12 @@ def test_macro_native_query_refresh_and_packaged_assets(runtime, monkeypatch):
         assert response.status_code == 200
         payload = response.json()
         assert payload["factor"] == "gold" and {r["key"] for r in payload["metrics"]} == SPECS.keys()
+        briefing = payload["briefing"]
+        assert briefing["as_of"] == payload["as_of"] and briefing["assessed_on"] == payload["today"]
+        assert {r["key"] for r in briefing["indicators"]} == SPECS.keys()
+        assert {r["key"] for r in briefing["dimensions"]} == {"growth", "liquidity", "external", "fiscal"}
+        coverage = briefing["coverage"]
+        assert coverage["total"] == coverage["fresh"] + coverage["stale"] + coverage["missing"] == len(SPECS)
         assert len(payload["sector_sensitivity"]) == 31 and payload["relationship"]["n"] > 200
         assert payload["valuation"]["available"] and payload["events"]["total"] == len(payload["events"]["rows"])
         assert {r["key"] for r in payload["valuation_comparison"]["rows"]} == INDEXES.keys()
@@ -242,6 +253,8 @@ def test_macro_native_query_refresh_and_packaged_assets(runtime, monkeypatch):
         page = client.get("/desktop/market_health").text
         assert 'id="mhView-macro"' in page and "宏观经济" in page
         assert 'id="mmValuationComparison"' in page and 'id="mmCandleQuery"' in page
+        for element in ("mmOverview", "mmDimensions", "mmWatchlist", "mmMetricGroup", "mmMetricStatus", "mmAppliedQuery", "mmNav"):
+            assert f'id="{element}"' in page
         for name in ("lumo_market_macro.js", "lumo_market_macro.css"):
             assert name in page and client.get("/static/" + name).status_code == 200
 

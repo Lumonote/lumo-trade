@@ -1,6 +1,19 @@
 <section id="mhView-macro" role="tabpanel" aria-labelledby="mhTab-macro" hidden>
   <div class="mh-box mh-space mm-intro">
-    <div class="mh-box-head"><div><span class="mh-eyebrow">宏观经济 / 政策 · 盈利 · 估值</span><h3>从政策变化，看到市场传导。</h3><p id="mmMeta">正在读取宏观研究快照…</p></div><div class="mh-actions"><button id="mmRefresh" class="button" type="button">更新宏观研究</button><button id="mmExport" class="button secondary" type="button" disabled>导出研究</button></div></div>
+    <div class="mh-box-head"><div><span class="mh-eyebrow">宏观经济 / 政策 · 盈利 · 估值</span><h3>先看环境变化，再验证市场传导。</h3><p id="mmMeta">正在读取宏观研究快照…</p></div><div class="mh-actions"><button id="mmRefresh" class="button" type="button">更新宏观研究</button><button id="mmExport" class="button secondary" type="button" disabled>导出研究</button></div></div>
+    <nav id="mmNav" class="mm-nav" aria-label="宏观研究内容导航"><button type="button" data-mm-jump="mmOverview">宏观概览</button><button type="button" data-mm-jump="mmResearch">联动研究</button><button type="button" data-mm-jump="mmValuationComparison">周期与估值</button><button type="button" data-mm-jump="mmPolicyEvents">政策事件</button><button type="button" data-mm-jump="mmScenarioPanel">情景实验</button></nav>
+    <p id="mmError" class="mh-notice mh-error" role="alert" hidden></p><p id="mmJob" class="mh-note" role="status" hidden></p>
+  </div>
+  <section id="mmOverview" class="mh-box mh-space mm-overview" aria-label="宏观环境概览" tabindex="-1"></section>
+  <div id="mmDimensions" class="mm-dimensions mh-space"></div>
+  <details id="mmWatchlistPanel" class="mh-box mh-space mm-watchlist"><summary>接下来需要确认什么 <span id="mmWatchCount"></span></summary><div id="mmWatchlist"></div></details>
+  <section class="mh-space mm-indicator-workbench" aria-labelledby="mmIndicatorsTitle">
+    <div class="mh-box-head"><div><h3 id="mmIndicatorsTitle">宏观指标观察台</h3><p>变化对应上一个可比观测；点击指标继续研究与指数的联动。</p></div><div class="mh-actions"><span id="mmMetricCount" class="mm-subtle" aria-live="polite"></span><button id="mmMetricsToggle" class="button secondary compact" type="button" aria-expanded="true" aria-controls="mmMetrics">收起指标</button></div></div>
+    <div class="mm-indicator-filters"><label for="mmMetricGroup">观察维度<select id="mmMetricGroup"><option value="all">全部指标</option><option value="growth">增长与物价</option><option value="liquidity">货币与信用</option><option value="external">海外与汇率</option><option value="fiscal">财政与债券</option><option value="valuation">股债估值</option></select></label><label for="mmMetricStatus">观察状态<select id="mmMetricStatus"><option value="all">全部状态</option><option value="changed">有变化</option><option value="attention">待更新 / 缺失</option></select></label></div>
+    <div id="mmMetrics" class="mm-metrics"></div>
+  </section>
+  <section id="mmResearch" class="mh-box mh-space" aria-labelledby="mmResearchTitle" tabindex="-1">
+    <div class="mh-box-head"><div><h3 id="mmResearchTitle">把观察变成可检验的问题</h3><p>选定指数、因子和时间范围，比较变化关系与窗口稳定性。</p></div></div>
     <form id="mmQuery" class="mm-filters">
       <label>研究指数<select id="mmEquity"><option value="csi300">沪深300</option><option value="shcomp">上证指数</option><option value="chinext">创业板指</option><option value="csi500">中证500</option><option value="csi1000">中证1000</option></select></label>
       <label>宏观因子<select id="mmFactor"><option value="real10y">美国10年实际利率</option></select></label>
@@ -9,12 +22,11 @@
       <label>因子领先期<select id="mmLag"><option value="0">同期变化</option><option value="1">领先1交易日</option><option value="5">领先5交易日</option><option value="20">领先20交易日</option></select></label>
       <button class="button secondary" id="mmQueryButton" type="submit">分析联动</button>
     </form>
-    <p id="mmError" class="mh-notice mh-error" role="alert" hidden></p><p id="mmJob" class="mh-note" role="status" hidden></p>
-  </div>
-  <div id="mmMetrics" class="mm-metrics mh-space"></div>
+    <p id="mmAppliedQuery" class="mm-applied-query" role="status"></p>
+  </section>
   <div id="mmInsights" class="mh-box mh-space"></div>
   <div class="mm-grid mh-space"><div id="mmTrend" class="mh-box"></div><div id="mmScatter" class="mh-box"></div></div>
-  <div id="mmValuationComparison" class="mh-box mh-space"></div>
+  <div id="mmValuationComparison" class="mh-box mh-space" tabindex="-1"></div>
   <section class="mh-box mh-space" aria-labelledby="mmCycleTitle">
     <div class="mh-box-head"><div><h3 id="mmCycleTitle">库存周期与估值交叉验证</h3><p>制造业新订单与产成品存货同比的逐月变化。按披露日回放，不计入估值或压力评分。</p></div></div>
     <form id="mmCycleQuery" class="mm-candle-filters">
@@ -42,13 +54,13 @@
   <div class="mm-grid mh-space"><div id="mmCorrelations" class="mh-box"></div><div id="mmSectors" class="mh-box"></div></div>
   <div id="mmGold" class="mh-box mh-space"></div>
   <div id="mmTransmission" class="mh-space"></div>
-  <div class="mh-box mh-space"><div class="mh-box-head"><div><h3>政策与利率事件研究</h3><p>筛选政策主题，比较之后1、5、20、60个交易日的指数表现。</p></div><button id="mmEventsCsv" class="button secondary" type="button" disabled>导出事件 CSV</button></div>
+  <div id="mmPolicyEvents" class="mh-box mh-space" tabindex="-1"><div class="mh-box-head"><div><h3>政策与利率事件研究</h3><p>筛选政策主题，比较之后1、5、20、60个交易日的指数表现。</p></div><button id="mmEventsCsv" class="button secondary" type="button" disabled>导出事件 CSV</button></div>
     <form id="mmEventQuery" class="mm-event-filters"><label>类型<select id="mmCategory"><option value="all">全部</option><option value="fed">美联储</option><option value="monetary">国内货币</option><option value="fiscal">国内财政与政策</option></select></label><label>关键词<input id="mmKeyword" type="search" placeholder="降息、化债、消费、预算…" maxlength="100"></label><button class="button secondary" type="submit">查询事件</button></form>
     <div id="mmEventSummary" class="mm-event-summary"></div><div id="mmEvents"></div><p id="mmEventNote" class="mh-note"></p>
     <div id="mmEventPages" hidden><button id="mmEventPrev" class="button secondary compact" type="button" aria-label="上一页事件">上一页</button> <span id="mmEventPage" aria-live="polite"></span> <button id="mmEventNext" class="button secondary compact" type="button" aria-label="下一页事件">下一页</button></div>
   </div>
   <div class="mm-grid mh-space"><div id="mmFiscal" class="mh-box"></div><div id="mmDebt" class="mh-box"></div></div>
-  <div class="mm-grid mh-space"><div id="mmValuation" class="mh-box"></div><div class="mh-box"><div class="mh-box-head"><div><h3>盈利与折现的情景实验</h3><p>自行设定假设，观察估值与盈利如何共同影响价格。</p></div></div>
+  <div class="mm-grid mh-space"><div id="mmValuation" class="mh-box"></div><div id="mmScenarioPanel" class="mh-box" tabindex="-1"><div class="mh-box-head"><div><h3>盈利与折现的情景实验</h3><p>自行设定假设，观察估值与盈利如何共同影响价格。</p></div></div>
     <form id="mmScenario" class="mm-scenario"><label>盈利变化 %<input id="mmEarnings" type="number" min="-80" max="100" step="1" value="0"></label><label>PE变化 %<input id="mmPe" type="number" min="-80" max="100" step="1" value="0"></label><label>折现率变化 bp<input id="mmDiscount" type="number" min="-300" max="300" step="5" value="-25"></label><label>假设久期 年<input id="mmDuration" type="number" min="0" max="40" step="1" value="10"></label></form><div id="mmScenarioResult"></div>
   </div></div>
   <div class="mm-grid mh-space"><div id="mmCalendar" class="mh-box"></div><details class="mh-box mm-method"><summary>研究口径、时点与数据覆盖</summary><div id="mmMethod"></div><div id="mmSources"></div></details></div>

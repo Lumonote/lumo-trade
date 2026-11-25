@@ -8,6 +8,7 @@ from statistics import mean, median
 
 from analysis.market_health import number
 from analysis.market_health_fusion import iso
+from analysis.market_macro_briefing import build_briefing
 
 INDEXES = {"shcomp": ("000001.SH", "上证指数"), "csi300": ("000300.SH", "沪深300"),
            "chinext": ("399006.SZ", "创业板指"), "csi500": ("000905.SH", "中证500"), "csi1000": ("000852.SH", "中证1000")}
@@ -68,6 +69,9 @@ def clean_series(rows, end=None):
     values = {}
     for row in rows or []:
         date, value = iso(row.get("date")), number(row.get("value"))
+        published = iso(row.get("published_on"))
+        if end and row.get("published_on") and (not published or published > end):
+            continue
         if date and value is not None and (not end or date <= end):
             values[date] = {**row, "date": date, "value": value}
     return [values[d] for d in sorted(values)]
@@ -389,6 +393,7 @@ def build_research(bundle, *, equity="csi300", factor="real10y", window=252, lag
     return {"as_of": end, "equity": equity, "equity_name": INDEXES[equity][1], "factor": factor, "factor_name": SPECS[factor]["name"],
             "frequency": frequency, "window": window, "lag": lag, "metrics": metrics, "relationship": chosen, "correlations": overview,
             "gold_links": gold_links,
+            "briefing": build_briefing({**(bundle.get("series") or {}), SPREAD: spreads[equity]}, SPECS, end),
             "sector_sensitivity": sorted(sectors, key=lambda r: abs(r["rho"]) if r["rho"] is not None else -1, reverse=True),
             "valuation": valuation_decomposition(all_prices, valuations.get(equity, [])),
             "valuation_comparison": compare_valuations(spreads, sessions),

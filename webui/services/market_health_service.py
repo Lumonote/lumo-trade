@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from analysis.market_breadth import build_breadth_report
 from analysis.market_health import (INDEXES, breadth_history, build_health, build_intraday_health, ice_history,
                                     index_metrics, market_snapshot, merge_ice_history, merge_observations,
                                     normalize_bars, number)
@@ -242,6 +243,15 @@ def live_status(value, closed_date):
     return status
 
 
+def _breadth_calendar(as_of, observed_days):
+    """Use saved exchange sessions when available, so missing candles cannot bridge a gap."""
+    if not as_of:
+        return []
+    end = dt.date.fromisoformat(as_of)
+    saved = daily_history._known_sessions(end - dt.timedelta(days=35), end)
+    return sorted(saved) if saved else [day for day in observed_days if day <= as_of]
+
+
 def query(jobs=None, refresh_live=False, force_live=False):
     from webui.services import market_health_cross_service
     state = read_state()
@@ -298,6 +308,12 @@ def query(jobs=None, refresh_live=False, force_live=False):
     if result["intraday"]:
         result["intraday"]["timing"] = indicator_timing(result["intraday"],True)
         annotate_rules(result["intraday"])
+    for view in (result, result["intraday"]):
+        if view is not None:
+            report_input = {**view, "observations": merge_observations(
+                state.get("observations", []), view.get("observations", []))}
+            view["breadth_valuation"] = build_breadth_report(
+                report_input, calendar=_breadth_calendar(view["as_of"], calendar))
     return result
 
 
