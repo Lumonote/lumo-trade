@@ -53,6 +53,41 @@
       return `<article><h4>${esc(row.title)}</h4><p>${esc(row.reason)}</p>${action}</article>`;
     }).join("");
   }
+  function relationRows(data,group="all",keyword=""){
+    const query=String(keyword).trim().toLocaleLowerCase();
+    return (data.macro_relations?.rows||[]).filter(row=>(group==="all"||row.group===group)&&(!query||
+      [row.name,row.mechanism,row.up,row.down,...(row.sectors||[]),...(row.watch||[])].join(" ").toLocaleLowerCase().includes(query)));
+  }
+  function relationList(rows,selected,data){
+    const byKey=new Map(indicators(data).map(m=>[m.key,m]));
+    if(!rows.length)return '<p class="mm-unavailable">没有匹配的指标，请调整类别或搜索词。</p>';
+    return rows.map(row=>{
+      const m=byKey.get(row.key),e=row.evidence||{};
+      const evidence=finite(e.rho)?`r ${num(e.rho)}`:row.frequency==="quarterly"?"季频观察":"待验证";
+      return `<button type="button" class="mm-relation-row" data-mm-relation="${esc(row.key)}" aria-pressed="${row.key===selected}" aria-controls="mmRelationDetail"><span><b>${esc(row.name)}</b><small>${m?`${num(m.value,row.key==="usdcny"?4:2)} ${esc(m.unit||"")} · ${esc(m.period||m.date||"未取得")}`:"未取得观测"}</small></span><span class="mm-relation-rho">${esc(evidence)}</span></button>`;
+    }).join("");
+  }
+  function relationDetail(row,data){
+    if(!row)return '<p class="mm-unavailable">选择有匹配结果的指标后查看关系说明。</p>';
+    const m=indicators(data).find(m=>m.key===row.key),e=row.evidence||{},quarterly=row.frequency==="quarterly";
+    const group=(data.macro_relations?.groups||[]).find(g=>g.key===row.group)?.name||"宏观指标";
+    const sourceLink=s=>/^https:\/\//.test(s.url||"")?`<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>`:esc(s.name);
+    const delta=finite(m?.change)?`${m.change>0?"+":""}${num(m.change)} ${esc(m.change_unit||"")}`:"—";
+    const relation=finite(e.rho)?e.rho>0?"样本正相关":e.rho<0?"样本负相关":"样本零线性相关":e.status||"样本不足";
+    const stat=(label,value)=>`<div><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
+    const frequency=e.frequency==="monthly"?"月频":"日频",unit=e.frequency==="monthly"?"个完整月":"个交易日";
+    const action=!quarterly&&["daily","monthly"].includes(e.frequency)?`<button type="button" class="button secondary compact" data-mm-research="${esc(row.key)}">查看走势与散点图 <span aria-hidden="true">↗</span></button>`:"";
+    return `<div class="mm-relation-heading"><div><span class="mh-eyebrow">${esc(group)}</span><h4>${esc(row.name)}</h4></div>${action}</div>`+
+      `<div class="mm-relation-observation"><strong>${num(m?.value,row.key==="usdcny"?4:2)} <small>${esc(m?.unit||"")}</small></strong><span>${esc(m?.status_label||"未取得")} · 观测 ${esc(m?.period||m?.date||"未取得")}<small>${esc(m?.change_label||"暂无可比前值")} ${delta} · ${m?.published_on?`披露 ${esc(m.published_on)}`:"原始发布日期未提供"}</small></span></div>`+
+      `<p class="mm-relation-path">${esc(row.mechanism)}</p>`+
+      `<div class="mm-relation-directions"><div><h5>数据上行时</h5><p>${esc(row.up)}</p></div><div><h5>数据下行时</h5><p>${esc(row.down)}</p></div></div>`+
+      `<div class="mm-relation-sectors"><span>关注行业</span>${(row.sectors||[]).map(s=>`<span class="mm-sector-tag">${esc(s)}</span>`).join("")}</div>`+
+      `<div class="mm-relation-evidence"><div class="mm-relation-heading"><h5>${esc(data.equity_name||"所选指数")} · 历史样本验证</h5><span>${esc(relation)}</span></div>`+
+      (quarterly?`<p class="mm-subtle">GDP 按季披露，仅作经济环境观察；不混入日频或月频相关计算。</p>`:
+        `<p class="mm-subtle">${frequency} · 最近 ${esc(e.window)} ${unit} · ${e.lag?`因子领先 ${esc(e.lag)} 期`:"同期变化"}</p><div class="mm-relation-stats">${stat("Pearson r",num(e.rho))}${stat("Spearman",num(e.spearman))}${stat("有效样本",num(e.n,0))}</div><p class="mm-subtle">样本区间 ${esc(e.start||"—")} 至 ${esc(e.end||"—")}<br>因子：${esc(e.x_unit||"—")}；股市：${esc(e.y_unit||"指数对数收益%")}${e.note?`<br>${esc(e.note)}`:""}</p>`)+`</div>`+
+      `<div class="mm-relation-caveat"><h5>还需要确认</h5><p>${(row.watch||[]).map(esc).join("；")}</p><p>${esc(row.caveat)}</p></div>`+
+      `<p class="mm-subtle mm-relation-sources">口径与机制参考：${(row.sources||[]).map(sourceLink).join(" · ")}</p>`;
+  }
   const methodNotes=data=>(data.briefing?.notes||[]).length?`<h4>环境观察与时效</h4><ul>${data.briefing.notes.map(note=>`<li>${esc(note)}</li>`).join("")}</ul>`:"";
   function appliedParameters(data,draft){
     const params={...draft};
@@ -67,7 +102,7 @@
     const notes=Array.isArray(job.result?.notes)?job.result.notes:errors;
     return {busy:false,state:notes.length?"partial":"finished",text:`${notes.length?"部分更新完成":"更新完成"} · ${job.finished_at||""}${notes.length?` · ${notes.length} 项来源需关注：${notes.slice(0,3).join("；")}${notes.length>3?"；其余见研究口径与数据覆盖":""}`:""}`};
   }
-  window.LumoMacroOverview={indicators,filterIndicators,indicatorCards,overview,dimensions,watchlist,jobStatus,chartGroups,methodNotes,appliedParameters};
+  window.LumoMacroOverview={indicators,filterIndicators,indicatorCards,overview,dimensions,watchlist,jobStatus,chartGroups,methodNotes,appliedParameters,relationRows,relationList,relationDetail};
 })();
 (() => {
   "use strict";
@@ -84,7 +119,7 @@
   const link=(url,label)=>/^https:\/\//.test(url||"")?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`:esc(label);
   const eventPageSize=50;
   const overview=window.LumoMacroOverview;
-  const state={data:null,id:0,eventId:0,eventPage:0,filters:{category:"all",keyword:""},jobId:0,poll:null,started:false,sort:new Map(),tables:new Map(),factors:[],candle:null,candles:[],candleWidth:0,candleRequest:0,refreshing:false,loading:false,reloadAfterQuery:false};
+  const state={data:null,id:0,eventId:0,eventPage:0,filters:{category:"all",keyword:""},jobId:0,poll:null,started:false,sort:new Map(),tables:new Map(),factors:[],candle:null,candles:[],candleWidth:0,candleRequest:0,refreshing:false,loading:false,reloadAfterQuery:false,relationKey:""};
   const selected=()=>({equity:$("mmEquity").value,factor:$("mmFactor").value,frequency:$("mmFrequency").value,window:$("mmWindow").value,lag:$("mmLag").value,...state.filters});
   function error(message=""){$("mmError").hidden=!message;$("mmError").textContent=message;}
   function renderMetrics(){
@@ -92,6 +127,18 @@
     const all=overview.indicators(d),rows=overview.filterIndicators(all,$("mmMetricGroup").value,$("mmMetricStatus").value);
     $("mmMetrics").innerHTML=overview.indicatorCards(rows,d.factor);
     $("mmMetricCount").textContent=`显示 ${rows.length} / ${all.length} 项`;
+  }
+  function renderRelations(){
+    const d=state.data;if(!d)return;
+    const rows=overview.relationRows(d,$("mmRelationGroup").value,$("mmRelationSearch").value);
+    const selected=rows.find(r=>r.key===state.relationKey)||rows.find(r=>r.key===d.factor)||rows[0];
+    state.relationKey=selected?.key||"";
+    const list=$("mmRelationList"),scroll=list.scrollTop;
+    list.innerHTML=overview.relationList(rows,state.relationKey,d);list.scrollTop=scroll;
+    $("mmRelationDetail").innerHTML=overview.relationDetail(selected,d);
+    $("mmRelationCount").textContent=`显示 ${rows.length} / ${d.macro_relations?.rows?.length||0} 项`;
+    $("mmRelationContext").textContent=`研究指数：${d.equity_name} · 日频最近252交易日 / 月频最近60完整月 · 同期变化；本区窗口固定，下方联动研究可单独调整。`;
+    $("mmRelationNote").textContent=d.macro_relations?.note||"传导逻辑是条件性分析框架，历史相关不等于因果或未来涨跌预测。";
   }
   function renderAppliedQuery(){
     const d=state.data,box=$("mmAppliedQuery");if(!d){box.textContent=state.loading?"正在读取研究…":"尚未应用研究条件。";return;}
@@ -266,7 +313,7 @@
     $("mmOverview").innerHTML=overview.overview(d);$("mmDimensions").innerHTML=overview.dimensions(d);
     $("mmDimensions").hidden=!(d.briefing?.dimensions||[]).length;
     $("mmWatchlist").innerHTML=overview.watchlist(d);$("mmWatchCount").textContent=`${(d.briefing?.watchlist||[]).length} 项`;
-    $("mmWatchlistPanel").hidden=!(d.briefing?.watchlist||[]).length;renderMetrics();renderAppliedQuery();
+    $("mmWatchlistPanel").hidden=!(d.briefing?.watchlist||[]).length;renderMetrics();renderRelations();renderAppliedQuery();
     $("mmInsights").innerHTML=head("当前研究线索","先看数据是否同频，再看政策是否传导到信用、需求和盈利。")+`<ul class="mm-brief">${d.insights.map(n=>`<li>${esc(n)}</li>`).join("")}</ul>`;
     const factor=d.metrics.find(m=>m.key===d.factor),asset=d.chart.asset,last=asset.at(-1)?.date,first=asset[0]?.date;
     $("mmTrend").innerHTML=head(`${d.equity_name} × ${d.factor_name}`,"双轴仅便于对照原始走势；统计使用变化量，不以曲线接近认定因果。")+lineChart([{name:d.equity_name,rows:asset},{name:`${d.factor_name} (${factor.unit})`,rows:d.chart.factor.filter(r=>(!first||r.date>=first)&&(!last||r.date<=last))}],{dual:true});
@@ -379,6 +426,8 @@
   new ResizeObserver(()=>{if($("mmCandlePlot").clientWidth>0&&$("mmCandlePlot").clientWidth!==state.candleWidth)renderCandlePlot();}).observe($("mmCandlePlot"));
   $("mmFrequency").addEventListener("change",frequencyChanged);$("mmQuery").addEventListener("change",renderAppliedQuery);
   for(const id of ["mmMetricGroup","mmMetricStatus"])$(id).addEventListener("change",renderMetrics);
+  $("mmRelationGroup").addEventListener("change",renderRelations);
+  $("mmRelationSearch").addEventListener("input",renderRelations);
   $("mmMetricsToggle").addEventListener("click",()=>{const hide=!$("mmMetrics").hidden;$("mmMetrics").hidden=hide;$("mmMetricsToggle").textContent=hide?"展开指标":"收起指标";$("mmMetricsToggle").setAttribute("aria-expanded",String(!hide));});
   $("mmScenario").addEventListener("input",renderScenario);$("mmScenario").addEventListener("submit",e=>e.preventDefault());
   $("mmRefresh").addEventListener("click",async()=>{
@@ -389,7 +438,11 @@
     finally{state.refreshing=false;$("mmRefresh").disabled=overview.jobStatus(state.data?.job).busy;}
   });
   document.addEventListener("market-health-full-refresh",()=>{if(state.started&&!$("mmRefresh").disabled)$("mmRefresh").click();});
-  root.addEventListener("click",e=>{const sort=e.target.closest("[data-mm-sort]"),factor=e.target.closest("[data-mm-factor]");if(sort){const id=sort.dataset.mmSort,index=Number(sort.dataset.mmColumn),previous=state.sort.get(id),wrap=sort.closest(".mm-table"),left=wrap.scrollLeft,top=wrap.scrollTop;
+  root.addEventListener("click",e=>{const relation=e.target.closest("[data-mm-relation]"),research=e.target.closest("[data-mm-research]");
+    if(relation){state.relationKey=relation.dataset.mmRelation;renderRelations();$("mmRelationList").querySelector('[aria-pressed="true"]')?.focus({preventScroll:true});}
+    if(research){const row=state.data?.macro_relations?.rows.find(r=>r.key===research.dataset.mmResearch),ev=row?.evidence;
+      if(ev&&["daily","monthly"].includes(ev.frequency)){$("mmFrequency").value=ev.frequency;frequencyChanged();$("mmFactor").value=row.key;$("mmWindow").value=String(ev.window);$("mmLag").value=String(ev.lag);load();$("mmResearch").scrollIntoView({block:"start",behavior:"auto"});$("mmResearch").focus({preventScroll:true});}}
+    const sort=e.target.closest("[data-mm-sort]"),factor=e.target.closest("[data-mm-factor]");if(sort){const id=sort.dataset.mmSort,index=Number(sort.dataset.mmColumn),previous=state.sort.get(id),wrap=sort.closest(".mm-table"),left=wrap.scrollLeft,top=wrap.scrollTop;
     if(id==="events"){if($("mmExport").disabled)return;state.eventPage=0;eventControls(state.data.events,true);}
     state.sort.set(id,{index,asc:previous?.index===index?!previous.asc:true});const m=state.tables.get(id);wrap.outerHTML=table(id,m.columns,m.rows);const next=root.querySelector(`[data-mm-sort="${id}"][data-mm-column="${index}"]`);next.closest(".mm-table").scrollLeft=left;next.closest(".mm-table").scrollTop=top;next.focus({preventScroll:true});}
     if(factor){const key=factor.dataset.mmFactor,spec=state.factors.find(r=>r.key===key);if(!spec||spec.frequency==="quarterly")return;if(spec.frequency==="monthly"&&$("mmFrequency").value!=="monthly"){$("mmFrequency").value="monthly";frequencyChanged();}$("mmFactor").value=key;load();}

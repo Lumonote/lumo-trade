@@ -1,12 +1,22 @@
 <section id="mhView-macro" role="tabpanel" aria-labelledby="mhTab-macro" hidden>
   <div class="mh-box mh-space mm-intro">
     <div class="mh-box-head"><div><span class="mh-eyebrow">宏观经济 / 政策 · 盈利 · 估值</span><h3>先看环境变化，再验证市场传导。</h3><p id="mmMeta">正在读取宏观研究快照…</p></div><div class="mh-actions"><button id="mmRefresh" class="button" type="button">更新宏观研究</button><button id="mmExport" class="button secondary" type="button" disabled>导出研究</button></div></div>
-    <nav id="mmNav" class="mm-nav" aria-label="宏观研究内容导航"><button type="button" data-mm-jump="mmOverview">宏观概览</button><button type="button" data-mm-jump="mmResearch">联动研究</button><button type="button" data-mm-jump="mmValuationComparison">周期与估值</button><button type="button" data-mm-jump="mmPolicyEvents">政策事件</button><button type="button" data-mm-jump="mmScenarioPanel">情景实验</button></nav>
+    <nav id="mmNav" class="mm-nav" aria-label="宏观研究内容导航"><button type="button" data-mm-jump="mmOverview">宏观概览</button><button type="button" data-mm-jump="mmRelations">数据与股市关系</button><button type="button" data-mm-jump="mmResearch">联动研究</button><button type="button" data-mm-jump="mmValuationComparison">周期与估值</button><button type="button" data-mm-jump="mmPolicyEvents">政策事件</button><button type="button" data-mm-jump="mmScenarioPanel">情景实验</button></nav>
     <p id="mmError" class="mh-notice mh-error" role="alert" hidden></p><p id="mmJob" class="mh-note" role="status" hidden></p>
   </div>
   <section id="mmOverview" class="mh-box mh-space mm-overview" aria-label="宏观环境概览" tabindex="-1"></section>
   <div id="mmDimensions" class="mm-dimensions mh-space"></div>
   <details id="mmWatchlistPanel" class="mh-box mh-space mm-watchlist"><summary>接下来需要确认什么 <span id="mmWatchCount"></span></summary><div id="mmWatchlist"></div></details>
+  <section id="mmRelations" class="mh-box mh-space" aria-labelledby="mmRelationsTitle" tabindex="-1">
+    <div class="mh-box-head"><div><span class="mh-eyebrow">经济数据 → 盈利 · 估值 · 风险偏好</span><h3 id="mmRelationsTitle">宏观数据与股市关系</h3><p>选择一个指标，对照传导逻辑、行业差异与真实历史样本。</p></div><span id="mmRelationCount" class="mm-subtle" role="status"></span></div>
+    <div class="mm-relation-filters">
+      <label for="mmRelationGroup">数据类别<select id="mmRelationGroup"><option value="all">全部类别</option><option value="growth">增长与物价</option><option value="liquidity">货币与信用</option><option value="external">海外利率与汇率</option><option value="fiscal">财政与地方债</option><option value="valuation">股债估值</option></select></label>
+      <label for="mmRelationSearch">查找指标或行业<input id="mmRelationSearch" type="search" placeholder="PMI、社融、银行、出口…" maxlength="100"></label>
+    </div>
+    <p id="mmRelationContext" class="mm-subtle"></p>
+    <div class="mm-relation-layout"><div id="mmRelationList" class="mm-relation-list" role="group" aria-label="选择宏观指标"></div><article id="mmRelationDetail" class="mm-relation-detail" aria-live="polite" aria-atomic="true"></article></div>
+    <p id="mmRelationNote" class="mm-subtle mm-relation-note"></p>
+  </section>
   <section class="mh-space mm-indicator-workbench" aria-labelledby="mmIndicatorsTitle">
     <div class="mh-box-head"><div><h3 id="mmIndicatorsTitle">宏观指标观察台</h3><p>变化对应上一个可比观测；点击指标继续研究与指数的联动。</p></div><div class="mh-actions"><span id="mmMetricCount" class="mm-subtle" aria-live="polite"></span><button id="mmMetricsToggle" class="button secondary compact" type="button" aria-expanded="true" aria-controls="mmMetrics">收起指标</button></div></div>
     <div class="mm-indicator-filters"><label for="mmMetricGroup">观察维度<select id="mmMetricGroup"><option value="all">全部指标</option><option value="growth">增长与物价</option><option value="liquidity">货币与信用</option><option value="external">海外与汇率</option><option value="fiscal">财政与债券</option><option value="valuation">股债估值</option></select></label><label for="mmMetricStatus">观察状态<select id="mmMetricStatus"><option value="all">全部状态</option><option value="changed">有变化</option><option value="attention">待更新 / 缺失</option></select></label></div>

@@ -96,3 +96,61 @@ assert.equal(chartRows.length,7);
     result = subprocess.run([shutil.which("node"), "-e", script],
                             cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="需要 Node.js 运行宏观前端回归")
+def test_macro_relations_separate_mechanisms_observations_and_samples():
+    script = r'''
+const fs=require("node:fs"),vm=require("node:vm"),assert=require("node:assert/strict");
+const window={};
+vm.runInNewContext(fs.readFileSync("webui/static/lumo_market_macro.js","utf8"),{
+  window,document:{getElementById:()=>null}
+});
+const view=window.LumoMacroOverview;
+const pmi={key:"pmi",name:"制造业PMI",group:"growth",frequency:"monthly",
+  mechanism:"订单 → 盈利预期",up:"需结合需求验证",down:"可能反映需求减弱",
+  sectors:["机械","电子"],watch:["新订单"],caveat:"不能单独预测涨跌",
+  sources:[{name:"统计局",url:"https://www.stats.gov.cn/"}],
+  evidence:{frequency:"monthly",window:60,lag:0,rho:0,spearman:-.2,n:30,
+    start:"2023-01-31",end:"2026-10-31",status:"描述性相关 / 非因果",x_unit:"%变化",y_unit:"指数对数收益%"}};
+const gdp={...pmi,key:"gdp",name:"GDP当季同比",frequency:"quarterly",sectors:["消费"],
+  evidence:{frequency:"quarterly",window:null,lag:0,n:0,rho:null,status:"季频环境观察"}};
+const absent={...pmi,key:"m2",name:"M2同比",group:"liquidity",evidence:{...pmi.evidence,n:0,rho:null,spearman:null,start:null,end:null,status:"样本不足"}};
+const data={equity_name:"中证500",briefing:{indicators:[
+  {key:"pmi",value:50,unit:"%",period:"2026-10",date:"2026-10-31",status_label:"观察期内",change:0,change_label:"较上月",change_unit:"百分点"},
+  {key:"m2",value:null,unit:"%",date:null,status_label:"未取得",change:null}
+]},macro_relations:{groups:[{key:"growth",name:"增长与物价"}],rows:[pmi,gdp,absent]}};
+assert.equal(view.relationRows(data).length,3);
+assert.deepEqual(Array.from(view.relationRows(data,"liquidity"),r=>r.key),["m2"]);
+assert.deepEqual(Array.from(view.relationRows(data,"all","  pMi  "),r=>r.key),["pmi"]);
+assert.deepEqual(Array.from(view.relationRows(data,"all","机械"),r=>r.key),["pmi","m2"]);
+assert.equal(view.relationRows(data,"growth","M2").length,0);
+assert.equal(view.relationRows({},"all").length,0);
+let html=view.relationList([pmi,gdp,absent],"pmi",data);
+assert(html.includes('aria-pressed="true"'));
+assert(html.includes("r 0.00"));assert(html.includes("季频观察"));assert(html.includes("待验证"));
+assert(html.includes("50.00 % · 2026-10"));
+assert(view.relationList([],"",data).includes("没有匹配"));
+html=view.relationDetail(pmi,data);
+for(const text of ["中证500", "数据上行时", "数据下行时", "样本零线性相关", "最近 60 个完整月", "2023-01-31", "30", "统计局"])assert(html.includes(text),text);
+assert(html.includes('data-mm-research="pmi"'));
+assert(html.includes("较上月 0.00 百分点"));
+html=view.relationDetail(gdp,data);
+assert(!html.includes("data-mm-research"));assert(html.includes("仅作经济环境观察"));
+html=view.relationDetail(absent,data);
+assert(html.includes("样本不足"));assert(html.includes("未取得"));assert(!html.includes("NaN"));
+assert(!html.includes("样本零线性相关"));assert(!html.includes("undefined"));
+assert(view.relationDetail(null,data).includes("选择"));
+const hostile='<img src=x onerror="alert(1)">';
+const row={...pmi,key:hostile,name:hostile,mechanism:hostile,up:hostile,down:hostile,caveat:hostile,
+ sectors:[hostile],watch:[hostile],sources:[{name:hostile,url:'javascript:alert(1)'},{name:hostile,url:'https://example.com/" onmouseover="alert(1)'}],
+ evidence:{...pmi.evidence,status:hostile,note:hostile}};
+html=view.relationDetail(row,{...data,equity_name:hostile});
+assert(!html.includes("<img"));assert(html.includes("&lt;img"));assert(!html.includes('href="javascript:'));
+assert(!html.includes('" onmouseover="'));
+html=view.relationList([row],hostile,data);
+assert(!html.includes("<img"));assert(html.includes("&lt;img"));
+'''
+    result = subprocess.run([shutil.which("node"), "-e", script],
+                            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr

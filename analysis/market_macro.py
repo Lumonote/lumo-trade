@@ -9,6 +9,7 @@ from statistics import mean, median
 from analysis.market_health import number
 from analysis.market_health_fusion import iso
 from analysis.market_macro_briefing import build_briefing
+from analysis.market_macro_relations import build_macro_relations
 
 INDEXES = {"shcomp": ("000001.SH", "上证指数"), "csi300": ("000300.SH", "沪深300"),
            "chinext": ("399006.SZ", "创业板指"), "csi500": ("000905.SH", "中证500"), "csi1000": ("000852.SH", "中证1000")}
@@ -31,14 +32,14 @@ SPECS.update({
     "lpr5y": {"name": "5年期LPR", "unit": "%", "kind": "rate", "frequency": "daily", "max_age": 45, "source": "全国银行间同业拆借中心 / TuShare", "url": "https://tushare.pro/document/2?doc_id=151"},
     "shibor3m": {"name": "3个月Shibor", "unit": "%", "kind": "rate", "frequency": "daily", "source": "全国银行间同业拆借中心 / TuShare", "url": "https://tushare.pro/document/2?doc_id=149"},
     "m2": {"name": "M2同比", "unit": "%", "kind": "rate", "frequency": "monthly", "source": "人民银行 / TuShare cn_m", "url": "https://tushare.pro/document/2?doc_id=242"},
-    "m1": {"name": "M1同比", "unit": "%", "kind": "rate", "frequency": "monthly", "source": "人民银行 / TuShare cn_m", "url": "https://tushare.pro/document/2?doc_id=242"},
+    "m1": {"name": "M1同比", "unit": "%", "kind": "rate", "frequency": "monthly", "comparable_from": "2025-01-01", "source": "人民银行 / TuShare cn_m", "url": "https://tushare.pro/document/2?doc_id=242"},
     "cpi": {"name": "CPI同比", "unit": "%", "kind": "rate", "frequency": "monthly", "source": "国家统计局 / TuShare cn_cpi", "url": "https://tushare.pro/document/2?doc_id=228"},
     "ppi": {"name": "PPI同比", "unit": "%", "kind": "rate", "frequency": "monthly", "source": "国家统计局 / TuShare cn_ppi", "url": "https://tushare.pro/document/2?doc_id=245"},
     "pmi": {"name": "制造业PMI", "unit": "%", "kind": "level", "frequency": "monthly", "source": "国家统计局 / TuShare cn_pmi", "url": "https://tushare.pro/document/2?doc_id=325"},
     "social": {"name": "社融当月增量", "unit": "亿元", "kind": "level", "frequency": "monthly", "source": "人民银行 / TuShare sf_month", "url": "https://tushare.pro/document/2?doc_id=310"},
     "social_stock": {"name": "社融存量同比（计算）", "unit": "%", "kind": "rate", "frequency": "monthly", "source": "同月社融存量同比计算", "url": "https://tushare.pro/document/2?doc_id=310"},
     "gdp": {"name": "GDP当季同比", "unit": "%", "kind": "rate", "frequency": "quarterly", "source": "国家统计局 / TuShare cn_gdp", "url": "https://tushare.pro/document/2?doc_id=227"},
-    "spending": {"name": "一般公共预算累计支出同比", "unit": "%", "kind": "rate", "frequency": "monthly", "source": "财政部原文 / 累计口径", "url": "https://www.mof.gov.cn/zhengwuxinxi/redianzhuanti/quanguocaizhengshouzhiqingkuang/"},
+    "spending": {"name": "一般公共预算累计支出同比", "unit": "%", "kind": "rate", "frequency": "monthly", "reset_each_year": True, "source": "财政部原文 / 累计口径", "url": "https://www.mof.gov.cn/zhengwuxinxi/redianzhuanti/quanguocaizhengshouzhiqingkuang/"},
     "local_new": {"name": "新增地方政府债券发行", "unit": "亿元", "kind": "level", "frequency": "monthly", "source": "财政部债务管理司 / 当月新增", "url": "https://zwgls.mof.gov.cn/tjsj/"},
     "local_refinance": {"name": "地方政府再融资债券发行", "unit": "亿元", "kind": "level", "frequency": "monthly", "source": "财政部债务管理司 / 当月再融资", "url": "https://zwgls.mof.gov.cn/tjsj/"},
     SPREAD: {"name": "股债利差", "unit": "个百分点", "kind": "rate", "frequency": "daily", "max_age": 0,
@@ -120,6 +121,8 @@ def monthly(rows):
 
 def pairs_for(asset, factor, spec, *, window=252, lag=0, frequency="daily"):
     asset, factor = clean_series(asset), clean_series(factor)
+    if spec.get("comparable_from"):
+        factor = [row for row in factor if row["date"] >= spec["comparable_from"]]
     if frequency == "monthly":
         asset, factor = monthly(asset), monthly(factor)
         by_month = {r["date"][:7]: r for r in factor}
@@ -134,6 +137,8 @@ def pairs_for(asset, factor, spec, *, window=252, lag=0, frequency="daily"):
                 continue
             f, p = by_month.get(target["date"][:7]), by_month.get(prior["date"][:7])
             if f and p and previous["value"] > 0 and current["value"] > 0:
+                if spec.get("reset_each_year") and f["date"][:4] != p["date"][:4]:
+                    continue
                 x = change(f["value"], p["value"], spec["kind"], daily=False)
                 if x is not None:
                     result.append({"date": current["date"], "factor_date": f["date"], "x": x, "y": math.log(current["value"] / previous["value"]) * 100})
@@ -393,6 +398,7 @@ def build_research(bundle, *, equity="csi300", factor="real10y", window=252, lag
     return {"as_of": end, "equity": equity, "equity_name": INDEXES[equity][1], "factor": factor, "factor_name": SPECS[factor]["name"],
             "frequency": frequency, "window": window, "lag": lag, "metrics": metrics, "relationship": chosen, "correlations": overview,
             "gold_links": gold_links,
+            "macro_relations": build_macro_relations(series, all_prices, SPECS, end, relationship),
             "briefing": build_briefing({**(bundle.get("series") or {}), SPREAD: spreads[equity]}, SPECS, end),
             "sector_sensitivity": sorted(sectors, key=lambda r: abs(r["rho"]) if r["rho"] is not None else -1, reverse=True),
             "valuation": valuation_decomposition(all_prices, valuations.get(equity, [])),
@@ -404,7 +410,7 @@ def build_research(bundle, *, equity="csi300", factor="real10y", window=252, lag
             "fiscal": bundle.get("fiscal", []), "debt": bundle.get("debt", []), "calendar": bundle.get("calendar", []),
             "insights": notes, "sources": bundle.get("sources", []), "errors": bundle.get("errors", []), "updated_at": bundle.get("updated_at"),
             "alignment_note": "日频：美国观测仅匹配严格早于A股日期的数值；额外领先期按A股交易日计算。重复沿用同一因子观测日不产生新样本；超过10天未更新（日频LPR允许45天）不匹配。月频：按完整统计月份描述关系，不冒充宏观数据公布前即可交易的回测。",
-            "limits": ["统计相关不等于因果，政策也可能是对市场与经济状况的回应。", "FRED与国内宏观历史可能修订；无完整实时发布版本库，不能用于无前视偏差的交易回测。", "未接入可验证的联邦基金期货预期与概率，不把当前利率或会议日历当作隐含降息预期。", "M1统计口径自2025年调整，跨口径比较需谨慎；国内金价为人民币/克，含汇率和境内溢价，非美元现货金价。"]}
+            "limits": ["统计相关不等于因果，政策也可能是对市场与经济状况的回应。", "FRED与国内宏观历史可能修订；无完整实时发布版本库，不能用于无前视偏差的交易回测。", "未接入可验证的联邦基金期货预期与概率，不把当前利率或会议日历当作隐含降息预期。", "M1统计口径自2025年调整，相关统计仅使用新口径后的相邻月变化；累计财政支出剔除跨年变化。国内金价为人民币/克，含汇率和境内溢价，非美元现货金价。"]}
 
 
 def build_events(bundle, *, equity="csi300", category="all", keyword="", limit=1000, offset=0):
